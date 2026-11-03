@@ -20,6 +20,19 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
   listings, integrity check and index rebuild, export/import, and property,
   durability and concurrency tests plus benchmarks
   ([docs/benchmarks.md](docs/benchmarks.md)).
+- **Phase 5, shell and query language:** `grafeno shell`, a console like
+  `psql` for a file or a server, and [GQ](docs/query-language.md), a
+  Cypher-style language with time travel (`VALID AT`, `KNOWN AT`).
+
+```text
+$ grafeno shell --db memory.redb -n vault
+vault=> MATCH (p:Person)-[w:works_at]->(c) VALID AT '2022-01-01'
+vault->   RETURN p.name, c.name, date(w.@valid_from) AS since;
+ p.name | c.name | since
+--------+--------+------------
+ Ana    | Acme   | 2020-01-01
+(1 row)
+```
 
 Give an agent long-term memory over MCP, for example in Claude Code:
 
@@ -93,5 +106,6 @@ cargo run -p grafeno-memory --example context
 | `grafeno-core`   | Model: `Node`, `Edge`, UUID v7 ids, `Timestamp`              |
 | `grafeno`        | Database, transactions, traversals, BM25 and HNSW indexes     |
 | `grafeno-memory` | Hybrid recall and token-budgeted context                      |
-| `grafeno-server` | The `grafeno` binary: HTTP API and MCP server                 |
+| `grafeno-query`  | GQ: parser and executor of the query language                 |
+| `grafeno-server` | The `grafeno` binary: HTTP API, MCP server, shell, admin CLI   |
 | `clients/typescript` | `grafeno-client`, the TypeScript HTTP client              |

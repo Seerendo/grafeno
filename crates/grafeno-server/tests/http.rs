@@ -472,3 +472,45 @@ async fn traversals() {
     assert_eq!(sub["nodes"].as_array().unwrap().len(), 2);
     assert_eq!(sub["edges"].as_array().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn queries_read_and_write() {
+    let app = app(None);
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/g/query",
+        Some(json!({ "query": "CREATE (a:Person {name: $name})-[:knows]->(b:Person {name: 'Bob'}) RETURN a.name",
+                     "params": { "name": "Ana" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["rows"], json!([["Ana"]]));
+    assert_eq!(body["stats"]["nodes_created"], 2);
+
+    let (_, body) = call(
+        &app,
+        "POST",
+        "/v1/g/query",
+        Some(json!({ "query": "MATCH (a)-[r:knows]->(b) RETURN a.name, type(r), b" })),
+    )
+    .await;
+    assert_eq!(body["columns"], json!(["a.name", "type(r)", "b"]));
+    assert_eq!(body["rows"][0][2]["props"]["name"], "Bob");
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/g/query",
+        Some(json!({ "query": "MATCH (n RETURN n" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_query");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("line 1, column")
+    );
+}

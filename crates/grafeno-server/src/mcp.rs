@@ -141,6 +141,7 @@ impl McpServer {
             "update" => self.update(arguments),
             "forget" => self.forget(arguments),
             "get_node" => self.get_node(arguments),
+            "query" => self.query(arguments),
             _ => return Err((-32602, format!("unknown tool: {name}"))),
         };
         Ok(match outcome {
@@ -460,6 +461,34 @@ impl McpServer {
         Ok(ToolOutput::Json(json!({ "id": id, "result": done })))
     }
 
+    fn query(&self, arguments: Value) -> ToolResult {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            query: String,
+            #[serde(default)]
+            params: serde_json::Map<String, Value>,
+            #[serde(default)]
+            namespace: Option<String>,
+        }
+        let args: Args = parse_args(arguments)?;
+        let ns = self.ns(&args.namespace);
+        let params = grafeno_query::params_from_json(&args.params);
+        let read = self.db.begin_read().map_err(describe)?;
+        let result = grafeno_query::execute_read(&read, ns, &args.query, &params)
+            .map_err(|error| error.to_string())?;
+        let total = result.rows.len();
+        let mut json = result.to_json();
+        if let Some(rows) = json["rows"].as_array_mut() {
+            rows.truncate(QUERY_ROWS);
+        }
+        json["truncated"] = Value::Bool(total > QUERY_ROWS);
+        if let Some(object) = json.as_object_mut() {
+            object.remove("stats");
+        }
+        Ok(ToolOutput::Json(json))
+    }
+
     fn get_node(&self, arguments: Value) -> ToolResult {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -731,6 +760,24 @@ fn tools() -> Value {
                 "properties": { "id": id("Id of the node."), "namespace": namespace },
                 "required": ["id"]
             }
+        },
+        {
+            "name": "query",
+            "title": "Query",
+            "description": "Run a read-only GQ query (Cypher-like) for structured questions, such as \
+                MATCH (p:Person)-[:works_at]->(c) VALID AT '2024-01-01' RETURN p.name, c.name. \
+                Pseudo-properties: n.@id, n.@text, e.@valid_from, e.@valid_to. Returns at most 200 rows.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "One MATCH … RETURN statement." },
+                    "params": { "type": "object", "description": "Values for $parameters." },
+                    "namespace": namespace
+                },
+                "required": ["query"]
+            }
         }
     ])
 }
+
+const QUERY_ROWS: usize = 200;

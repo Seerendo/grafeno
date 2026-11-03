@@ -8,6 +8,7 @@ use std::sync::Arc;
 use clap::{Args, Parser, Subcommand};
 use grafeno::Grafeno;
 
+use grafeno_server::shell::{Backend, Shell, read_script, stdin_script};
 use grafeno_server::{http, mcp};
 
 #[derive(Parser)]
@@ -41,6 +42,37 @@ enum Command {
         /// Namespace used by tools that do not name one.
         #[arg(long, env = "GRAFENO_NAMESPACE", default_value = "default")]
         namespace: String,
+    },
+    /// An interactive console for GQ queries and administration, like psql.
+    Shell {
+        /// Database file to open directly (stop any server using it first).
+        #[arg(long, conflicts_with_all = ["url", "memory"])]
+        db: Option<PathBuf>,
+        /// Use a throwaway in-memory database.
+        #[arg(long, conflicts_with = "url")]
+        memory: bool,
+        /// URL of a running `grafeno serve`, such as http://127.0.0.1:7810.
+        #[arg(long, env = "GRAFENO_URL")]
+        url: Option<String>,
+        /// Bearer token of the server.
+        #[arg(long, env = "GRAFENO_TOKEN", hide_env_values = true)]
+        token: Option<String>,
+        #[arg(
+            long,
+            short = 'n',
+            env = "GRAFENO_NAMESPACE",
+            default_value = "default"
+        )]
+        namespace: String,
+        /// Run these statements (and meta-commands) and exit.
+        #[arg(long, short = 'c', conflicts_with = "file")]
+        command: Option<String>,
+        /// Run the statements in this file (`-` for standard input) and exit.
+        #[arg(long, short = 'f')]
+        file: Option<String>,
+        /// Print results as JSON instead of tables.
+        #[arg(long)]
+        json: bool,
     },
     /// List the namespaces with their node and edge counts.
     Namespaces {
@@ -160,6 +192,37 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .block_on(http::serve(state, addr))?;
         }
         Command::Mcp { db, namespace } => mcp::run(db.open()?, namespace)?,
+        Command::Shell {
+            db,
+            memory,
+            url,
+            token,
+            namespace,
+            command,
+            file,
+            json,
+        } => {
+            let backend = match url {
+                Some(url) => Backend::remote(&url, token.filter(|t| !t.is_empty())),
+                None if memory => Backend::Local(Grafeno::in_memory()?),
+                None => Backend::Local(Grafeno::open(
+                    db.unwrap_or_else(|| PathBuf::from("grafeno.redb")),
+                )?),
+            };
+            let mut shell = Shell::new(backend, namespace, json);
+            if let Some(command) = command {
+                shell.run_script(&command);
+            } else if let Some(file) = file {
+                shell.run_script(&read_script(&file)?);
+            } else if let Some(script) = stdin_script() {
+                shell.run_script(&script);
+            } else {
+                shell.interactive()?;
+            }
+            if shell.failed {
+                return Err("some statements failed".into());
+            }
+        }
         Command::Namespaces { db } => {
             let namespaces = db.open()?.begin_read()?.namespaces()?;
             let width = namespaces

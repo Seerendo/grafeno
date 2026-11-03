@@ -119,6 +119,23 @@ impl ReadTx {
         Ok(out)
     }
 
+    /// The edges of `node` that pass `filter`, as `(edge, other end)`, each
+    /// edge once. The cheap form of [`ReadTx::neighbors`]: it reads no edge
+    /// records.
+    pub fn neighbor_ids(
+        &self,
+        ns: &str,
+        node: NodeId,
+        direction: Direction,
+        filter: &EdgeFilter,
+    ) -> Result<Vec<(EdgeId, NodeId)>> {
+        Ok(self
+            .adjacent(ns, node, direction, filter)?
+            .into_iter()
+            .map(|entry| (entry.edge, entry.other))
+            .collect())
+    }
+
     /// The adjacency entries of `node` that pass `filter`, each edge once.
     /// Reads no edge records: the filter's fields are in the entries.
     pub(crate) fn adjacent(

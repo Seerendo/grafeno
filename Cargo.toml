@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/grafeno-core", "crates/grafeno", "crates/grafeno-memory", "crates/grafeno-server"]
+members = [
+    "crates/grafeno-core",
+    "crates/grafeno",
+    "crates/grafeno-memory",
+    "crates/grafeno-query",
+    "crates/grafeno-server",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +16,8 @@ rust-version = "1.88"
 [workspace.dependencies]
 grafeno = { path = "crates/grafeno" }
 grafeno-core = { path = "crates/grafeno-core" }
+grafeno-memory = { path = "crates/grafeno-memory" }
+grafeno-query = { path = "crates/grafeno-query" }
 redb = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

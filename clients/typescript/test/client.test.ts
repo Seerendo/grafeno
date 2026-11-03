@@ -148,6 +148,23 @@ test("administration: namespaces, stats, pages, check, export and import", async
   await assert.rejects(grafeno.import("garbage"), { status: 400 });
 });
 
+test("GQ queries", async () => {
+  const graph = new Grafeno({ url, token }).namespace("query-test");
+  const created = await graph.query(
+    "CREATE (a:Person {name: $name})-[:works_at {@valid_from: '2024-01-01'}]->(c:Company {name: 'Acme'}) RETURN a.name",
+    { name: "Ana" },
+  );
+  assert.deepEqual(created.rows, [["Ana"]]);
+  assert.equal(created.stats.nodes_created, 2);
+
+  const result = await graph.query(
+    "MATCH (p:Person)-[w:works_at]->(c) VALID AT '2024-06-01' RETURN p.name AS person, c.name AS company, w.@valid_from",
+  );
+  assert.deepEqual(result.columns, ["person", "company", "w.@valid_from"]);
+  assert.deepEqual(result.rows, [["Ana", "Acme", "2024-01-01T00:00:00Z"]]);
+  await assert.rejects(graph.query("MATCH (n RETURN n"), { status: 400, code: "invalid_query" });
+});
+
 test("errors carry status and code", async () => {
   const vault = new Grafeno({ url, token }).namespace("user-1");
   await assert.rejects(vault.getNode("0190f5c2-7a3e-7cde-8f01-0000000000ff"), { status: 404, code: "not_found" });

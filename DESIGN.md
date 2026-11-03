@@ -31,7 +31,8 @@ MCP.
 ### Out of scope (for now)
 
 - A custom storage engine (pager, WAL): an embedded KV store is used.
-- Full Cypher or GQL: a typed API and a pattern DSL come first.
+- Full Cypher or GQL: GQ covers patterns, filters, aggregates and writes;
+  `OPTIONAL MATCH`, `MERGE`, `WITH` and the rest come when needed.
 - Distribution and sharding.
 
 ## Architecture
@@ -43,7 +44,9 @@ grafeno/
 │   ├── grafeno           redb storage, transactions, traversals,          [phases 1-2]
 │   │                     full-text index (BM25), vector index (HNSW)
 │   ├── grafeno-memory    hybrid recall, token-budgeted context            [phase 2]
-│   └── grafeno-server    `grafeno` binary: HTTP API + MCP over stdio      [phase 3]
+│   ├── grafeno-query     GQ: lexer, parser, executor                      [phase 5]
+│   └── grafeno-server    `grafeno` binary: HTTP API, MCP over stdio,      [phases 3-5]
+│                         shell, administration commands
 └── clients/
     └── typescript        `grafeno-client`, fetch-based HTTP client         [phase 3]
 ```
@@ -176,6 +179,27 @@ A database file is locked by the process that opens it, so the HTTP and MCP
 modes cannot share a file. An MCP mode that forwards to an HTTP server
 (`grafeno mcp --url`) would remove that limit.
 
+### Query language and shell (phase 5)
+
+- **GQ** (`grafeno-query`): a hand-written lexer and recursive-descent
+  parser (errors carry line and column), and an executor on top of the
+  engine API. A pattern starts from its most selective node (a bound
+  variable, then `@id`, then labels with properties, then labels) and
+  extends both ways through `neighbor_ids`, which reads adjacency entries
+  only; edge and node records are read when the pattern needs them.
+  `VALID AT` / `KNOWN AT` become the traversal's `EdgeFilter`.
+- Writing statements take the write lock, then a read snapshot (which is
+  then the latest state), match on the snapshot and write through the
+  transaction; any error aborts all of it.
+- Grafeno-specific parts: pseudo-properties (`@id`, `@text`, `@embedding`,
+  `@valid_from`, …), `RETRACT`, and `SET r.@valid_to` to invalidate a fact.
+- **Shell** (`grafeno shell`): a line editor (rustyline) with history,
+  statements ending with `;`, psql-style meta-commands, table or JSON
+  output, and script mode. The same code drives a file (through the
+  library) or a server (through the HTTP API, with `ureq`).
+- GQ is also the HTTP API's `POST /v1/{ns}/query` and the MCP `query`
+  tool, which is read-only so agents write through the dedicated tools.
+
 ### Administration and validation (phase 4)
 
 - **Introspection**: `namespaces()`, `stats(ns)` (counts per label, texts,
@@ -224,8 +248,9 @@ without a current user. They remain possible for embedded use.
 4. **Foundations and validation** (done): layout versioning, counters,
    namespaces and statistics, paging, integrity check and rebuild,
    export/import, property/durability/concurrency tests, benchmarks.
-5. `grafeno shell` (an interactive console, like `psql`) and a first subset
-   of a query language (Cypher/GQL-style patterns).
+5. **Shell and query language** (done): `grafeno shell` (a console like
+   `psql`, on a file or a server) and GQ, a Cypher-style language with time
+   travel ([docs/query-language.md](docs/query-language.md)).
 6. Grafeno Studio: a web interface served by `grafeno serve` (explorer,
    graph view with a time slider, search and context lab, editor,
    administration).

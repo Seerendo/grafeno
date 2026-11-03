@@ -17,10 +17,13 @@ axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 grafeno.workspace = true
 grafeno-memory = { path = "../grafeno-memory" }
+grafeno-query.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
 uuid.workspace = true
+rustyline = "15"
+ureq = { version = "3", features = ["json"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

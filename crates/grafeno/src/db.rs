@@ -449,6 +449,19 @@ impl WriteTx {
         read_record(&table, ns, id.as_u128())
     }
 
+    /// The indexed text of a node, as written so far in this transaction.
+    pub fn text(&self, ns: &str, id: NodeId) -> Result<Option<String>> {
+        let table = self.tx.open_table(TEXTS).map_err(storage)?;
+        text::text(&table, ns, id)
+    }
+
+    /// The stored (normalized) embedding of a node, as written so far in
+    /// this transaction.
+    pub fn embedding(&self, ns: &str, id: NodeId) -> Result<Option<Vec<f32>>> {
+        let table = self.tx.open_table(VECTORS).map_err(storage)?;
+        vector::embedding(&table, ns, id)
+    }
+
     pub fn create_node(&mut self, ns: &str, new: NewNode) -> Result<NodeId> {
         let id = NodeId::new();
         self.upsert_node(ns, id, new)?;

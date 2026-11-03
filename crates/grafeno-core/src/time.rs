@@ -109,6 +109,25 @@ impl Timestamp {
         let year = yoe + era * 400 + i64::from(month <= 2);
         format!("{year:04}-{month:02}-{day:02}")
     }
+
+    /// ISO 8601 in UTC: `2024-05-01T10:30:00Z`, with microseconds only when
+    /// they are not zero (`…:00.250000Z`). [`Timestamp::parse`] reads it back.
+    pub fn iso(self) -> String {
+        let micros_of_day = self.0.rem_euclid(86_400_000_000);
+        let seconds = micros_of_day / 1_000_000;
+        let fraction = micros_of_day % 1_000_000;
+        let clock = format!(
+            "{:02}:{:02}:{:02}",
+            seconds / 3_600,
+            seconds / 60 % 60,
+            seconds % 60
+        );
+        if fraction == 0 {
+            format!("{}T{clock}Z", self.date())
+        } else {
+            format!("{}T{clock}.{fraction:06}Z", self.date())
+        }
+    }
 }
 
 /// Days since 1970-01-01 (Howard Hinnant's `days_from_civil`).
@@ -137,7 +156,9 @@ mod tests {
 
     #[test]
     fn parses_iso_dates() {
-        let parse = |text| Timestamp::parse(text).unwrap();
+        fn parse(text: &str) -> Timestamp {
+            Timestamp::parse(text).unwrap()
+        }
         assert_eq!(parse("1970-01-01"), Timestamp::from_secs(0));
         assert_eq!(parse("2026-11-03"), Timestamp::from_secs(1_793_664_000));
         assert_eq!(
@@ -167,6 +188,13 @@ mod tests {
             assert!(Timestamp::parse(bad).is_err(), "{bad:?}");
         }
         assert_eq!(parse(&parse("2000-02-29").date()), parse("2000-02-29"));
+        for text in [
+            "2026-11-03T01:02:03Z",
+            "1969-12-31T23:59:59.999999Z",
+            "2000-02-29T00:00:00Z",
+        ] {
+            assert_eq!(parse(text).iso(), text);
+        }
     }
 
     #[test]

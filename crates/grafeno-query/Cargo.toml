@@ -1,0 +1,11 @@
+[package]
+name = "grafeno-query"
+description = "A Cypher-style query language for Grafeno"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+grafeno.workspace = true
+serde.workspace = true
+serde_json.workspace = true

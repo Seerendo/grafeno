@@ -69,6 +69,7 @@ pub fn router(state: AppState) -> Router {
         .route("/{ns}/recall", post(recall_handler))
         .route("/{ns}/context", post(context_handler))
         .route("/{ns}/batch", post(batch))
+        .route("/{ns}/query", post(query))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth));
     Router::new()
         .route("/health", get(health))
@@ -175,6 +176,10 @@ async fn auth(State(state): State<AppState>, request: Request, next: Next) -> Re
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "));
         if !given.is_some_and(|given| constant_time_eq(given.as_bytes(), token.as_bytes())) {
+            // Read (a bounded part of) the body first: closing the connection
+            // while the client still sends it makes some clients see a reset
+            // instead of this response.
+            let _ = axum::body::to_bytes(request.into_body(), 1024 * 1024).await;
             return ApiError {
                 status: StatusCode::UNAUTHORIZED,
                 code: "unauthorized",
@@ -935,4 +940,48 @@ async fn import(
         .map_err(|error| ApiError::bad_request(format!("cannot read the export: {error}")))?;
     let stats = blocking(&state, move |db| db.import(body.as_ref())).await?;
     Ok(Json(stats))
+}
+
+// ---------------------------------------------------------------- queries
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryInput {
+    query: String,
+    #[serde(default)]
+    params: serde_json::Map<String, Value>,
+}
+
+impl From<grafeno_query::QueryError> for ApiError {
+    fn from(error: grafeno_query::QueryError) -> Self {
+        Self {
+            status: if error.internal {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                StatusCode::BAD_REQUEST
+            },
+            code: if error.internal {
+                "internal"
+            } else {
+                "invalid_query"
+            },
+            message: error.to_string(),
+        }
+    }
+}
+
+/// Runs one GQ statement; statements with writes run in one transaction.
+async fn query(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Body(input): Body<QueryInput>,
+) -> ApiResult<Json<Value>> {
+    let db = state.db.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let params = grafeno_query::params_from_json(&input.params);
+        grafeno_query::execute(&db, &ns, &input.query, &params)
+    })
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))??;
+    Ok(Json(result.to_json()))
 }

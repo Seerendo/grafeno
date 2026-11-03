@@ -68,7 +68,7 @@ fn handshake_and_tool_list() {
     assert_eq!(
         names,
         [
-            "remember", "recall", "context", "relate", "update", "forget", "get_node"
+            "remember", "recall", "context", "relate", "update", "forget", "get_node", "query"
         ]
     );
     for tool in response["result"]["tools"].as_array().unwrap() {
@@ -228,5 +228,54 @@ fn update_get_and_forget() {
             .as_str()
             .unwrap()
             .starts_with("invalid arguments")
+    );
+}
+
+#[test]
+fn read_only_queries() {
+    let server = server();
+    let ana = call(
+        &server,
+        "remember",
+        json!({ "name": "Ana", "text": "Engineer", "labels": ["Person"] }),
+    );
+    let ana = structured(&ana)["id"].as_str().unwrap().to_owned();
+    let acme = call(
+        &server,
+        "remember",
+        json!({ "name": "Acme", "text": "Company", "labels": ["Company"] }),
+    );
+    let acme = structured(&acme)["id"].as_str().unwrap().to_owned();
+    call(
+        &server,
+        "relate",
+        json!({ "from": ana, "label": "works_at", "to": acme, "valid_from": "2024-01-01" }),
+    );
+
+    let result = call(
+        &server,
+        "query",
+        json!({ "query": "MATCH (p:Person)-[w:works_at]->(c) WHERE c.name = $company RETURN p.name, date(w.@valid_from)",
+                "params": { "company": "Acme" } }),
+    );
+    let output = structured(&result);
+    assert_eq!(output["columns"], json!(["p.name", "date(w.@valid_from)"]));
+    assert_eq!(output["rows"], json!([["Ana", "2024-01-01"]]));
+    assert_eq!(output["truncated"], false);
+
+    let write = call(&server, "query", json!({ "query": "MATCH (n) DELETE n" }));
+    assert_eq!(write["isError"], true);
+    assert!(
+        write["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("writes")
+    );
+    let syntax = call(&server, "query", json!({ "query": "MATCH (n RETURN n" }));
+    assert!(
+        syntax["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("line 1")
     );
 }

@@ -233,6 +233,25 @@ export interface DumpStats {
   edges: number;
 }
 
+/** What a writing query changed. */
+export interface WriteStats {
+  nodes_created: number;
+  nodes_deleted: number;
+  edges_created: number;
+  edges_deleted: number;
+  edges_retracted: number;
+  properties_set: number;
+  labels_added: number;
+  labels_removed: number;
+}
+
+/** The result of a GQ query. Nodes and edges come as their records, times as ISO strings. */
+export interface QueryResult {
+  columns: string[];
+  rows: unknown[][];
+  stats: WriteStats;
+}
+
 export interface BatchResult {
   results: Record<string, unknown>[];
   /** The ids given to each `$name`. */
@@ -497,6 +516,15 @@ export class Namespace {
   /** Recalled nodes and facts packed into a token budget. */
   context(input: ContextInput): Promise<Context> {
     return this.#call("POST", "/context", input);
+  }
+
+  /**
+   * Runs one GQ statement (Cypher-like), such as
+   * `MATCH (p:Person)-[:works_at]->(c) RETURN p.name, c.name`. Statements
+   * with writes run in one transaction.
+   */
+  query(query: string, params: Record<string, unknown> = {}): Promise<QueryResult> {
+    return this.#call("POST", "/query", { query, params });
   }
 
   /** Applies every operation in one transaction: all of them or none. */

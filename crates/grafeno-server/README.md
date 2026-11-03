@@ -1,10 +1,14 @@
 # grafeno-server
 
-The `grafeno` binary serves a Grafeno database in one of two ways:
+The `grafeno` binary serves and manages a Grafeno database:
 
 - `grafeno serve`: a JSON HTTP API, for applications such as Grafito.
 - `grafeno mcp`: an MCP server over stdio, for agents (Claude Code, Claude
   Desktop and any other MCP client).
+- `grafeno shell`: an interactive console for GQ queries and
+  administration, on a file or on a running server (like `psql`).
+- `grafeno namespaces | stats | check | rebuild | export | import`:
+  administration commands on a file (like `pg_dump`).
 
 ```bash
 cargo install --path crates/grafeno-server
@@ -22,7 +26,44 @@ A database file can be open in only one process at a time, so an HTTP server
 and an MCP server cannot share a file. Use `--memory` for a throwaway
 in-memory database.
 
-Administration commands open the file directly (stop the server first):
+## Shell
+
+```bash
+grafeno shell --db memory.redb -n vault
+```
+
+```bash
+grafeno shell --url http://127.0.0.1:7810 --token change-me -n vault
+```
+
+```text
+vault=> MATCH (p:Person)-[:works_at]->(c)
+vault->   RETURN p.name, c.name LIMIT 3;
+ p.name | c.name
+--------+--------
+ Ana    | Acme
+ Bob    | Acme
+(2 rows)
+vault=> \context who works at Acme?
+```
+
+Statements are [GQ](../../docs/query-language.md) and end with `;`; lines
+that start with `\` are meta-commands (`\?` lists them): `\ns`, `\use`,
+`\stats`, `\check`, `\rebuild`, `\search`, `\recall`, `\context`,
+`\export`, `\import`, `\format table|json`, `\timing`, `\i FILE`, `\q`.
+History is kept in `~/.grafeno_history`.
+
+Without a terminal it runs scripts and exits, with an error code if a
+statement failed: `-c "…"`, `-f FILE` (`-` for standard input), or a script
+piped into it. `--json` prints results as JSON.
+
+```bash
+grafeno shell --db memory.redb -n vault -c "MATCH (n) RETURN count(*);"
+```
+
+## Administration commands
+
+They open the file directly (stop the server first):
 
 | Command                                   | What it does                                                   |
 | ----------------------------------------- | -------------------------------------------------------------- |
@@ -104,6 +145,7 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `POST`   | `/v1/{ns}/recall`                     | recall query                                            | `[{node, score, signals}]`    |
 | `POST`   | `/v1/{ns}/context`                    | recall query + `{budget, fact_share, max_facts, facts}` | `{items, facts, tokens, rendered}` |
 | `POST`   | `/v1/{ns}/batch`                      | `{ops}`                                                 | `{results, refs}`             |
+| `POST`   | `/v1/{ns}/query`                      | `{query, params?}` ([GQ](../../docs/query-language.md)) | `{columns, rows, stats}`      |
 
 - **Listings** return up to `limit` items (default 100, at most 1000) in id
   order; when `next` is set, pass it as `after` to get the following page.
@@ -157,6 +199,7 @@ Syncing a note and replacing its links in one request:
 | `update`   | Replaces a node's text, renames it, merges properties or changes labels.      |
 | `forget`   | Invalidates (default), retracts or deletes a fact; deletes a node.            |
 | `get_node` | A node with its text, properties and connecting facts.                        |
+| `query`    | A read-only [GQ](../../docs/query-language.md) statement; at most 200 rows.   |
 
 Every tool takes an optional `namespace`, which defaults to `--namespace`.
 
