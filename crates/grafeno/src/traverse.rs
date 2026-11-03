@@ -8,7 +8,7 @@ use redb::ReadOnlyTable;
 use serde::{Deserialize, Serialize};
 
 use crate::ReadTx;
-use crate::store::{AdjKey, adjacency};
+use crate::store::{AdjKey, AdjValue, Adjacent, adjacency};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -62,6 +62,19 @@ impl EdgeFilter {
             && self.valid_at.is_none_or(|at| edge.holds_at(at))
             && (self.labels.is_empty() || self.labels.contains(&edge.label))
     }
+
+    /// Like [`EdgeFilter::accepts`], for an adjacency entry. Labels are not
+    /// checked here: entries are read by label already.
+    pub(crate) fn accepts_entry(&self, entry: &Adjacent) -> bool {
+        let known = match self.known_at {
+            Some(at) => entry.recorded_at <= at.as_micros() && at.as_micros() < entry.expired_at,
+            None => entry.expired_at == i64::MAX,
+        };
+        known
+            && self.valid_at.is_none_or(|at| {
+                entry.valid_from <= at.as_micros() && at.as_micros() < entry.valid_to
+            })
+    }
 }
 
 /// A neighbor: the node at the other end and the edge that leads to it.
@@ -93,7 +106,29 @@ impl ReadTx {
         direction: Direction,
         filter: &EdgeFilter,
     ) -> Result<Vec<Neighbor>> {
-        let tables: Vec<&ReadOnlyTable<AdjKey, u128>> = match direction {
+        let mut out = Vec::new();
+        for entry in self.adjacent(ns, node, direction, filter)? {
+            let edge = self
+                .edge(ns, entry.edge)?
+                .ok_or(Error::EdgeNotFound(entry.edge))?;
+            out.push(Neighbor {
+                node: entry.other,
+                edge,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The adjacency entries of `node` that pass `filter`, each edge once.
+    /// Reads no edge records: the filter's fields are in the entries.
+    pub(crate) fn adjacent(
+        &self,
+        ns: &str,
+        node: NodeId,
+        direction: Direction,
+        filter: &EdgeFilter,
+    ) -> Result<Vec<Adjacent>> {
+        let tables: Vec<&ReadOnlyTable<AdjKey, AdjValue>> = match direction {
             Direction::Out => vec![&self.out],
             Direction::In => vec![&self.inn],
             Direction::Both => vec![&self.out, &self.inn],
@@ -110,16 +145,10 @@ impl ReadTx {
                 }
                 entries
             };
-            for (edge_id, other) in entries {
+            for entry in entries {
                 // With `Both`, a self-loop shows up in both tables.
-                if !seen.insert(edge_id) {
-                    continue;
-                }
-                let edge = self
-                    .edge(ns, edge_id)?
-                    .ok_or(Error::EdgeNotFound(edge_id))?;
-                if filter.accepts(&edge) {
-                    out.push(Neighbor { node: other, edge });
+                if filter.accepts_entry(&entry) && seen.insert(entry.edge) {
+                    out.push(entry);
                 }
             }
         }
@@ -143,11 +172,11 @@ impl ReadTx {
             if d == depth {
                 continue;
             }
-            for neighbor in self.neighbors(ns, current, direction, filter)? {
-                if let Entry::Vacant(entry) = distance.entry(neighbor.node) {
+            for neighbor in self.adjacent(ns, current, direction, filter)? {
+                if let Entry::Vacant(entry) = distance.entry(neighbor.other) {
                     entry.insert(d + 1);
-                    out.push((neighbor.node, d + 1));
-                    queue.push_back(neighbor.node);
+                    out.push((neighbor.other, d + 1));
+                    queue.push_back(neighbor.other);
                 }
             }
         }
@@ -178,16 +207,16 @@ impl ReadTx {
             if d == max_depth {
                 continue;
             }
-            for neighbor in self.neighbors(ns, current, direction, filter)? {
-                if distance.contains_key(&neighbor.node) {
+            for neighbor in self.adjacent(ns, current, direction, filter)? {
+                if distance.contains_key(&neighbor.other) {
                     continue;
                 }
-                distance.insert(neighbor.node, d + 1);
-                parent.insert(neighbor.node, (current, neighbor.edge.id));
-                if neighbor.node == to {
+                distance.insert(neighbor.other, d + 1);
+                parent.insert(neighbor.other, (current, neighbor.edge));
+                if neighbor.other == to {
                     return Ok(Some(rebuild(&parent, from, to)));
                 }
-                queue.push_back(neighbor.node);
+                queue.push_back(neighbor.other);
             }
         }
         Ok(None)

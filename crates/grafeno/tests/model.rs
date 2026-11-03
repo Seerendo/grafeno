@@ -5,7 +5,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use grafeno::{Direction, EdgeFilter, EdgeId, Error, Grafeno, NewEdge, NewNode, NodeId, tokenize};
+use grafeno::{
+    Direction, Edge, EdgeFilter, EdgeId, Error, Grafeno, NewEdge, NewNode, NodeId, Timestamp,
+    tokenize,
+};
 use proptest::prelude::*;
 
 const NS: &str = "model";
@@ -56,6 +59,12 @@ enum Op {
         from: usize,
         to: usize,
         label: usize,
+        /// Valid from this second, and for this many seconds.
+        valid: (Option<i64>, Option<i64>),
+    },
+    Invalidate {
+        slot: usize,
+        at: i64,
     },
     Unlink {
         slot: usize,
@@ -93,8 +102,15 @@ fn op() -> impl Strategy<Value = Op> {
         1 => slot.clone().prop_map(|slot| Op::RemoveVector { slot }),
         1 => (slot.clone(), 0..LABELS.len()).prop_map(|(slot, label)| Op::AddLabel { slot, label }),
         1 => (slot.clone(), 0..LABELS.len()).prop_map(|(slot, label)| Op::RemoveLabel { slot, label }),
-        3 => (slot.clone(), slot.clone(), 0..EDGE_LABELS.len())
-            .prop_map(|(from, to, label)| Op::Link { from, to, label }),
+        3 => (
+            slot.clone(),
+            slot.clone(),
+            0..EDGE_LABELS.len(),
+            prop::option::of(0..10i64),
+            prop::option::of(1..10i64),
+        )
+            .prop_map(|(from, to, label, start, span)| Op::Link { from, to, label, valid: (start, span) }),
+        1 => (slot.clone(), 0..20i64).prop_map(|(slot, at)| Op::Invalidate { slot, at }),
         1 => slot.clone().prop_map(|slot| Op::Unlink { slot }),
         1 => slot.clone().prop_map(|slot| Op::Retract { slot }),
         1 => (slot, prop::option::of(0..EDGE_LABELS.len()))
@@ -246,13 +262,19 @@ fn apply_in(tx: &mut grafeno::WriteTx, model: &mut Model, op: &Op) {
                 Err(error) => panic!("{error}"),
             }
         }
-        Op::Link { from, to, label } => {
+        Op::Link {
+            from,
+            to,
+            label,
+            valid: (start, span),
+        } => {
             let (Some(from), Some(to)) = (node(*from, model), node(*to, model)) else {
                 return;
             };
-            let id = tx
-                .create_edge(NS, NewEdge::new(from, EDGE_LABELS[*label], to))
-                .unwrap();
+            let mut edge = NewEdge::new(from, EDGE_LABELS[*label], to);
+            edge.valid_from = start.map(Timestamp::from_secs);
+            edge.valid_to = span.map(|span| Timestamp::from_secs(start.unwrap_or(0) + span));
+            let id = tx.create_edge(NS, edge).unwrap();
             model.edges.insert(
                 id,
                 ModelEdge {
@@ -269,6 +291,16 @@ fn apply_in(tx: &mut grafeno::WriteTx, model: &mut Model, op: &Op) {
             };
             tx.delete_edge(NS, id).unwrap();
             model.edges.remove(&id);
+        }
+        Op::Invalidate { slot, at } => {
+            let Some(id) = pick(model.edges.keys().copied(), *slot) else {
+                return;
+            };
+            // Valid times are compared against the records, not the model.
+            match tx.invalidate_edge(NS, id, Timestamp::from_secs(*at)) {
+                Ok(()) | Err(Error::Invalid(_)) => {}
+                Err(error) => panic!("{error}"),
+            }
         }
         Op::Retract { slot } => {
             let Some(id) = pick(model.edges.keys().copied(), *slot) else {
@@ -348,6 +380,62 @@ fn verify(db: &Grafeno, model: &Model) {
         );
         let page = read.nodes_page(NS, Some(label), None, 1000).unwrap();
         assert_eq!(page.len() as u64, expected);
+    }
+
+    // Traversals filter on adjacency entries; they must agree with the filter
+    // applied to the full edge records.
+    let records: Vec<Edge> = read.edges(NS).unwrap();
+    let mut filters = vec![
+        EdgeFilter::any(),
+        EdgeFilter::any().label("x"),
+        EdgeFilter::any().known_at(Timestamp::from_micros(0)),
+        EdgeFilter::any().known_at(Timestamp::now()),
+    ];
+    for secs in [0, 3, 9, 15, 30] {
+        filters.push(EdgeFilter::any().valid_at(Timestamp::from_secs(secs)));
+        filters.push(
+            EdgeFilter::any()
+                .label("y")
+                .valid_at(Timestamp::from_secs(secs))
+                .known_at(Timestamp::now()),
+        );
+    }
+    for &id in model.nodes.keys() {
+        for filter in &filters {
+            for direction in [Direction::Out, Direction::In, Direction::Both] {
+                let found: BTreeSet<EdgeId> = read
+                    .neighbors(NS, id, direction, filter)
+                    .unwrap()
+                    .into_iter()
+                    .map(|neighbor| neighbor.edge.id)
+                    .collect();
+                let expected: BTreeSet<EdgeId> = records
+                    .iter()
+                    .filter(|edge| {
+                        let touches = match direction {
+                            Direction::Out => edge.from == id,
+                            Direction::In => edge.to == id,
+                            Direction::Both => edge.from == id || edge.to == id,
+                        };
+                        touches && filter.accepts(edge)
+                    })
+                    .map(|edge| edge.id)
+                    .collect();
+                assert_eq!(found, expected, "{filter:?} {direction:?}");
+            }
+            let hops: BTreeSet<NodeId> = read
+                .k_hop(NS, id, 1, Direction::Out, filter)
+                .unwrap()
+                .into_iter()
+                .map(|(node, _)| node)
+                .collect();
+            let expected: BTreeSet<NodeId> = records
+                .iter()
+                .filter(|edge| edge.from == id && edge.to != id && filter.accepts(edge))
+                .map(|edge| edge.to)
+                .collect();
+            assert_eq!(hops, expected, "k_hop {filter:?}");
+        }
     }
 
     // Current neighbors leave out retracted edges.

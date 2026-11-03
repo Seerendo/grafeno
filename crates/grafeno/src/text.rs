@@ -64,7 +64,7 @@ fn push_term(current: &mut String, terms: &mut Vec<String>) {
     }
 }
 
-fn term_frequencies(terms: &[String]) -> HashMap<&str, u32> {
+pub(crate) fn term_frequencies(terms: &[String]) -> HashMap<&str, u32> {
     let mut frequencies = HashMap::new();
     for term in terms {
         *frequencies.entry(term.as_str()).or_insert(0) += 1;
@@ -77,13 +77,13 @@ pub(crate) fn index(tx: &WriteTransaction, ns: &str, node: NodeId, text: &str) -
     remove(tx, ns, node)?;
     let id = node.as_u128();
     let terms = tokenize(text);
+    let length = terms.len() as u32;
     let mut postings = tx.open_table(POSTINGS).map_err(storage)?;
     for (term, frequency) in term_frequencies(&terms) {
         postings
-            .insert((ns, term, id), frequency)
+            .insert((ns, term, id), (frequency, length))
             .map_err(storage)?;
     }
-    let length = terms.len() as u32;
     tx.open_table(TEXTS)
         .map_err(storage)?
         .insert((ns, id), text)
@@ -152,8 +152,7 @@ pub(crate) fn text(
 
 /// The `limit` best nodes for `query` by BM25, best first.
 pub(crate) fn search(
-    postings: &impl ReadableTable<PostingKey, u32>,
-    lengths: &impl ReadableTable<RecordKey, u32>,
+    postings: &impl ReadableTable<PostingKey, (u32, u32)>,
     stats: &impl ReadableTable<&'static str, (u64, u64)>,
     ns: &str,
     query: &str,
@@ -178,21 +177,17 @@ pub(crate) fn search(
             .range((ns, term.as_str(), 0u128)..)
             .map_err(storage)?
         {
-            let (key, frequency) = item.map_err(storage)?;
+            let (key, value) = item.map_err(storage)?;
             let (key_ns, key_term, node) = key.value();
             if key_ns != ns || key_term != term {
                 break;
             }
-            matches.push((node, frequency.value() as f32));
+            let (frequency, length) = value.value();
+            matches.push((node, frequency as f32, length as f32));
         }
         let frequency_in_docs = matches.len() as f32;
         let idf = (1.0 + (documents - frequency_in_docs + 0.5) / (frequency_in_docs + 0.5)).ln();
-        for (node, frequency) in matches {
-            let length = lengths
-                .get((ns, node))
-                .map_err(storage)?
-                .map(|guard| guard.value())
-                .unwrap_or(0) as f32;
+        for (node, frequency, length) in matches {
             let norm = K1 * (1.0 - B + B * length / average_length);
             *scores.entry(node).or_insert(0.0) += idf * frequency * (K1 + 1.0) / (frequency + norm);
         }
@@ -215,7 +210,7 @@ pub(crate) fn search(
 pub(crate) fn check(
     texts: &impl ReadableTable<RecordKey, &'static str>,
     lengths: &impl ReadableTable<RecordKey, u32>,
-    postings: &impl ReadableTable<PostingKey, u32>,
+    postings: &impl ReadableTable<PostingKey, (u32, u32)>,
     stats: &impl ReadableTable<&'static str, (u64, u64)>,
     ns: &str,
     nodes: &std::collections::HashSet<u128>,
@@ -244,14 +239,16 @@ pub(crate) fn check(
                 terms.len()
             ));
         }
+        let expected_length = terms.len() as u32;
         for (term, frequency) in frequencies {
             let stored = postings
                 .get((ns, term, id))
                 .map_err(storage)?
                 .map(|g| g.value());
-            if stored != Some(frequency) {
+            if stored != Some((frequency, expected_length)) {
                 problems.push(format!(
-                    "posting {term:?} of node {node} is {stored:?}, expected {frequency}"
+                    "posting {term:?} of node {node} is {stored:?}, expected {:?}",
+                    (frequency, expected_length)
                 ));
             }
         }

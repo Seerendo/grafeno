@@ -2,7 +2,7 @@
 
 use std::ops::Bound;
 
-use grafeno_core::{EdgeId, Error, NodeId, Result};
+use grafeno_core::{Edge, EdgeId, Error, NodeId, Result, Timestamp};
 use redb::{ReadableTable, TableDefinition};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -17,10 +17,16 @@ pub(crate) type LinkKey = (&'static str, u128, u8);
 pub(crate) const NODES: TableDefinition<RecordKey, &[u8]> = TableDefinition::new("nodes");
 /// `(ns, edge_id) -> Edge`
 pub(crate) const EDGES: TableDefinition<RecordKey, &[u8]> = TableDefinition::new("edges");
-/// `(ns, from, label, edge_id) -> to`
-pub(crate) const ADJ_OUT: TableDefinition<AdjKey, u128> = TableDefinition::new("adj_out");
-/// `(ns, to, label, edge_id) -> from`
-pub(crate) const ADJ_IN: TableDefinition<AdjKey, u128> = TableDefinition::new("adj_in");
+/// What a traversal needs to know about an edge, kept in the adjacency entries
+/// so that filtering reads no edge record: `(other end, recorded_at,
+/// expired_at, valid_from, valid_to)` in microseconds, with `i64::MIN` and
+/// `i64::MAX` for open bounds.
+pub(crate) type AdjValue = (u128, i64, i64, i64, i64);
+
+/// `(ns, from, label, edge_id) -> AdjValue` with `to` as the other end.
+pub(crate) const ADJ_OUT: TableDefinition<AdjKey, AdjValue> = TableDefinition::new("adjacency_out");
+/// `(ns, to, label, edge_id) -> AdjValue` with `from` as the other end.
+pub(crate) const ADJ_IN: TableDefinition<AdjKey, AdjValue> = TableDefinition::new("adjacency_in");
 /// `(ns, label, node_id) -> ()`
 pub(crate) const NODE_LABELS: TableDefinition<LabelKey, ()> = TableDefinition::new("node_labels");
 
@@ -29,8 +35,10 @@ pub(crate) const TEXTS: TableDefinition<RecordKey, &str> = TableDefinition::new(
 /// `(ns, node_id) -> number of terms` in the indexed text.
 pub(crate) const TEXT_LENGTHS: TableDefinition<RecordKey, u32> =
     TableDefinition::new("text_lengths");
-/// `(ns, term, node_id) -> term frequency`
-pub(crate) const POSTINGS: TableDefinition<PostingKey, u32> = TableDefinition::new("postings");
+/// `(ns, term, node_id) -> (term frequency, terms in the text)`: the length is
+/// repeated in every posting so that ranking needs no extra lookup.
+pub(crate) const POSTINGS: TableDefinition<PostingKey, (u32, u32)> =
+    TableDefinition::new("text_postings");
 /// `ns -> (indexed documents, total terms)`
 pub(crate) const TEXT_STATS: TableDefinition<&str, (u64, u64)> = TableDefinition::new("text_stats");
 
@@ -94,14 +102,36 @@ pub(crate) fn scan_records<R: DeserializeOwned>(
     Ok(out)
 }
 
-/// The edges of `node` in an adjacency table: `(edge, other end)`.
-/// With `label`, only edges with that label.
+/// An edge seen from one of its ends, as stored in an adjacency table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Adjacent {
+    pub(crate) edge: EdgeId,
+    pub(crate) other: NodeId,
+    pub(crate) recorded_at: i64,
+    pub(crate) expired_at: i64,
+    pub(crate) valid_from: i64,
+    pub(crate) valid_to: i64,
+}
+
+/// The adjacency value of `edge` seen from the end opposite to `other`.
+pub(crate) fn adjacency_value(edge: &Edge, other: NodeId) -> AdjValue {
+    (
+        other.as_u128(),
+        edge.recorded_at.as_micros(),
+        edge.expired_at.map_or(i64::MAX, Timestamp::as_micros),
+        edge.valid_from.map_or(i64::MIN, Timestamp::as_micros),
+        edge.valid_to.map_or(i64::MAX, Timestamp::as_micros),
+    )
+}
+
+/// The edges of `node` in an adjacency table. With `label`, only edges with
+/// that label.
 pub(crate) fn adjacency(
-    table: &impl ReadableTable<AdjKey, u128>,
+    table: &impl ReadableTable<AdjKey, AdjValue>,
     ns: &str,
     node: NodeId,
     label: Option<&str>,
-) -> Result<Vec<(EdgeId, NodeId)>> {
+) -> Result<Vec<Adjacent>> {
     let node = node.as_u128();
     let mut out = Vec::new();
     for item in table
@@ -113,7 +143,15 @@ pub(crate) fn adjacency(
         if key_ns != ns || key_node != node || label.is_some_and(|label| label != key_label) {
             break;
         }
-        out.push((EdgeId::from_u128(edge), NodeId::from_u128(value.value())));
+        let (other, recorded_at, expired_at, valid_from, valid_to) = value.value();
+        out.push(Adjacent {
+            edge: EdgeId::from_u128(edge),
+            other: NodeId::from_u128(other),
+            recorded_at,
+            expired_at,
+            valid_from,
+            valid_to,
+        });
     }
     Ok(out)
 }

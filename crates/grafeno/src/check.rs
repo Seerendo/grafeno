@@ -14,8 +14,8 @@ use crate::db::{ReadTx, WriteTx};
 use crate::stats::{bump_edge_label, bump_namespace, label_counts};
 use crate::store::{
     ADJ_IN, ADJ_OUT, EDGE_LABEL_COUNTS, EDGES, HNSW_LINKS, LABEL_COUNTS, NODE_LABELS, NODES,
-    NS_COUNTS, POSTINGS, TEXT_LENGTHS, TEXT_STATS, TEXTS, VECTOR_META, VECTORS, scan_records,
-    storage,
+    NS_COUNTS, POSTINGS, TEXT_LENGTHS, TEXT_STATS, TEXTS, VECTOR_META, VECTORS, adjacency_value,
+    scan_records, storage,
 };
 use crate::{text, vector};
 
@@ -118,7 +118,7 @@ impl ReadTx {
                 .get(key(edge.from))
                 .map_err(storage)?
                 .map(|g| g.value());
-            if out != Some(edge.to.as_u128()) {
+            if out != Some(adjacency_value(edge, edge.to)) {
                 problems.push(format!("outgoing adjacency of edge {} is wrong", edge.id));
             }
             let inn = self
@@ -126,7 +126,7 @@ impl ReadTx {
                 .get(key(edge.to))
                 .map_err(storage)?
                 .map(|g| g.value());
-            if inn != Some(edge.from.as_u128()) {
+            if inn != Some(adjacency_value(edge, edge.from)) {
                 problems.push(format!("incoming adjacency of edge {} is wrong", edge.id));
             }
         }
@@ -293,6 +293,9 @@ impl WriteTx {
             .remove(ns)
             .map_err(storage)?;
 
+        // The tables were changed underneath the vector cache.
+        self.vectors.forget(ns);
+
         let mut report = RebuildReport {
             namespace: ns.to_owned(),
             ..RebuildReport::default()
@@ -327,7 +330,7 @@ impl WriteTx {
         }
         for (id, embedding) in &vectors {
             if ids.contains(&id.as_u128()) {
-                vector::insert(&self.tx, ns, *id, embedding)?;
+                vector::insert(&self.tx, &mut self.vectors, ns, *id, embedding)?;
                 report.vectors += 1;
             } else {
                 report.dropped_vectors += 1;
@@ -383,7 +386,7 @@ mod tests {
                 .unwrap();
             t.open_table(POSTINGS)
                 .unwrap()
-                .insert(("ns", "ghost", b.as_u128()), 7)
+                .insert(("ns", "ghost", b.as_u128()), (7, 1))
                 .unwrap();
             t.open_table(TEXT_LENGTHS)
                 .unwrap()

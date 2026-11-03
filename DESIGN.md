@@ -62,12 +62,12 @@ short-lived agents.
 | -------------- | ----------------------------- | -------------------------- |
 | `nodes`        | `(ns, node_id)`               | `Node` record              |
 | `edges`        | `(ns, edge_id)`               | `Edge` record              |
-| `adj_out`      | `(ns, from, label, edge_id)`  | `to`                       |
-| `adj_in`       | `(ns, to, label, edge_id)`    | `from`                     |
+| `adjacency_out` | `(ns, from, label, edge_id)` | `to` + the edge's times    |
+| `adjacency_in` | `(ns, to, label, edge_id)`    | `from` + the edge's times  |
 | `node_labels`  | `(ns, label, node_id)`        | `()`                       |
 | `texts`        | `(ns, node_id)`               | indexed text               |
 | `text_lengths` | `(ns, node_id)`               | number of terms            |
-| `postings`     | `(ns, term, node_id)`         | term frequency             |
+| `text_postings` | `(ns, term, node_id)`        | term frequency, text length |
 | `text_stats`   | `ns`                          | `(documents, total terms)` |
 | `vectors`      | `(ns, node_id)`               | normalized `f32` vector    |
 | `hnsw_links`   | `(ns, node_id, layer)`        | neighbor ids               |
@@ -77,9 +77,14 @@ short-lived agents.
 | `label_counts` | `(ns, label)`                 | nodes with the label       |
 | `edge_label_counts` | `(ns, label)`            | edges with the label       |
 
-- The layout has a version (`SCHEMA_VERSION`, now 2) in `meta`. Opening an
-  older file upgrades it (version 1 gets its counters computed); a newer one
-  is refused.
+- The layout has a version (`SCHEMA_VERSION`, now 3) in `meta`. Opening an
+  older file upgrades it in one transaction: version 1 gets its counters
+  computed, version 2 gets the new adjacency and posting tables (built from
+  the records) and loses the old ones. A newer layout is refused.
+- Adjacency entries hold the edge's record time and valid time
+  (`recorded_at`, `expired_at`, `valid_from`, `valid_to`), so traversals
+  filter without reading edge records. Postings hold the length of their
+  text, so BM25 needs no extra lookup.
 - Counters are updated in the same transaction as each write, so listing
   namespaces and their statistics never scans records. A namespace exists
   while it has nodes.
@@ -124,6 +129,10 @@ richer linguistics (stemming per language, phrase queries) become necessary.
 - Deleting a node reconnects each of its neighbors using the removed node's
   links as candidates; links that still point to removed nodes are skipped at
   search time.
+- Searches compute distances straight from the stored bytes (no decoding,
+  eight-lane dot products). Inserts and removes in one write transaction
+  share a cache of decoded vectors and link lists that every write updates
+  and that ends with the transaction; a rebuild drops it for its namespace.
 - Embeddings are sent by the client. A local model (ort or candle) may be
   offered later for clients without one.
 
@@ -223,9 +232,9 @@ without a current user. They remain possible for embedded use.
 7. Memory: consolidation, importance and decay, entity resolution.
 8. Integrations (Grafito first), Python bindings, read replicas.
 
-A performance pass on the bottlenecks in [docs/benchmarks.md](docs/benchmarks.md)
-(vector inserts, edge decoding in traversals) fits before or alongside
-phase 5.
+A performance pass (layout version 3) followed phase 4: traversals 3-4×
+faster, BM25 3× faster, vector inserts 2.5× faster in batches. Numbers and
+the remaining limits are in [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Open decisions
 

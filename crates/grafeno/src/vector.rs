@@ -6,9 +6,15 @@
 //!
 //! A node's level is derived from its id (the random bits of a UUID v7), so it
 //! never has to be stored and the entry point can always be recomputed.
+//!
+//! Searches compute distances straight from the stored bytes. Inserts and
+//! removes in one write transaction share a [`Cache`] of decoded vectors and
+//! link lists, updated by every write, so batch inserts do not read the same
+//! entries from redb over and over.
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::sync::Arc;
 
 use grafeno_core::{Error, NodeId, Result};
 use redb::{ReadableTable, WriteTransaction};
@@ -23,6 +29,9 @@ const M: usize = 16;
 const M0: usize = 2 * M;
 const EF_CONSTRUCTION: usize = 100;
 const MAX_LEVEL: u8 = 16;
+/// Above this many cached vectors (or link lists) a namespace's cache starts
+/// over, which bounds the memory of very large write transactions.
+const MAX_CACHED: usize = 1 << 18;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct VectorMeta {
@@ -56,7 +65,7 @@ fn normalize(vector: &[f32]) -> Result<Vec<f32>> {
     if vector.iter().any(|value| !value.is_finite()) {
         return Err(Error::Invalid("vector values must be finite".into()));
     }
-    let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+    let norm = dot(vector, vector).sqrt();
     if norm == 0.0 {
         return Err(Error::Invalid("vector must not be zero".into()));
     }
@@ -67,8 +76,40 @@ fn normalize(vector: &[f32]) -> Result<Vec<f32>> {
     Ok(vector.iter().map(|value| value / norm).collect())
 }
 
+/// Dot product with eight independent sums, so that the compiler can use
+/// SIMD instructions. Both slices have the same length.
 fn dot(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
+    let (a_chunks, a_rest) = a.as_chunks::<8>();
+    let (b_chunks, b_rest) = b.as_chunks::<8>();
+    let mut sums = [0.0f32; 8];
+    for (x, y) in a_chunks.iter().zip(b_chunks) {
+        for lane in 0..8 {
+            sums[lane] += x[lane] * y[lane];
+        }
+    }
+    let rest: f32 = a_rest.iter().zip(b_rest).map(|(x, y)| x * y).sum();
+    sums.iter().sum::<f32>() + rest
+}
+
+/// [`dot`] against a vector stored as little-endian bytes, without decoding
+/// it first. The sums run in the same order, so the result is identical.
+fn dot_bytes(query: &[f32], bytes: &[u8]) -> f32 {
+    let (query_chunks, query_rest) = query.as_chunks::<8>();
+    let (byte_chunks, _) = bytes.as_chunks::<32>();
+    let mut sums = [0.0f32; 8];
+    for (x, chunk) in query_chunks.iter().zip(byte_chunks) {
+        let (values, _) = chunk.as_chunks::<4>();
+        for lane in 0..8 {
+            sums[lane] += x[lane] * f32::from_le_bytes(values[lane]);
+        }
+    }
+    let (rest_bytes, _) = bytes[query_chunks.len() * 32..].as_chunks::<4>();
+    let rest: f32 = query_rest
+        .iter()
+        .zip(rest_bytes)
+        .map(|(x, value)| x * f32::from_le_bytes(*value))
+        .sum();
+    sums.iter().sum::<f32>() + rest
 }
 
 fn vector_bytes(vector: &[f32]) -> Vec<u8> {
@@ -119,6 +160,47 @@ pub(crate) fn embedding(
         .map(|guard| bytes_vector(guard.value())))
 }
 
+/// Decoded vectors (`None`: the node has none) and link lists of one
+/// namespace's graph.
+#[derive(Default)]
+struct NamespaceCache {
+    vectors: HashMap<u128, Option<Arc<[f32]>>>,
+    links: HashMap<(u128, u8), Arc<[u128]>>,
+}
+
+impl NamespaceCache {
+    fn trim(&mut self) {
+        if self.vectors.len() > MAX_CACHED {
+            self.vectors.clear();
+        }
+        if self.links.len() > MAX_CACHED {
+            self.links.clear();
+        }
+    }
+}
+
+/// The vector-graph cache of a write transaction, per namespace. It lives
+/// as long as the transaction, so it never outlives the data it copies.
+#[derive(Default)]
+pub(crate) struct Cache {
+    namespaces: HashMap<String, NamespaceCache>,
+}
+
+impl Cache {
+    fn namespace(&mut self, ns: &str) -> &mut NamespaceCache {
+        if !self.namespaces.contains_key(ns) {
+            self.namespaces
+                .insert(ns.to_owned(), NamespaceCache::default());
+        }
+        self.namespaces.get_mut(ns).expect("inserted above")
+    }
+
+    /// Drops what is cached for `ns`, after its tables were changed directly.
+    pub(crate) fn forget(&mut self, ns: &str) {
+        self.namespaces.remove(ns);
+    }
+}
+
 /// A candidate ordered by distance (smaller is closer).
 #[derive(Clone, Copy, Debug)]
 struct Scored(f32, u128);
@@ -143,12 +225,14 @@ impl Ord for Scored {
     }
 }
 
-/// Read access to one namespace's HNSW graph, with a cache of vectors.
+/// Read access to one namespace's HNSW graph.
 struct Space<'a, V, L> {
     ns: &'a str,
     vectors: &'a V,
     links: &'a L,
-    cache: &'a mut HashMap<u128, Option<Vec<f32>>>,
+    /// `None` for searches: they visit each vector once, so decoding and
+    /// keeping vectors would only cost.
+    cache: Option<&'a mut NamespaceCache>,
 }
 
 impl<V, L> Space<'_, V, L>
@@ -156,30 +240,51 @@ where
     V: ReadableTable<RecordKey, &'static [u8]>,
     L: ReadableTable<LinkKey, &'static [u8]>,
 {
-    fn vector(&mut self, id: u128) -> Result<Option<&[f32]>> {
-        if !self.cache.contains_key(&id) {
-            let vector = self
-                .vectors
-                .get((self.ns, id))
-                .map_err(storage)?
-                .map(|guard| bytes_vector(guard.value()));
-            self.cache.insert(id, vector);
+    fn vector(&mut self, id: u128) -> Result<Option<Arc<[f32]>>> {
+        if let Some(cached) = self.cache.as_ref().and_then(|cache| cache.vectors.get(&id)) {
+            return Ok(cached.clone());
         }
-        Ok(self.cache[&id].as_deref())
+        let vector: Option<Arc<[f32]>> = self
+            .vectors
+            .get((self.ns, id))
+            .map_err(storage)?
+            .map(|guard| bytes_vector(guard.value()).into());
+        if let Some(cache) = self.cache.as_mut() {
+            cache.vectors.insert(id, vector.clone());
+        }
+        Ok(vector)
     }
 
     /// `None` when the node has no vector: links may point to removed nodes.
     fn distance(&mut self, query: &[f32], id: u128) -> Result<Option<f32>> {
-        Ok(self.vector(id)?.map(|vector| 1.0 - dot(query, vector)))
+        if let Some(cached) = self.cache.as_ref().and_then(|cache| cache.vectors.get(&id)) {
+            return Ok(cached.as_ref().map(|vector| 1.0 - dot(query, vector)));
+        }
+        Ok(self
+            .vectors
+            .get((self.ns, id))
+            .map_err(storage)?
+            .map(|guard| 1.0 - dot_bytes(query, guard.value())))
     }
 
-    fn links(&self, id: u128, layer: u8) -> Result<Vec<u128>> {
-        Ok(self
+    fn links(&mut self, id: u128, layer: u8) -> Result<Arc<[u128]>> {
+        if let Some(cached) = self
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.links.get(&(id, layer)))
+        {
+            return Ok(cached.clone());
+        }
+        let links: Arc<[u128]> = self
             .links
             .get((self.ns, id, layer))
             .map_err(storage)?
-            .map(|guard| bytes_links(guard.value()))
-            .unwrap_or_default())
+            .map(|guard| bytes_links(guard.value()).into())
+            .unwrap_or_else(|| Arc::from([]));
+        if let Some(cache) = self.cache.as_mut() {
+            cache.links.insert((id, layer), links.clone());
+        }
+        Ok(links)
     }
 
     /// The `ef` nodes closest to `query` on `layer`, closest first.
@@ -198,7 +303,7 @@ where
             if results.len() >= ef && results.peek().is_some_and(|worst| candidate.0 > worst.0) {
                 break;
             }
-            for neighbor in self.links(candidate.1, layer)? {
+            for &neighbor in self.links(candidate.1, layer)?.iter() {
                 if !visited.insert(neighbor) {
                     continue;
                 }
@@ -222,13 +327,13 @@ where
     /// neighbor than to the base, so links spread in different directions.
     /// Skipped candidates fill the remaining slots.
     fn select(&mut self, candidates: &[Scored], m: usize) -> Result<Vec<u128>> {
-        let mut chosen: Vec<(u128, Vec<f32>)> = Vec::new();
+        let mut chosen: Vec<(u128, Arc<[f32]>)> = Vec::new();
         let mut skipped = Vec::new();
         for &Scored(distance, id) in candidates {
             if chosen.len() >= m {
                 break;
             }
-            let Some(vector) = self.vector(id)?.map(<[f32]>::to_vec) else {
+            let Some(vector) = self.vector(id)? else {
                 continue;
             };
             if chosen
@@ -247,7 +352,7 @@ where
 
     /// Reduces `links` of `base` to `m`, keeping the best by the heuristic.
     fn prune(&mut self, base: u128, links: &[u128], m: usize) -> Result<Vec<u128>> {
-        let Some(base_vector) = self.vector(base)?.map(<[f32]>::to_vec) else {
+        let Some(base_vector) = self.vector(base)? else {
             return Ok(Vec::new());
         };
         let mut scored = Vec::new();
@@ -280,9 +385,15 @@ where
 
 /// Stores `vector` for `node` and links it into the graph, replacing any
 /// previous vector.
-pub(crate) fn insert(tx: &WriteTransaction, ns: &str, node: NodeId, vector: &[f32]) -> Result<()> {
+pub(crate) fn insert(
+    tx: &WriteTransaction,
+    cache: &mut Cache,
+    ns: &str,
+    node: NodeId,
+    vector: &[f32],
+) -> Result<()> {
     let query = normalize(vector)?;
-    remove(tx, ns, node)?;
+    remove(tx, cache, ns, node)?;
 
     let mut meta_table = tx.open_table(VECTOR_META).map_err(storage)?;
     let mut meta = read_meta(&meta_table, ns)?.unwrap_or(VectorMeta {
@@ -305,18 +416,20 @@ pub(crate) fn insert(tx: &WriteTransaction, ns: &str, node: NodeId, vector: &[f3
         .insert((ns, id), vector_bytes(&query).as_slice())
         .map_err(storage)?;
     let mut links = tx.open_table(HNSW_LINKS).map_err(storage)?;
+    let cache = cache.namespace(ns);
+    cache.trim();
+    cache.vectors.insert(id, Some(Arc::from(query.as_slice())));
     let level = level_of(node);
 
     if let Some(entry) = meta.entry {
         let entry_level = level_of(entry);
-        let mut cache = HashMap::new();
-        let mut space = Space {
+        let mut entries = Space {
             ns,
             vectors: &vectors,
             links: &links,
-            cache: &mut cache,
-        };
-        let mut entries = space.descend(&query, entry, level.min(entry_level))?;
+            cache: Some(&mut *cache),
+        }
+        .descend(&query, entry, level.min(entry_level))?;
 
         for layer in (0..=level.min(entry_level)).rev() {
             // Read phase: compute every link list of this layer…
@@ -324,13 +437,13 @@ pub(crate) fn insert(tx: &WriteTransaction, ns: &str, node: NodeId, vector: &[f3
                 ns,
                 vectors: &vectors,
                 links: &links,
-                cache: &mut cache,
+                cache: Some(&mut *cache),
             };
             let found = space.search_layer(&query, &entries, EF_CONSTRUCTION, layer)?;
             let own = space.select(&found, M)?;
             let mut updates = vec![(id, own.clone())];
             for &neighbor in &own {
-                let mut list = space.links(neighbor, layer)?;
+                let mut list = space.links(neighbor, layer)?.to_vec();
                 list.push(id);
                 if list.len() > max_links(layer) {
                     list = space.prune(neighbor, &list, max_links(layer))?;
@@ -338,11 +451,12 @@ pub(crate) fn insert(tx: &WriteTransaction, ns: &str, node: NodeId, vector: &[f3
                 updates.push((neighbor, list));
             }
             entries = found;
-            // …then write them.
+            // …then write them, to the table and the cache.
             for (node, list) in updates {
                 links
                     .insert((ns, node, layer), links_bytes(&list).as_slice())
                     .map_err(storage)?;
+                cache.links.insert((node, layer), list.into());
             }
         }
         if level > entry_level {
@@ -361,32 +475,40 @@ pub(crate) fn insert(tx: &WriteTransaction, ns: &str, node: NodeId, vector: &[f3
 
 /// Removes the vector of `node` and reconnects its neighbors. Returns whether
 /// there was one.
-pub(crate) fn remove(tx: &WriteTransaction, ns: &str, node: NodeId) -> Result<bool> {
+pub(crate) fn remove(
+    tx: &WriteTransaction,
+    cache: &mut Cache,
+    ns: &str,
+    node: NodeId,
+) -> Result<bool> {
     let id = node.as_u128();
     let mut vectors = tx.open_table(VECTORS).map_err(storage)?;
     if vectors.remove((ns, id)).map_err(storage)?.is_none() {
         return Ok(false);
     }
+    let cache = cache.namespace(ns);
+    cache.vectors.insert(id, None);
     let mut links = tx.open_table(HNSW_LINKS).map_err(storage)?;
-    let mut cache = HashMap::new();
     for layer in 0..=level_of(node) {
         let own = links
             .remove((ns, id, layer))
             .map_err(storage)?
             .map(|guard| bytes_links(guard.value()))
             .unwrap_or_default();
+        cache.links.remove(&(id, layer));
         let mut space = Space {
             ns,
             vectors: &vectors,
             links: &links,
-            cache: &mut cache,
+            cache: Some(&mut *cache),
         };
         let mut updates = Vec::new();
         for &neighbor in &own {
             // The neighbor inherits the removed node's links as candidates.
             let mut candidates: Vec<u128> = space
                 .links(neighbor, layer)?
-                .into_iter()
+                .iter()
+                .copied()
                 .filter(|other| *other != id)
                 .collect();
             candidates.extend(own.iter().copied().filter(|other| *other != neighbor));
@@ -399,6 +521,7 @@ pub(crate) fn remove(tx: &WriteTransaction, ns: &str, node: NodeId) -> Result<bo
             links
                 .insert((ns, neighbor, layer), links_bytes(&list).as_slice())
                 .map_err(storage)?;
+            cache.links.insert((neighbor, layer), list.into());
         }
     }
 
@@ -461,12 +584,11 @@ pub(crate) fn search(
         )));
     }
     let query = normalize(query)?;
-    let mut cache = HashMap::new();
     let mut space = Space {
         ns,
         vectors,
         links,
-        cache: &mut cache,
+        cache: None,
     };
     let entries = space.descend(&query, entry, 0)?;
     let found = space.search_layer(&query, &entries, ef.max(limit), 0)?;

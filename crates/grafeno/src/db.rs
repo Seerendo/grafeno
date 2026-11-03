@@ -4,7 +4,7 @@ use std::path::Path as FsPath;
 use grafeno_core::{Edge, EdgeId, Error, NewEdge, NewNode, Node, NodeId, Props, Result, Timestamp};
 use redb::{
     Database, ReadOnlyTable, ReadTransaction, ReadableDatabase, ReadableTable,
-    ReadableTableMetadata, WriteTransaction,
+    ReadableTableMetadata, TableDefinition, WriteTransaction,
 };
 
 use crate::stats::{
@@ -12,10 +12,11 @@ use crate::stats::{
     namespaces,
 };
 use crate::store::{
-    ADJ_IN, ADJ_OUT, AdjKey, CountKey, EDGE_LABEL_COUNTS, EDGES, HNSW_LINKS, LABEL_COUNTS,
-    LabelKey, LinkKey, META, NODE_LABELS, NODES, NS_COUNTS, POSTINGS, PostingKey, RecordKey,
-    TEXT_LENGTHS, TEXT_STATS, TEXTS, VECTOR_META, VECTORS, adjacency, check_label, check_namespace,
-    decode, encode, label_page, nodes_with_label, read_record, scan_page, scan_records, storage,
+    ADJ_IN, ADJ_OUT, AdjKey, AdjValue, CountKey, EDGE_LABEL_COUNTS, EDGES, HNSW_LINKS,
+    LABEL_COUNTS, LabelKey, LinkKey, META, NODE_LABELS, NODES, NS_COUNTS, POSTINGS, PostingKey,
+    RecordKey, TEXT_LENGTHS, TEXT_STATS, TEXTS, VECTOR_META, VECTORS, adjacency, adjacency_value,
+    check_label, check_namespace, decode, encode, label_page, nodes_with_label, read_record,
+    scan_page, scan_records, storage,
 };
 use crate::{Hit, text, vector};
 
@@ -23,7 +24,15 @@ use crate::{Hit, text, vector};
 ///
 /// 1. Phases 1-3: graph, text and vector tables.
 /// 2. Adds the `meta` table and the namespace and label counters.
-pub const SCHEMA_VERSION: u64 = 2;
+/// 3. Adjacency entries carry the edge's times (`adjacency_out`/`_in`
+///    replace `adj_out`/`_in`), and postings carry the text length
+///    (`text_postings` replaces `postings`).
+pub const SCHEMA_VERSION: u64 = 3;
+
+/// The tables replaced in version 3, by name (their types no longer matter).
+const OLD_ADJ_OUT: TableDefinition<AdjKey, u128> = TableDefinition::new("adj_out");
+const OLD_ADJ_IN: TableDefinition<AdjKey, u128> = TableDefinition::new("adj_in");
+const OLD_POSTINGS: TableDefinition<PostingKey, u32> = TableDefinition::new("postings");
 
 const SCHEMA_KEY: &str = "schema_version";
 
@@ -99,6 +108,9 @@ impl Grafeno {
         if version < 2 {
             recount(&tx)?;
         }
+        if version < 3 {
+            migrate_to_3(&tx)?;
+        }
         tx.open_table(META)
             .map_err(storage)?
             .insert(SCHEMA_KEY, SCHEMA_VERSION)
@@ -132,6 +144,7 @@ impl Grafeno {
     pub fn begin_write(&self) -> Result<WriteTx> {
         Ok(WriteTx {
             tx: self.db.begin_write().map_err(storage)?,
+            vectors: vector::Cache::default(),
         })
     }
 
@@ -150,6 +163,62 @@ impl Grafeno {
             }
         }
     }
+}
+
+/// Version 3: rebuilds the adjacency tables from the edge records and the
+/// postings from the stored texts, then drops the old tables.
+fn migrate_to_3(tx: &WriteTransaction) -> Result<()> {
+    let mut out = tx.open_table(ADJ_OUT).map_err(storage)?;
+    let mut inn = tx.open_table(ADJ_IN).map_err(storage)?;
+    out.retain(|_, _| false).map_err(storage)?;
+    inn.retain(|_, _| false).map_err(storage)?;
+    for item in tx
+        .open_table(EDGES)
+        .map_err(storage)?
+        .iter()
+        .map_err(storage)?
+    {
+        let (key, value) = item.map_err(storage)?;
+        let ns = key.value().0;
+        let edge: Edge = decode(value.value())?;
+        let (from, to, id) = (edge.from.as_u128(), edge.to.as_u128(), edge.id.as_u128());
+        out.insert(
+            (ns, from, edge.label.as_str(), id),
+            adjacency_value(&edge, edge.to),
+        )
+        .map_err(storage)?;
+        inn.insert(
+            (ns, to, edge.label.as_str(), id),
+            adjacency_value(&edge, edge.from),
+        )
+        .map_err(storage)?;
+    }
+    drop((out, inn));
+
+    let mut postings = tx.open_table(POSTINGS).map_err(storage)?;
+    postings.retain(|_, _| false).map_err(storage)?;
+    for item in tx
+        .open_table(TEXTS)
+        .map_err(storage)?
+        .iter()
+        .map_err(storage)?
+    {
+        let (key, value) = item.map_err(storage)?;
+        let (ns, id) = key.value();
+        let terms = text::tokenize(value.value());
+        let length = terms.len() as u32;
+        for (term, frequency) in text::term_frequencies(&terms) {
+            postings
+                .insert((ns, term, id), (frequency, length))
+                .map_err(storage)?;
+        }
+    }
+    drop(postings);
+
+    tx.delete_table(OLD_ADJ_OUT).map_err(storage)?;
+    tx.delete_table(OLD_ADJ_IN).map_err(storage)?;
+    tx.delete_table(OLD_POSTINGS).map_err(storage)?;
+    Ok(())
 }
 
 /// Rebuilds every counter from the node and edge records.
@@ -202,12 +271,12 @@ fn recount(tx: &WriteTransaction) -> Result<()> {
 pub struct ReadTx {
     pub(crate) nodes: ReadOnlyTable<RecordKey, &'static [u8]>,
     pub(crate) edges: ReadOnlyTable<RecordKey, &'static [u8]>,
-    pub(crate) out: ReadOnlyTable<AdjKey, u128>,
-    pub(crate) inn: ReadOnlyTable<AdjKey, u128>,
+    pub(crate) out: ReadOnlyTable<AdjKey, AdjValue>,
+    pub(crate) inn: ReadOnlyTable<AdjKey, AdjValue>,
     pub(crate) labels: ReadOnlyTable<LabelKey, ()>,
     pub(crate) texts: ReadOnlyTable<RecordKey, &'static str>,
     pub(crate) text_lengths: ReadOnlyTable<RecordKey, u32>,
-    pub(crate) postings: ReadOnlyTable<PostingKey, u32>,
+    pub(crate) postings: ReadOnlyTable<PostingKey, (u32, u32)>,
     pub(crate) text_stats: ReadOnlyTable<&'static str, (u64, u64)>,
     pub(crate) vectors: ReadOnlyTable<RecordKey, &'static [u8]>,
     pub(crate) hnsw_links: ReadOnlyTable<LinkKey, &'static [u8]>,
@@ -325,14 +394,7 @@ impl ReadTx {
 
     /// Full-text search ranked by BM25, best first.
     pub fn search_text(&self, ns: &str, query: &str, limit: usize) -> Result<Vec<Hit>> {
-        text::search(
-            &self.postings,
-            &self.text_lengths,
-            &self.text_stats,
-            ns,
-            query,
-            limit,
-        )
+        text::search(&self.postings, &self.text_stats, ns, query, limit)
     }
 
     /// Approximate nearest neighbors by cosine similarity, best first.
@@ -364,6 +426,8 @@ impl ReadTx {
 /// A write transaction. Nothing is visible to others until `commit`.
 pub struct WriteTx {
     pub(crate) tx: WriteTransaction,
+    /// Decoded vectors and links, shared by the vector writes of this transaction.
+    pub(crate) vectors: vector::Cache,
 }
 
 impl WriteTx {
@@ -453,9 +517,9 @@ impl WriteTx {
             }
         }
         match embedding {
-            Some(embedding) => vector::insert(&self.tx, ns, id, embedding)?,
+            Some(embedding) => vector::insert(&self.tx, &mut self.vectors, ns, id, embedding)?,
             None => {
-                vector::remove(&self.tx, ns, id)?;
+                vector::remove(&self.tx, &mut self.vectors, ns, id)?;
             }
         }
         Ok(())
@@ -517,12 +581,12 @@ impl WriteTx {
     /// embeddings of a namespace must have the same dimension.
     pub fn set_embedding(&mut self, ns: &str, id: NodeId, embedding: &[f32]) -> Result<()> {
         self.node(ns, id)?.ok_or(Error::NodeNotFound(id))?;
-        vector::insert(&self.tx, ns, id, embedding)
+        vector::insert(&self.tx, &mut self.vectors, ns, id, embedding)
     }
 
     /// Removes the node's embedding from the index. Returns whether it had one.
     pub fn remove_embedding(&mut self, ns: &str, id: NodeId) -> Result<bool> {
-        vector::remove(&self.tx, ns, id)
+        vector::remove(&self.tx, &mut self.vectors, ns, id)
     }
 
     /// Deletes the node, its edges and its indexed text and embedding, without
@@ -535,7 +599,7 @@ impl WriteTx {
             edges.extend(
                 adjacency(&table, ns, id, None)?
                     .into_iter()
-                    .map(|(edge, _)| edge),
+                    .map(|entry| entry.edge),
             );
         }
         edges.sort();
@@ -544,7 +608,7 @@ impl WriteTx {
             self.delete_edge(ns, edge)?;
         }
         text::remove(&self.tx, ns, id)?;
-        vector::remove(&self.tx, ns, id)?;
+        vector::remove(&self.tx, &mut self.vectors, ns, id)?;
         let mut labels = self.tx.open_table(NODE_LABELS).map_err(storage)?;
         for label in &node.labels {
             labels
@@ -638,8 +702,8 @@ impl WriteTx {
             let table = self.tx.open_table(ADJ_OUT).map_err(storage)?;
             adjacency(&table, ns, from, label)?
         };
-        for (edge, _) in &edges {
-            self.delete_edge(ns, *edge)?;
+        for entry in &edges {
+            self.delete_edge(ns, entry.edge)?;
         }
         Ok(edges.len())
     }
@@ -721,12 +785,12 @@ impl WriteTx {
         self.tx
             .open_table(ADJ_OUT)
             .map_err(storage)?
-            .insert((ns, from, label, id), to)
+            .insert((ns, from, label, id), adjacency_value(edge, edge.to))
             .map_err(storage)?;
         self.tx
             .open_table(ADJ_IN)
             .map_err(storage)?
-            .insert((ns, to, label, id), from)
+            .insert((ns, to, label, id), adjacency_value(edge, edge.from))
             .map_err(storage)?;
         Ok(())
     }
@@ -805,6 +869,82 @@ mod tests {
             assert_eq!(stats.node_labels["Person"], 2);
             assert_eq!(stats.node_labels["Admin"], 1);
             assert_eq!(stats.edge_labels["knows"], 1);
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn version_2_databases_get_new_adjacency_and_postings() {
+        let path = std::env::temp_dir().join(format!("grafeno-v2-{}.redb", NodeId::new()));
+        let (a, b) = {
+            let db = Grafeno::open(&path).unwrap();
+            db.write(|tx| {
+                let a = tx.create_node("ns", NewNode::new("Note").text("alpha beta beta"))?;
+                let b = tx.create_node("ns", NewNode::new("Note").text("gamma"))?;
+                let edge = tx.create_edge("ns", NewEdge::new(a, "links_to", b))?;
+                tx.create_edge("ns", NewEdge::new(b, "links_to", a))?;
+                tx.retract_edge("ns", edge)?;
+                Ok((a, b))
+            })
+            .unwrap()
+        };
+        {
+            // Turn it into a version 2 database: the old tables, no new ones.
+            let db = Database::create(&path).unwrap();
+            let tx = db.begin_write().unwrap();
+            tx.delete_table(ADJ_OUT).unwrap();
+            tx.delete_table(ADJ_IN).unwrap();
+            tx.delete_table(POSTINGS).unwrap();
+            tx.open_table(OLD_ADJ_OUT)
+                .unwrap()
+                .insert(("ns", 1, "x", 2), 3)
+                .unwrap();
+            tx.open_table(OLD_ADJ_IN).unwrap();
+            tx.open_table(OLD_POSTINGS)
+                .unwrap()
+                .insert(("ns", "alpha", 1), 1)
+                .unwrap();
+            tx.open_table(META).unwrap().insert(SCHEMA_KEY, 2).unwrap();
+            tx.commit().unwrap();
+        }
+        {
+            let db = Grafeno::open(&path).unwrap();
+            let read = db.begin_read().unwrap();
+            let report = read.check("ns").unwrap();
+            assert!(report.is_ok(), "{:?}", report.problems);
+            let out = read
+                .neighbors("ns", b, crate::Direction::Out, &crate::EdgeFilter::any())
+                .unwrap();
+            assert_eq!(out[0].node, a);
+            let retracted = read
+                .neighbors("ns", a, crate::Direction::Out, &crate::EdgeFilter::any())
+                .unwrap();
+            assert!(
+                retracted.is_empty(),
+                "the retraction survives the migration"
+            );
+            assert_eq!(read.search_text("ns", "beta", 5).unwrap()[0].node, a);
+        }
+        {
+            let db = Database::create(&path).unwrap();
+            let tx = db.begin_read().unwrap();
+            let names: Vec<String> = tx
+                .list_tables()
+                .unwrap()
+                .map(|t| redb::TableHandle::name(&t).to_owned())
+                .collect();
+            for old in ["adj_out", "adj_in", "postings"] {
+                assert!(!names.iter().any(|name| name == old), "{old} was dropped");
+            }
+            assert_eq!(
+                tx.open_table(META)
+                    .unwrap()
+                    .get(SCHEMA_KEY)
+                    .unwrap()
+                    .unwrap()
+                    .value(),
+                SCHEMA_VERSION
+            );
         }
         std::fs::remove_file(&path).unwrap();
     }
