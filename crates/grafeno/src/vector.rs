@@ -31,6 +31,16 @@ pub(crate) struct VectorMeta {
     entry: Option<NodeId>,
 }
 
+impl VectorMeta {
+    pub(crate) fn dimension(&self) -> usize {
+        self.dimension
+    }
+
+    pub(crate) fn count(&self) -> u64 {
+        self.count
+    }
+}
+
 fn level_of(node: NodeId) -> u8 {
     let bits = (node.as_u128() as u64) & ((1 << 52) - 1);
     let uniform = (bits as f64 + 1.0) / (1u64 << 52) as f64;
@@ -49,6 +59,10 @@ fn normalize(vector: &[f32]) -> Result<Vec<f32>> {
     let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
     if norm == 0.0 {
         return Err(Error::Invalid("vector must not be zero".into()));
+    }
+    // Already normalized (such as an exported vector): keep its exact bits.
+    if (norm - 1.0).abs() <= 1e-6 {
+        return Ok(vector.to_vec());
     }
     Ok(vector.iter().map(|value| value / norm).collect())
 }
@@ -464,4 +478,120 @@ pub(crate) fn search(
             score: 1.0 - distance,
         })
         .collect())
+}
+
+/// Checks the vector index of a namespace: vectors, metadata, links, and that
+/// every vector is reachable from the entry point on layer 0 (otherwise
+/// searches could never return it). Returns the number of vectors and of
+/// dangling links.
+pub(crate) fn check(
+    vectors: &impl ReadableTable<RecordKey, &'static [u8]>,
+    links: &impl ReadableTable<LinkKey, &'static [u8]>,
+    meta: &impl ReadableTable<&'static str, &'static [u8]>,
+    ns: &str,
+    nodes: &HashSet<u128>,
+    problems: &mut Vec<String>,
+) -> Result<(u64, u64)> {
+    let meta = read_meta(meta, ns)?;
+    let mut ids = HashSet::new();
+    for item in vectors.range((ns, 0u128)..).map_err(storage)? {
+        let (key, value) = item.map_err(storage)?;
+        let (key_ns, id) = key.value();
+        if key_ns != ns {
+            break;
+        }
+        ids.insert(id);
+        let node = NodeId::from_u128(id);
+        if !nodes.contains(&id) {
+            problems.push(format!("vector of missing node {node}"));
+        }
+        let vector = bytes_vector(value.value());
+        if let Some(meta) = &meta
+            && vector.len() != meta.dimension
+        {
+            problems.push(format!(
+                "vector of node {node} has dimension {}, expected {}",
+                vector.len(),
+                meta.dimension
+            ));
+        }
+        let norm = dot(&vector, &vector).sqrt();
+        if (norm - 1.0).abs() > 1e-3 {
+            problems.push(format!(
+                "vector of node {node} is not normalized (norm {norm})"
+            ));
+        }
+    }
+    let count = ids.len() as u64;
+    match &meta {
+        None if count > 0 => problems.push(format!("{count} vectors but no vector metadata")),
+        None => {}
+        Some(meta) => {
+            if meta.count != count {
+                problems.push(format!(
+                    "vector metadata counts {}, found {count}",
+                    meta.count
+                ));
+            }
+            match meta.entry {
+                None if count > 0 => {
+                    problems.push("vectors exist but there is no entry point".into())
+                }
+                Some(entry) if !ids.contains(&entry.as_u128()) => {
+                    problems.push(format!("entry point {entry} has no vector"))
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut dangling = 0u64;
+    for item in links.range((ns, 0u128, 0u8)..).map_err(storage)? {
+        let (key, value) = item.map_err(storage)?;
+        let (key_ns, id, layer) = key.value();
+        if key_ns != ns {
+            break;
+        }
+        let node = NodeId::from_u128(id);
+        if !ids.contains(&id) {
+            problems.push(format!(
+                "links of node {node} without a vector, layer {layer}"
+            ));
+        }
+        if layer > level_of(node) {
+            problems.push(format!(
+                "links of node {node} on layer {layer}, above its level"
+            ));
+        }
+        dangling += bytes_links(value.value())
+            .iter()
+            .filter(|neighbor| !ids.contains(neighbor))
+            .count() as u64;
+    }
+
+    if let Some(entry) = meta.as_ref().and_then(|meta| meta.entry)
+        && ids.contains(&entry.as_u128())
+    {
+        let mut seen = HashSet::from([entry.as_u128()]);
+        let mut stack = vec![entry.as_u128()];
+        while let Some(id) = stack.pop() {
+            let neighbors = links
+                .get((ns, id, 0u8))
+                .map_err(storage)?
+                .map(|guard| bytes_links(guard.value()))
+                .unwrap_or_default();
+            for neighbor in neighbors {
+                if ids.contains(&neighbor) && seen.insert(neighbor) {
+                    stack.push(neighbor);
+                }
+            }
+        }
+        if (seen.len() as u64) < count {
+            problems.push(format!(
+                "{} of {count} vectors cannot be reached from the entry point",
+                count - seen.len() as u64
+            ));
+        }
+    }
+    Ok((count, dangling))
 }

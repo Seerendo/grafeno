@@ -27,7 +27,8 @@ before(async () => {
     let output = "";
     server.stderr!.on("data", (chunk: Buffer) => {
       output += chunk.toString();
-      const match = output.match(/listening on (http:\/\/\S+)/);
+      // Wait for the whole line: a chunk can end in the middle of the port.
+      const match = output.match(/listening on (http:\/\/\S+)\r?\n/);
       if (match) resolve(match[1]);
     });
     server.once("exit", (code) => reject(new Error(`grafeno exited with ${code}: ${output}`)));
@@ -105,6 +106,46 @@ test("recall and context", async () => {
   assert.equal(invalidated.valid_to, Date.UTC(2026, 5, 1) * 1000);
   assert.equal((await memory.neighbors(refs.$ana, { validAt: "2026-07-01" })).length, 0);
   assert.equal((await memory.neighbors(refs.$ana, { validAt: "2026-03-01" })).length, 1);
+});
+
+test("administration: namespaces, stats, pages, check, export and import", async () => {
+  const grafeno = new Grafeno({ url, token });
+  const admin = grafeno.namespace("admin-test");
+  await admin.batch([
+    ...[0, 1, 2, 3, 4].map((i) => ({
+      op: "create_node" as const,
+      ref: `$n${i}`,
+      node: { labels: ["N"], text: `item number ${i}` },
+    })),
+    { op: "create_edge", edge: { from: "$n0", label: "next", to: "$n1" } },
+  ]);
+
+  const names = (await grafeno.namespaces()).map((info) => info.name);
+  assert.ok(names.includes("admin-test"));
+  const stats = await admin.stats();
+  assert.equal(stats.nodes, 5);
+  assert.equal(stats.node_labels.N, 5);
+  assert.equal(stats.texts, 5);
+
+  const page = await admin.listNodes({ limit: 2 });
+  assert.equal(page.items.length, 2);
+  assert.ok(page.next);
+  const all = [];
+  for await (const node of admin.allNodes({ limit: 2 })) all.push(node.id);
+  assert.equal(new Set(all).size, 5);
+  assert.equal((await admin.listEdges({ label: "next" })).items.length, 1);
+
+  assert.deepEqual((await admin.check()).problems, []);
+  assert.equal((await admin.rebuild()).nodes, 5);
+
+  const dump = await grafeno.export(["admin-test"]);
+  assert.equal(dump.trim().split("\n").length, 7);
+  await admin.batch([{ op: "delete_node", id: all[0] }]);
+  assert.equal((await admin.stats()).nodes, 4);
+  const imported = await grafeno.import(dump);
+  assert.deepEqual(imported, { namespaces: 1, nodes: 5, edges: 1 });
+  assert.equal((await admin.stats()).nodes, 5);
+  await assert.rejects(grafeno.import("garbage"), { status: 400 });
 });
 
 test("errors carry status and code", async () => {

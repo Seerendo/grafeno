@@ -16,6 +16,10 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
 - **Phase 3, server:** the `grafeno` binary with an HTTP API (`grafeno serve`)
   and an MCP server for agents (`grafeno mcp`), a TypeScript client and a
   Docker image. See [crates/grafeno-server](crates/grafeno-server/README.md).
+- **Phase 4, foundations and validation:** namespaces and statistics, paged
+  listings, integrity check and index rebuild, export/import, and property,
+  durability and concurrency tests plus benchmarks
+  ([docs/benchmarks.md](docs/benchmarks.md)).
 
 Give an agent long-term memory over MCP, for example in Claude Code:
 

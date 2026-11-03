@@ -22,6 +22,25 @@ A database file can be open in only one process at a time, so an HTTP server
 and an MCP server cannot share a file. Use `--memory` for a throwaway
 in-memory database.
 
+Administration commands open the file directly (stop the server first):
+
+| Command                                   | What it does                                                   |
+| ----------------------------------------- | -------------------------------------------------------------- |
+| `grafeno namespaces --db F`               | Namespaces with their node and edge counts.                    |
+| `grafeno stats --db F [-n NS]...`         | Statistics as JSON: counts per label, texts, vectors.          |
+| `grafeno check --db F [-n NS]...`         | Integrity check; exits with an error if anything is wrong.     |
+| `grafeno rebuild --db F (-n NS... \| --all)` | Rebuilds indexes and counters from the records.             |
+| `grafeno export --db F [-n NS]... [-o FILE]` | JSON Lines export (standard output by default).             |
+| `grafeno import --db F FILE`              | Imports an export (`-` reads standard input), all or nothing.  |
+
+```bash
+grafeno export --db memory.redb -o backup.jsonl
+```
+
+```bash
+grafeno import --db restored.redb backup.jsonl
+```
+
 | Option        | Environment         | Default            | Command         |
 | ------------- | ------------------- | ------------------ | --------------- |
 | `--db`        | `GRAFENO_DB`        | `grafeno.redb`     | `serve`, `mcp`  |
@@ -58,8 +77,15 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | Method   | Path                                  | Body / query                                            | Returns                       |
 | -------- | ------------------------------------- | ------------------------------------------------------- | ----------------------------- |
 | `GET`    | `/health`                             |                                                         | `{status, version}`           |
+| `GET`    | `/v1/namespaces`                      |                                                         | `[{name, nodes, edges}]`      |
+| `GET`    | `/v1/export`                          | `?ns=a,b` (all by default)                              | JSON Lines                    |
+| `POST`   | `/v1/import`                          | JSON Lines (up to 1 GiB)                                | `{namespaces, nodes, edges}`  |
+| `GET`    | `/v1/{ns}/stats`                      |                                                         | statistics                    |
+| `GET`    | `/v1/{ns}/check`                      |                                                         | `{…, problems}`               |
+| `POST`   | `/v1/{ns}/rebuild`                    |                                                         | rebuild report                |
 | `POST`   | `/v1/{ns}/nodes`                      | node (with `id`: upsert)                                | `{id, created}`               |
-| `GET`    | `/v1/{ns}/nodes`                      | `?label=`                                               | nodes                         |
+| `GET`    | `/v1/{ns}/nodes`                      | `?label=&after=&limit=`                                 | `{items, next}`               |
+| `GET`    | `/v1/{ns}/edges`                      | `?label=&after=&limit=`                                 | `{items, next}`               |
 | `GET`    | `/v1/{ns}/nodes/{id}`                 |                                                         | node with `text`              |
 | `PUT`    | `/v1/{ns}/nodes/{id}`                 | node                                                    | `{id, created}`               |
 | `PATCH`  | `/v1/{ns}/nodes/{id}`                 | patch                                                   | node with `text`              |
@@ -79,6 +105,8 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `POST`   | `/v1/{ns}/context`                    | recall query + `{budget, fact_share, max_facts, facts}` | `{items, facts, tokens, rendered}` |
 | `POST`   | `/v1/{ns}/batch`                      | `{ops}`                                                 | `{results, refs}`             |
 
+- **Listings** return up to `limit` items (default 100, at most 1000) in id
+  order; when `next` is set, pass it as `after` to get the following page.
 - **node**: `{labels, props?, sources?, text?, embedding?}`. `PUT` and upserts
   replace the whole node; a missing `text` or `embedding` is removed, edges
   are kept.

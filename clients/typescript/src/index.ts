@@ -177,6 +177,62 @@ export type BatchOp =
   | { op: "invalidate_edge"; id: Id; at: TimeInput }
   | { op: "retract_edge"; id: Id };
 
+/** A page of a listing; pass `next` as `after` to get the following one. */
+export interface Page<T> {
+  items: T[];
+  next: Id | null;
+}
+
+export interface ListOptions {
+  label?: string;
+  after?: Id;
+  /** 1 to 1000; default 100. */
+  limit?: number;
+}
+
+export interface NamespaceInfo {
+  name: string;
+  nodes: number;
+  edges: number;
+}
+
+export interface NamespaceStats extends NamespaceInfo {
+  node_labels: Record<string, number>;
+  edge_labels: Record<string, number>;
+  texts: number;
+  text_terms: number;
+  vectors: number;
+  vector_dimension: number | null;
+}
+
+export interface CheckReport {
+  namespace: string;
+  nodes: number;
+  edges: number;
+  texts: number;
+  vectors: number;
+  dangling_links: number;
+  /** Empty when the namespace is consistent. */
+  problems: string[];
+}
+
+export interface RebuildReport {
+  namespace: string;
+  nodes: number;
+  edges: number;
+  texts: number;
+  vectors: number;
+  dropped_edges: number;
+  dropped_texts: number;
+  dropped_vectors: number;
+}
+
+export interface DumpStats {
+  namespaces: number;
+  nodes: number;
+  edges: number;
+}
+
 export interface BatchResult {
   results: Record<string, unknown>[];
   /** The ids given to each `$name`. */
@@ -225,29 +281,66 @@ export class Grafeno {
     return this.request("GET", "/health");
   }
 
+  /** Every namespace that has nodes, in name order. */
+  namespaces(): Promise<NamespaceInfo[]> {
+    return this.request("GET", "/v1/namespaces");
+  }
+
+  /** A JSON Lines export of `namespaces` (all of them by default). */
+  async export(namespaces: string[] = []): Promise<string> {
+    const query = namespaces.length ? `?ns=${encodeURIComponent(namespaces.join(","))}` : "";
+    return this.#send("GET", `/v1/export${query}`).then((response) => response.text());
+  }
+
+  /** Imports a JSON Lines export in one transaction: all of it or nothing. */
+  async import(dump: string): Promise<DumpStats> {
+    const response = await this.#send("POST", "/v1/import", dump, "application/x-ndjson");
+    return (await response.json()) as DumpStats;
+  }
+
   /** Sends a request and parses the JSON response. */
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const response = await this.#send(
+      method,
+      path,
+      body === undefined ? undefined : JSON.stringify(body),
+      "application/json",
+    );
+    const text = await response.text();
+    return (text ? JSON.parse(text) : undefined) as T;
+  }
+
+  /** Sends a request; throws `GrafenoError` unless the response is a success. */
+  async #send(method: string, path: string, body?: string, contentType?: string): Promise<Response> {
     const headers: Record<string, string> = {};
-    if (body !== undefined) headers["content-type"] = "application/json";
+    if (body !== undefined && contentType) headers["content-type"] = contentType;
     if (this.#token) headers.authorization = `Bearer ${this.#token}`;
     let response: Response;
     try {
-      response = await this.#fetch(this.#url + path, {
-        method,
-        headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
+      response = await this.#fetch(this.#url + path, { method, headers, body });
     } catch (error) {
       throw new GrafenoError(0, "network", `request to Grafeno failed: ${String(error)}`);
     }
-    const text = await response.text();
-    const data: unknown = text ? JSON.parse(text) : undefined;
     if (!response.ok) {
-      const error = (data as { error?: { code?: string; message?: string } } | undefined)?.error;
-      throw new GrafenoError(response.status, error?.code ?? "http", error?.message ?? response.statusText);
+      const text = await response.text();
+      let error: { code?: string; message?: string } | undefined;
+      try {
+        error = (JSON.parse(text) as { error?: { code?: string; message?: string } }).error;
+      } catch {
+        error = undefined;
+      }
+      throw new GrafenoError(response.status, error?.code ?? "http", error?.message ?? (text || response.statusText));
     }
-    return data as T;
+    return response;
   }
+}
+
+function listQuery(options: ListOptions): string {
+  const params = new URLSearchParams();
+  if (options.label !== undefined) params.set("label", options.label);
+  if (options.after !== undefined) params.set("after", options.after);
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  return params.size ? `?${params}` : "";
 }
 
 export class Namespace {
@@ -281,10 +374,38 @@ export class Namespace {
     return this.#call("GET", `/nodes/${encodeURIComponent(id)}`);
   }
 
-  /** Every node of the namespace, or only those with `label`. */
-  listNodes(label?: string): Promise<Node[]> {
-    const query = label === undefined ? "" : `?label=${encodeURIComponent(label)}`;
-    return this.#call("GET", `/nodes${query}`);
+  /** A page of nodes in creation order, only those with `label` if given. */
+  listNodes(options: ListOptions = {}): Promise<Page<Node>> {
+    return this.#call("GET", `/nodes${listQuery(options)}`);
+  }
+
+  /** A page of edges (retracted ones included), only those with `label` if given. */
+  listEdges(options: ListOptions = {}): Promise<Page<Edge>> {
+    return this.#call("GET", `/edges${listQuery(options)}`);
+  }
+
+  /** Every node, following the pages. */
+  async *allNodes(options: Omit<ListOptions, "after"> = {}): AsyncGenerator<Node> {
+    let after: Id | undefined;
+    do {
+      const page = await this.listNodes({ ...options, after });
+      yield* page.items;
+      after = page.next ?? undefined;
+    } while (after);
+  }
+
+  stats(): Promise<NamespaceStats> {
+    return this.#call("GET", "/stats");
+  }
+
+  /** Checks that indexes and counters agree with the records. */
+  check(): Promise<CheckReport> {
+    return this.#call("GET", "/check");
+  }
+
+  /** Rebuilds the namespace's indexes and counters from its records. */
+  rebuild(): Promise<RebuildReport> {
+    return this.#call("POST", "/rebuild");
   }
 
   patchNode(id: Id, patch: NodePatch): Promise<NodeWithText> {

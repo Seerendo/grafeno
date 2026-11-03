@@ -1,5 +1,7 @@
 //! redb tables and the reads shared by read and write transactions.
 
+use std::ops::Bound;
+
 use grafeno_core::{EdgeId, Error, NodeId, Result};
 use redb::{ReadableTable, TableDefinition};
 use serde::Serialize;
@@ -129,6 +131,88 @@ pub(crate) fn nodes_with_label(
             break;
         }
         out.push(NodeId::from_u128(node));
+    }
+    Ok(out)
+}
+
+/// `key -> value`: database metadata, such as the schema version.
+pub(crate) const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
+/// `ns -> (nodes, edges)`
+pub(crate) const NS_COUNTS: TableDefinition<&str, (u64, u64)> =
+    TableDefinition::new("namespace_counts");
+/// `(ns, label) -> nodes with that label`
+pub(crate) const LABEL_COUNTS: TableDefinition<CountKey, u64> =
+    TableDefinition::new("label_counts");
+/// `(ns, label) -> edges with that label`
+pub(crate) const EDGE_LABEL_COUNTS: TableDefinition<CountKey, u64> =
+    TableDefinition::new("edge_label_counts");
+
+pub(crate) type CountKey = (&'static str, &'static str);
+
+/// A key range with explicit bounds.
+type Bounds<K> = (Bound<K>, Bound<K>);
+
+/// Up to `limit` records of a namespace with an id greater than `after`, in
+/// id order, that pass `keep`.
+pub(crate) fn scan_page<R: DeserializeOwned>(
+    table: &impl ReadableTable<RecordKey, &'static [u8]>,
+    ns: &str,
+    after: Option<u128>,
+    limit: usize,
+    mut keep: impl FnMut(&R) -> bool,
+) -> Result<Vec<R>> {
+    let mut out = Vec::new();
+    if limit == 0 {
+        return Ok(out);
+    }
+    let lower = match after {
+        Some(id) => Bound::Excluded((ns, id)),
+        None => Bound::Included((ns, 0u128)),
+    };
+    let bounds: Bounds<(&str, u128)> = (lower, Bound::Unbounded);
+    for item in table.range(bounds).map_err(storage)? {
+        let (key, value) = item.map_err(storage)?;
+        if key.value().0 != ns {
+            break;
+        }
+        let record = decode(value.value())?;
+        if keep(&record) {
+            out.push(record);
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Up to `limit` ids of nodes with `label`, greater than `after`, in id order.
+pub(crate) fn label_page(
+    table: &impl ReadableTable<LabelKey, ()>,
+    ns: &str,
+    label: &str,
+    after: Option<u128>,
+    limit: usize,
+) -> Result<Vec<NodeId>> {
+    let mut out = Vec::new();
+    if limit == 0 {
+        return Ok(out);
+    }
+    let lower = match after {
+        Some(id) => Bound::Excluded((ns, label, id)),
+        None => Bound::Included((ns, label, 0u128)),
+    };
+    let bounds: Bounds<(&str, &str, u128)> = (lower, Bound::Unbounded);
+    for item in table.range(bounds).map_err(storage)? {
+        let (key, _) = item.map_err(storage)?;
+        let (key_ns, key_label, node) = key.value();
+        if key_ns != ns || key_label != label {
+            break;
+        }
+        out.push(NodeId::from_u128(node));
+        if out.len() >= limit {
+            break;
+        }
     }
     Ok(out)
 }

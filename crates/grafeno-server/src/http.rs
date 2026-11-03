@@ -42,6 +42,12 @@ pub async fn serve(state: AppState, addr: SocketAddr) -> std::io::Result<()> {
 
 pub fn router(state: AppState) -> Router {
     let v1 = Router::new()
+        .route("/namespaces", get(namespaces))
+        .route("/export", get(export))
+        .route("/import", post(import))
+        .route("/{ns}/stats", get(stats))
+        .route("/{ns}/check", get(check))
+        .route("/{ns}/rebuild", post(rebuild))
         .route("/{ns}/nodes", get(list_nodes).post(create_node))
         .route(
             "/{ns}/nodes/{id}",
@@ -51,7 +57,7 @@ pub fn router(state: AppState) -> Router {
                 .delete(delete_node),
         )
         .route("/{ns}/nodes/{id}/neighbors", get(neighbors))
-        .route("/{ns}/edges", post(create_edge))
+        .route("/{ns}/edges", get(list_edges).post(create_edge))
         .route("/{ns}/edges/{id}", get(get_edge).delete(delete_edge))
         .route("/{ns}/edges/{id}/invalidate", post(invalidate_edge))
         .route("/{ns}/edges/{id}/retract", post(retract_edge))
@@ -266,31 +272,68 @@ async fn put_node(
     Ok((status, Json(Upserted { id, created })))
 }
 
+const DEFAULT_PAGE: usize = 100;
+const MAX_PAGE: usize = 1_000;
+
 #[derive(Deserialize)]
 struct ListParams {
     label: Option<String>,
+    /// The `next` value of the previous page.
+    after: Option<String>,
+    limit: Option<usize>,
+}
+
+impl ListParams {
+    fn limit(&self) -> usize {
+        self.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE)
+    }
+}
+
+/// A page of a listing. `next` is set when there may be more: pass it as
+/// `after` to get them.
+#[derive(Serialize)]
+struct Page<T> {
+    items: Vec<T>,
+    next: Option<String>,
+}
+
+impl<T> Page<T> {
+    fn new(items: Vec<T>, limit: usize, id: impl Fn(&T) -> String) -> Self {
+        let next = (items.len() == limit)
+            .then(|| items.last().map(id))
+            .flatten();
+        Self { items, next }
+    }
 }
 
 async fn list_nodes(
     State(state): State<AppState>,
     Path(ns): Path<String>,
     Params(params): Params<ListParams>,
-) -> ApiResult<Json<Vec<grafeno::Node>>> {
+) -> ApiResult<Json<Page<grafeno::Node>>> {
+    let limit = params.limit();
+    let after = params.after.as_deref().map(parse_id).transpose()?;
     let nodes = blocking(&state, move |db| {
-        let read = db.begin_read()?;
-        match params.label {
-            None => read.nodes(&ns),
-            Some(label) => {
-                let mut nodes = Vec::new();
-                for id in read.nodes_with_label(&ns, &label)? {
-                    nodes.extend(read.node(&ns, id)?);
-                }
-                Ok(nodes)
-            }
-        }
+        db.begin_read()?
+            .nodes_page(&ns, params.label.as_deref(), after, limit)
     })
     .await?;
-    Ok(Json(nodes))
+    Ok(Json(Page::new(nodes, limit, |node| node.id.to_string())))
+}
+
+async fn list_edges(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Params(params): Params<ListParams>,
+) -> ApiResult<Json<Page<grafeno::Edge>>> {
+    let limit = params.limit();
+    let after = params.after.as_deref().map(parse_edge_id).transpose()?;
+    let edges = blocking(&state, move |db| {
+        db.begin_read()?
+            .edges_page(&ns, params.label.as_deref(), after, limit)
+    })
+    .await?;
+    Ok(Json(Page::new(edges, limit, |edge| edge.id.to_string())))
 }
 
 async fn get_node(
@@ -820,4 +863,76 @@ async fn batch(
             Err(api_error)
         }
     }
+}
+
+// ---------------------------------------------------------------- administration
+
+const IMPORT_LIMIT: usize = 1024 * 1024 * 1024;
+
+async fn namespaces(State(state): State<AppState>) -> ApiResult<Json<Vec<grafeno::NamespaceInfo>>> {
+    let namespaces = blocking(&state, |db| db.begin_read()?.namespaces()).await?;
+    Ok(Json(namespaces))
+}
+
+async fn stats(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+) -> ApiResult<Json<grafeno::NamespaceStats>> {
+    let stats = blocking(&state, move |db| db.begin_read()?.stats(&ns)).await?;
+    Ok(Json(stats))
+}
+
+async fn check(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+) -> ApiResult<Json<grafeno::CheckReport>> {
+    let report = blocking(&state, move |db| db.begin_read()?.check(&ns)).await?;
+    Ok(Json(report))
+}
+
+async fn rebuild(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+) -> ApiResult<Json<grafeno::RebuildReport>> {
+    let report = blocking(&state, move |db| db.write(|tx| tx.rebuild_indexes(&ns))).await?;
+    Ok(Json(report))
+}
+
+#[derive(Deserialize)]
+struct ExportParams {
+    /// Comma-separated namespaces; all of them when absent.
+    ns: Option<String>,
+}
+
+/// The whole export as JSON Lines, from one consistent snapshot.
+async fn export(
+    State(state): State<AppState>,
+    Params(params): Params<ExportParams>,
+) -> ApiResult<Response> {
+    let namespaces: Vec<String> = params
+        .ns
+        .iter()
+        .flat_map(|names| names.split(','))
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let body = blocking(&state, move |db| {
+        let mut body = Vec::new();
+        db.begin_read()?.export(&namespaces, &mut body)?;
+        Ok(body)
+    })
+    .await?;
+    Ok(([(header::CONTENT_TYPE, "application/x-ndjson")], body).into_response())
+}
+
+/// Imports a JSON Lines export (up to 1 GiB) in one transaction.
+async fn import(
+    State(state): State<AppState>,
+    request: Request,
+) -> ApiResult<Json<grafeno::DumpStats>> {
+    let body = axum::body::to_bytes(request.into_body(), IMPORT_LIMIT)
+        .await
+        .map_err(|error| ApiError::bad_request(format!("cannot read the export: {error}")))?;
+    let stats = blocking(&state, move |db| db.import(body.as_ref())).await?;
+    Ok(Json(stats))
 }

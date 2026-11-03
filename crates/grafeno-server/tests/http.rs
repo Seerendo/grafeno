@@ -224,10 +224,128 @@ async fn batch_is_atomic_and_resolves_refs() {
             .starts_with("operation 1:")
     );
     let (_, nodes) = call(&app, "GET", "/v1/vault/nodes", None).await;
-    assert_eq!(nodes.as_array().unwrap().len(), 2);
+    assert_eq!(nodes["items"].as_array().unwrap().len(), 2);
+    assert!(nodes["next"].is_null());
 
     let (_, tagged) = call(&app, "GET", "/v1/vault/nodes?label=Tag", None).await;
-    assert_eq!(tagged[0]["id"], tag.as_str());
+    assert_eq!(tagged["items"][0]["id"], tag.as_str());
+}
+
+#[tokio::test]
+async fn listings_are_paged() {
+    let app = app(None);
+    let ops: Vec<Value> = (0..5)
+        .map(|i| json!({ "op": "create_node", "ref": format!("$n{i}"), "node": { "labels": ["N"] } }))
+        .chain((0..4).map(|i| {
+            json!({ "op": "create_edge", "edge": { "from": format!("$n{i}"), "label": "next", "to": format!("$n{}", i + 1) } })
+        }))
+        .collect();
+    call(&app, "POST", "/v1/p/batch", Some(json!({ "ops": ops }))).await;
+
+    let (_, first) = call(&app, "GET", "/v1/p/nodes?limit=2", None).await;
+    assert_eq!(first["items"].as_array().unwrap().len(), 2);
+    let next = first["next"].as_str().unwrap().to_owned();
+    assert_eq!(next, first["items"][1]["id"].as_str().unwrap());
+    let (_, second) = call(
+        &app,
+        "GET",
+        &format!("/v1/p/nodes?limit=2&after={next}"),
+        None,
+    )
+    .await;
+    assert_ne!(second["items"][0]["id"], first["items"][0]["id"]);
+    let (_, last) = call(
+        &app,
+        "GET",
+        &format!("/v1/p/nodes?limit=4&after={next}"),
+        None,
+    )
+    .await;
+    assert_eq!(last["items"].as_array().unwrap().len(), 3);
+    assert!(last["next"].is_null());
+
+    let (_, edges) = call(&app, "GET", "/v1/p/edges?label=next&limit=10", None).await;
+    assert_eq!(edges["items"].as_array().unwrap().len(), 4);
+    let (_, none) = call(&app, "GET", "/v1/p/edges?label=other", None).await;
+    assert!(none["items"].as_array().unwrap().is_empty());
+    let (status, _) = call(&app, "GET", "/v1/p/nodes?after=nope", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn administration_endpoints() {
+    let app = app(None);
+    let ops = json!({ "ops": [
+        { "op": "create_node", "ref": "$a", "node": { "labels": ["Person"], "props": { "name": "Ana" }, "text": "writes Rust", "embedding": [1.0, 0.0] } },
+        { "op": "create_node", "ref": "$b", "node": { "labels": ["Person"], "text": "reads Go" } },
+        { "op": "create_edge", "edge": { "from": "$a", "label": "knows", "to": "$b" } }
+    ]});
+    call(&app, "POST", "/v1/team/batch", Some(ops)).await;
+    call(
+        &app,
+        "POST",
+        "/v1/solo/nodes",
+        Some(json!({ "labels": ["Note"] })),
+    )
+    .await;
+
+    let (_, namespaces) = call(&app, "GET", "/v1/namespaces", None).await;
+    assert_eq!(
+        namespaces,
+        json!([{ "name": "solo", "nodes": 1, "edges": 0 }, { "name": "team", "nodes": 2, "edges": 1 }])
+    );
+    let (_, stats) = call(&app, "GET", "/v1/team/stats", None).await;
+    assert_eq!(stats["node_labels"]["Person"], 2);
+    assert_eq!(stats["vector_dimension"], 2);
+
+    let (_, report) = call(&app, "GET", "/v1/team/check", None).await;
+    assert_eq!(report["problems"], json!([]));
+    let (status, report) = call(&app, "POST", "/v1/team/rebuild", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(report["texts"], 2);
+
+    // Export one namespace and import it into another server.
+    let request = Request::builder()
+        .uri("/v1/export?ns=team")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "application/x-ndjson"
+    );
+    let dump = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(String::from_utf8(dump.to_vec()).unwrap().lines().count(), 4);
+
+    let other = self::app(None);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/import")
+        .body(Body::from(dump))
+        .unwrap();
+    let response = other.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let (_, namespaces) = call(&other, "GET", "/v1/namespaces", None).await;
+    assert_eq!(
+        namespaces,
+        json!([{ "name": "team", "nodes": 2, "edges": 1 }])
+    );
+    let (_, hits) = call(
+        &other,
+        "POST",
+        "/v1/team/search/text",
+        Some(json!({ "query": "rust" })),
+    )
+    .await;
+    assert_eq!(hits.as_array().unwrap().len(), 1);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/import")
+        .body(Body::from("not an export"))
+        .unwrap();
+    let response = other.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

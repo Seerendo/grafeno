@@ -1,14 +1,31 @@
+use std::collections::HashMap;
 use std::path::Path as FsPath;
 
 use grafeno_core::{Edge, EdgeId, Error, NewEdge, NewNode, Node, NodeId, Props, Result, Timestamp};
-use redb::{Database, ReadOnlyTable, ReadTransaction, ReadableDatabase, WriteTransaction};
+use redb::{
+    Database, ReadOnlyTable, ReadTransaction, ReadableDatabase, ReadableTable,
+    ReadableTableMetadata, WriteTransaction,
+};
 
+use crate::stats::{
+    NamespaceInfo, NamespaceStats, bump_edge_label, bump_namespace, bump_node_label, label_counts,
+    namespaces,
+};
 use crate::store::{
-    ADJ_IN, ADJ_OUT, AdjKey, EDGES, HNSW_LINKS, LabelKey, LinkKey, NODE_LABELS, NODES, POSTINGS,
-    PostingKey, RecordKey, TEXT_LENGTHS, TEXT_STATS, TEXTS, VECTOR_META, VECTORS, adjacency,
-    check_label, check_namespace, encode, nodes_with_label, read_record, scan_records, storage,
+    ADJ_IN, ADJ_OUT, AdjKey, CountKey, EDGE_LABEL_COUNTS, EDGES, HNSW_LINKS, LABEL_COUNTS,
+    LabelKey, LinkKey, META, NODE_LABELS, NODES, NS_COUNTS, POSTINGS, PostingKey, RecordKey,
+    TEXT_LENGTHS, TEXT_STATS, TEXTS, VECTOR_META, VECTORS, adjacency, check_label, check_namespace,
+    decode, encode, label_page, nodes_with_label, read_record, scan_page, scan_records, storage,
 };
 use crate::{Hit, text, vector};
+
+/// The version of the on-disk layout written by this build.
+///
+/// 1. Phases 1-3: graph, text and vector tables.
+/// 2. Adds the `meta` table and the namespace and label counters.
+pub const SCHEMA_VERSION: u64 = 2;
+
+const SCHEMA_KEY: &str = "schema_version";
 
 /// A Grafeno database: one file (or memory) holding many namespaces.
 ///
@@ -19,7 +36,8 @@ pub struct Grafeno {
 }
 
 impl Grafeno {
-    /// Opens the file, creating it if it does not exist.
+    /// Opens the file, creating it if it does not exist, and upgrades its
+    /// layout if it was written by an older version.
     pub fn open(path: impl AsRef<FsPath>) -> Result<Self> {
         Self::init(Database::create(path).map_err(storage)?)
     }
@@ -33,8 +51,8 @@ impl Grafeno {
     }
 
     fn init(db: Database) -> Result<Self> {
-        // Tables must exist before a read transaction can open them.
         let tx = db.begin_write().map_err(storage)?;
+        // Tables must exist before a read transaction can open them.
         tx.open_table(NODES).map_err(storage)?;
         tx.open_table(EDGES).map_err(storage)?;
         tx.open_table(ADJ_OUT).map_err(storage)?;
@@ -47,6 +65,44 @@ impl Grafeno {
         tx.open_table(VECTORS).map_err(storage)?;
         tx.open_table(HNSW_LINKS).map_err(storage)?;
         tx.open_table(VECTOR_META).map_err(storage)?;
+        tx.open_table(NS_COUNTS).map_err(storage)?;
+        tx.open_table(LABEL_COUNTS).map_err(storage)?;
+        tx.open_table(EDGE_LABEL_COUNTS).map_err(storage)?;
+
+        let stored = tx
+            .open_table(META)
+            .map_err(storage)?
+            .get(SCHEMA_KEY)
+            .map_err(storage)?
+            .map(|guard| guard.value());
+        let version = match stored {
+            Some(version) => version,
+            // Before version 2 there was no `meta` table: a database with
+            // nodes but no version is from version 1.
+            None if tx
+                .open_table(NODES)
+                .map_err(storage)?
+                .len()
+                .map_err(storage)?
+                > 0 =>
+            {
+                1
+            }
+            None => SCHEMA_VERSION,
+        };
+        if version > SCHEMA_VERSION {
+            return Err(Error::Invalid(format!(
+                "the database uses layout version {version}, newer than this Grafeno \
+                 (version {SCHEMA_VERSION}); upgrade Grafeno to open it"
+            )));
+        }
+        if version < 2 {
+            recount(&tx)?;
+        }
+        tx.open_table(META)
+            .map_err(storage)?
+            .insert(SCHEMA_KEY, SCHEMA_VERSION)
+            .map_err(storage)?;
         tx.commit().map_err(storage)?;
         Ok(Self { db })
     }
@@ -66,6 +122,9 @@ impl Grafeno {
             vectors: tx.open_table(VECTORS).map_err(storage)?,
             hnsw_links: tx.open_table(HNSW_LINKS).map_err(storage)?,
             vector_meta: tx.open_table(VECTOR_META).map_err(storage)?,
+            ns_counts: tx.open_table(NS_COUNTS).map_err(storage)?,
+            label_counts: tx.open_table(LABEL_COUNTS).map_err(storage)?,
+            edge_label_counts: tx.open_table(EDGE_LABEL_COUNTS).map_err(storage)?,
             _tx: tx,
         })
     }
@@ -93,6 +152,52 @@ impl Grafeno {
     }
 }
 
+/// Rebuilds every counter from the node and edge records.
+fn recount(tx: &WriteTransaction) -> Result<()> {
+    let mut namespaces: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut node_labels: HashMap<(String, String), u64> = HashMap::new();
+    let mut edge_labels: HashMap<(String, String), u64> = HashMap::new();
+    {
+        let nodes = tx.open_table(NODES).map_err(storage)?;
+        for item in nodes.iter().map_err(storage)? {
+            let (key, value) = item.map_err(storage)?;
+            let ns = key.value().0.to_owned();
+            let node: Node = decode(value.value())?;
+            namespaces.entry(ns.clone()).or_default().0 += 1;
+            for label in node.labels {
+                *node_labels.entry((ns.clone(), label)).or_default() += 1;
+            }
+        }
+        let edges = tx.open_table(EDGES).map_err(storage)?;
+        for item in edges.iter().map_err(storage)? {
+            let (key, value) = item.map_err(storage)?;
+            let ns = key.value().0.to_owned();
+            let edge: Edge = decode(value.value())?;
+            namespaces.entry(ns.clone()).or_default().1 += 1;
+            *edge_labels.entry((ns, edge.label)).or_default() += 1;
+        }
+    }
+    let mut table = tx.open_table(NS_COUNTS).map_err(storage)?;
+    table.retain(|_, _| false).map_err(storage)?;
+    for (ns, counts) in &namespaces {
+        table.insert(ns.as_str(), *counts).map_err(storage)?;
+    }
+    drop(table);
+    for (definition, counts) in [
+        (LABEL_COUNTS, &node_labels),
+        (EDGE_LABEL_COUNTS, &edge_labels),
+    ] {
+        let mut table = tx.open_table(definition).map_err(storage)?;
+        table.retain(|_, _| false).map_err(storage)?;
+        for ((ns, label), count) in counts {
+            table
+                .insert((ns.as_str(), label.as_str()), *count)
+                .map_err(storage)?;
+        }
+    }
+    Ok(())
+}
+
 /// A read transaction: a fixed snapshot of the database.
 pub struct ReadTx {
     pub(crate) nodes: ReadOnlyTable<RecordKey, &'static [u8]>,
@@ -100,13 +205,16 @@ pub struct ReadTx {
     pub(crate) out: ReadOnlyTable<AdjKey, u128>,
     pub(crate) inn: ReadOnlyTable<AdjKey, u128>,
     pub(crate) labels: ReadOnlyTable<LabelKey, ()>,
-    texts: ReadOnlyTable<RecordKey, &'static str>,
-    text_lengths: ReadOnlyTable<RecordKey, u32>,
-    postings: ReadOnlyTable<PostingKey, u32>,
-    text_stats: ReadOnlyTable<&'static str, (u64, u64)>,
-    vectors: ReadOnlyTable<RecordKey, &'static [u8]>,
-    hnsw_links: ReadOnlyTable<LinkKey, &'static [u8]>,
-    vector_meta: ReadOnlyTable<&'static str, &'static [u8]>,
+    pub(crate) texts: ReadOnlyTable<RecordKey, &'static str>,
+    pub(crate) text_lengths: ReadOnlyTable<RecordKey, u32>,
+    pub(crate) postings: ReadOnlyTable<PostingKey, u32>,
+    pub(crate) text_stats: ReadOnlyTable<&'static str, (u64, u64)>,
+    pub(crate) vectors: ReadOnlyTable<RecordKey, &'static [u8]>,
+    pub(crate) hnsw_links: ReadOnlyTable<LinkKey, &'static [u8]>,
+    pub(crate) vector_meta: ReadOnlyTable<&'static str, &'static [u8]>,
+    pub(crate) ns_counts: ReadOnlyTable<&'static str, (u64, u64)>,
+    pub(crate) label_counts: ReadOnlyTable<CountKey, u64>,
+    pub(crate) edge_label_counts: ReadOnlyTable<CountKey, u64>,
     _tx: ReadTransaction,
 }
 
@@ -119,17 +227,90 @@ impl ReadTx {
         read_record(&self.edges, ns, id.as_u128())
     }
 
+    /// Every node of the namespace. Prefer [`ReadTx::nodes_page`] for large ones.
     pub fn nodes(&self, ns: &str) -> Result<Vec<Node>> {
         scan_records(&self.nodes, ns)
     }
 
-    /// Every edge of the namespace, including retracted ones.
+    /// Every edge of the namespace, including retracted ones. Prefer
+    /// [`ReadTx::edges_page`] for large ones.
     pub fn edges(&self, ns: &str) -> Result<Vec<Edge>> {
         scan_records(&self.edges, ns)
     }
 
+    /// Up to `limit` nodes after the id `after`, in id (creation) order, only
+    /// those with `label` if given. Pass the last id back as `after` to get
+    /// the next page.
+    pub fn nodes_page(
+        &self,
+        ns: &str,
+        label: Option<&str>,
+        after: Option<NodeId>,
+        limit: usize,
+    ) -> Result<Vec<Node>> {
+        let after = after.map(NodeId::as_u128);
+        match label {
+            None => scan_page(&self.nodes, ns, after, limit, |_: &Node| true),
+            Some(label) => label_page(&self.labels, ns, label, after, limit)?
+                .into_iter()
+                .map(|id| self.node(ns, id)?.ok_or(Error::NodeNotFound(id)))
+                .collect(),
+        }
+    }
+
+    /// Up to `limit` edges after the id `after`, in id order, only those with
+    /// `label` if given (filtering scans the namespace's edges).
+    pub fn edges_page(
+        &self,
+        ns: &str,
+        label: Option<&str>,
+        after: Option<EdgeId>,
+        limit: usize,
+    ) -> Result<Vec<Edge>> {
+        scan_page(
+            &self.edges,
+            ns,
+            after.map(EdgeId::as_u128),
+            limit,
+            |edge: &Edge| label.is_none_or(|label| edge.label == label),
+        )
+    }
+
     pub fn nodes_with_label(&self, ns: &str, label: &str) -> Result<Vec<NodeId>> {
         nodes_with_label(&self.labels, ns, label)
+    }
+
+    /// Every namespace that has nodes, in name order.
+    pub fn namespaces(&self) -> Result<Vec<NamespaceInfo>> {
+        namespaces(&self.ns_counts)
+    }
+
+    pub fn stats(&self, ns: &str) -> Result<NamespaceStats> {
+        let (nodes, edges) = self
+            .ns_counts
+            .get(ns)
+            .map_err(storage)?
+            .map(|guard| guard.value())
+            .unwrap_or((0, 0));
+        let (texts, text_terms) = self
+            .text_stats
+            .get(ns)
+            .map_err(storage)?
+            .map(|guard| guard.value())
+            .unwrap_or((0, 0));
+        let meta = vector::read_meta(&self.vector_meta, ns)?;
+        let vectors = meta.as_ref().map_or(0, |meta| meta.count());
+        Ok(NamespaceStats {
+            name: ns.to_owned(),
+            nodes,
+            edges,
+            node_labels: label_counts(&self.label_counts, ns)?,
+            edge_labels: label_counts(&self.edge_label_counts, ns)?,
+            texts,
+            text_terms,
+            vectors,
+            vector_dimension: meta.filter(|_| vectors > 0).map(|meta| meta.dimension()),
+        })
     }
 
     /// The indexed text of a node.
@@ -182,7 +363,7 @@ impl ReadTx {
 
 /// A write transaction. Nothing is visible to others until `commit`.
 pub struct WriteTx {
-    tx: WriteTransaction,
+    pub(crate) tx: WriteTransaction,
 }
 
 impl WriteTx {
@@ -218,23 +399,9 @@ impl WriteTx {
     /// This lets a client keep its own ids and sync idempotently.
     pub fn upsert_node(&mut self, ns: &str, id: NodeId, new: NewNode) -> Result<bool> {
         check_namespace(ns)?;
-        if new.labels.is_empty() {
-            return Err(Error::Invalid("a node needs at least one label".into()));
-        }
-        new.labels.iter().try_for_each(|label| check_label(label))?;
-        let mut labels = new.labels;
-        labels.sort();
-        labels.dedup();
+        let labels = normalize_labels(new.labels)?;
         let now = Timestamp::now();
         let existing = self.node(ns, id)?;
-        if let Some(old) = &existing {
-            let mut index = self.tx.open_table(NODE_LABELS).map_err(storage)?;
-            for label in old.labels.iter().filter(|label| !labels.contains(label)) {
-                index
-                    .remove((ns, label.as_str(), id.as_u128()))
-                    .map_err(storage)?;
-            }
-        }
         let node = Node {
             id,
             labels,
@@ -243,20 +410,55 @@ impl WriteTx {
             created_at: existing.as_ref().map_or(now, |old| old.created_at),
             updated_at: now,
         };
-        self.put_node(ns, &node)?;
-        match &new.text {
+        self.put_node(
+            ns,
+            &node,
+            existing.as_ref().map(|old| old.labels.as_slice()),
+        )?;
+        self.replace_indexes(ns, id, new.text.as_deref(), new.embedding.as_deref())?;
+        Ok(existing.is_none())
+    }
+
+    /// Writes a node exactly as given, timestamps included, with its text and
+    /// embedding (replacing any previous ones). Used to import exports.
+    pub fn restore_node(
+        &mut self,
+        ns: &str,
+        mut node: Node,
+        text: Option<&str>,
+        embedding: Option<&[f32]>,
+    ) -> Result<()> {
+        check_namespace(ns)?;
+        node.labels = normalize_labels(node.labels)?;
+        let existing = self.node(ns, node.id)?;
+        self.put_node(
+            ns,
+            &node,
+            existing.as_ref().map(|old| old.labels.as_slice()),
+        )?;
+        self.replace_indexes(ns, node.id, text, embedding)
+    }
+
+    fn replace_indexes(
+        &mut self,
+        ns: &str,
+        id: NodeId,
+        text: Option<&str>,
+        embedding: Option<&[f32]>,
+    ) -> Result<()> {
+        match text {
             Some(text) => text::index(&self.tx, ns, id, text)?,
             None => {
                 text::remove(&self.tx, ns, id)?;
             }
         }
-        match &new.embedding {
+        match embedding {
             Some(embedding) => vector::insert(&self.tx, ns, id, embedding)?,
             None => {
                 vector::remove(&self.tx, ns, id)?;
             }
         }
-        Ok(existing.is_none())
+        Ok(())
     }
 
     /// Merges `props` into the node; a `null` value removes the property.
@@ -264,7 +466,8 @@ impl WriteTx {
         let mut node = self.node(ns, id)?.ok_or(Error::NodeNotFound(id))?;
         merge_props(&mut node.props, props);
         node.updated_at = Timestamp::now();
-        self.put_node(ns, &node)
+        let labels = node.labels.clone();
+        self.put_node(ns, &node, Some(&labels))
     }
 
     pub fn add_label(&mut self, ns: &str, id: NodeId, label: &str) -> Result<()> {
@@ -274,9 +477,10 @@ impl WriteTx {
             .labels
             .binary_search_by(|item| item.as_str().cmp(label))
         {
+            let old = node.labels.clone();
             node.labels.insert(at, label.to_owned());
             node.updated_at = Timestamp::now();
-            self.put_node(ns, &node)?;
+            self.put_node(ns, &node, Some(&old))?;
         }
         Ok(())
     }
@@ -290,11 +494,10 @@ impl WriteTx {
             if node.labels.len() == 1 {
                 return Err(Error::Invalid("a node needs at least one label".into()));
             }
+            let old = node.labels.clone();
             node.labels.remove(at);
             node.updated_at = Timestamp::now();
-            self.put_node(ns, &node)?;
-            let mut labels = self.tx.open_table(NODE_LABELS).map_err(storage)?;
-            labels.remove((ns, label, id.as_u128())).map_err(storage)?;
+            self.put_node(ns, &node, Some(&old))?;
         }
         Ok(())
     }
@@ -349,20 +552,16 @@ impl WriteTx {
                 .map_err(storage)?;
         }
         drop(labels);
+        for label in &node.labels {
+            bump_node_label(&self.tx, ns, label, -1)?;
+        }
         let mut nodes = self.tx.open_table(NODES).map_err(storage)?;
         nodes.remove((ns, id.as_u128())).map_err(storage)?;
-        Ok(())
+        drop(nodes);
+        bump_namespace(&self.tx, ns, -1, 0)
     }
 
     pub fn create_edge(&mut self, ns: &str, new: NewEdge) -> Result<EdgeId> {
-        check_namespace(ns)?;
-        check_label(&new.label)?;
-        check_interval(new.valid_from, new.valid_to)?;
-        for end in [new.from, new.to] {
-            if self.node(ns, end)?.is_none() {
-                return Err(Error::NodeNotFound(end));
-            }
-        }
         let edge = Edge {
             id: EdgeId::new(),
             label: new.label,
@@ -375,8 +574,28 @@ impl WriteTx {
             recorded_at: Timestamp::now(),
             expired_at: None,
         };
+        let id = edge.id;
+        self.restore_edge(ns, edge)?;
+        Ok(id)
+    }
+
+    /// Writes an edge exactly as given, timestamps included, replacing any
+    /// edge with its id. Both ends must exist. Used to import exports.
+    pub fn restore_edge(&mut self, ns: &str, edge: Edge) -> Result<()> {
+        check_namespace(ns)?;
+        check_label(&edge.label)?;
+        check_interval(edge.valid_from, edge.valid_to)?;
+        for end in [edge.from, edge.to] {
+            if self.node(ns, end)?.is_none() {
+                return Err(Error::NodeNotFound(end));
+            }
+        }
+        if self.edge(ns, edge.id)?.is_some() {
+            self.delete_edge(ns, edge.id)?;
+        }
         self.put_edge(ns, &edge)?;
-        Ok(edge.id)
+        bump_namespace(&self.tx, ns, 0, 1)?;
+        bump_edge_label(&self.tx, ns, &edge.label, 1)
     }
 
     /// Merges `props` into the edge; a `null` value removes the property.
@@ -445,25 +664,52 @@ impl WriteTx {
             .map_err(storage)?
             .remove((ns, edge_id))
             .map_err(storage)?;
-        Ok(())
+        bump_namespace(&self.tx, ns, 0, -1)?;
+        bump_edge_label(&self.tx, ns, label, -1)
     }
 
-    fn put_node(&mut self, ns: &str, node: &Node) -> Result<()> {
+    /// Writes the node record and brings the label index and counters from
+    /// `old_labels` (`None`: a new node) to the node's labels.
+    pub(crate) fn put_node(
+        &mut self,
+        ns: &str,
+        node: &Node,
+        old_labels: Option<&[String]>,
+    ) -> Result<()> {
         let bytes = encode(node)?;
         let id = node.id.as_u128();
-        let mut nodes = self.tx.open_table(NODES).map_err(storage)?;
-        nodes.insert((ns, id), bytes.as_slice()).map_err(storage)?;
-        drop(nodes);
-        let mut labels = self.tx.open_table(NODE_LABELS).map_err(storage)?;
-        for label in &node.labels {
-            labels
+        self.tx
+            .open_table(NODES)
+            .map_err(storage)?
+            .insert((ns, id), bytes.as_slice())
+            .map_err(storage)?;
+        let old = old_labels.unwrap_or_default();
+        let removed: Vec<&String> = old.iter().filter(|l| !node.labels.contains(l)).collect();
+        let added: Vec<&String> = node.labels.iter().filter(|l| !old.contains(l)).collect();
+        let mut index = self.tx.open_table(NODE_LABELS).map_err(storage)?;
+        for label in &removed {
+            index.remove((ns, label.as_str(), id)).map_err(storage)?;
+        }
+        for label in &added {
+            index
                 .insert((ns, label.as_str(), id), ())
                 .map_err(storage)?;
+        }
+        drop(index);
+        for label in removed {
+            bump_node_label(&self.tx, ns, label, -1)?;
+        }
+        for label in added {
+            bump_node_label(&self.tx, ns, label, 1)?;
+        }
+        if old_labels.is_none() {
+            bump_namespace(&self.tx, ns, 1, 0)?;
         }
         Ok(())
     }
 
-    fn put_edge(&mut self, ns: &str, edge: &Edge) -> Result<()> {
+    /// Writes the edge record and its adjacency entries (no counters).
+    pub(crate) fn put_edge(&mut self, ns: &str, edge: &Edge) -> Result<()> {
         let bytes = encode(edge)?;
         let (from, to, id) = (edge.from.as_u128(), edge.to.as_u128(), edge.id.as_u128());
         let label = edge.label.as_str();
@@ -486,6 +732,17 @@ impl WriteTx {
     }
 }
 
+fn normalize_labels(labels: Vec<String>) -> Result<Vec<String>> {
+    if labels.is_empty() {
+        return Err(Error::Invalid("a node needs at least one label".into()));
+    }
+    labels.iter().try_for_each(|label| check_label(label))?;
+    let mut labels = labels;
+    labels.sort();
+    labels.dedup();
+    Ok(labels)
+}
+
 fn merge_props(target: &mut Props, changes: Props) {
     for (key, value) in changes {
         if value.is_null() {
@@ -496,11 +753,76 @@ fn merge_props(target: &mut Props, changes: Props) {
     }
 }
 
-fn check_interval(from: Option<Timestamp>, to: Option<Timestamp>) -> Result<()> {
+pub(crate) fn check_interval(from: Option<Timestamp>, to: Option<Timestamp>) -> Result<()> {
     if let (Some(from), Some(to)) = (from, to)
         && to <= from
     {
         return Err(Error::Invalid("valid_to must be after valid_from".into()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grafeno_core::NewNode;
+
+    #[test]
+    fn version_1_databases_get_counters() {
+        let path = std::env::temp_dir().join(format!("grafeno-migration-{}.redb", NodeId::new()));
+        {
+            let db = Grafeno::open(&path).unwrap();
+            db.write(|tx| {
+                let a = tx.create_node("ns", NewNode::new("Person").label("Admin"))?;
+                let b = tx.create_node("ns", NewNode::new("Person"))?;
+                tx.create_edge("ns", NewEdge::new(a, "knows", b))?;
+                tx.create_node("other", NewNode::new("Note"))?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        {
+            // Turn it into a version 1 database: no `meta` and no counters.
+            let db = Database::create(&path).unwrap();
+            let tx = db.begin_write().unwrap();
+            tx.delete_table(META).unwrap();
+            tx.delete_table(NS_COUNTS).unwrap();
+            tx.delete_table(LABEL_COUNTS).unwrap();
+            tx.delete_table(EDGE_LABEL_COUNTS).unwrap();
+            tx.commit().unwrap();
+        }
+        {
+            let db = Grafeno::open(&path).unwrap();
+            let read = db.begin_read().unwrap();
+            let names: Vec<(String, u64, u64)> = read
+                .namespaces()
+                .unwrap()
+                .into_iter()
+                .map(|info| (info.name, info.nodes, info.edges))
+                .collect();
+            assert_eq!(names, vec![("ns".into(), 2, 1), ("other".into(), 1, 0)]);
+            let stats = read.stats("ns").unwrap();
+            assert_eq!(stats.node_labels["Person"], 2);
+            assert_eq!(stats.node_labels["Admin"], 1);
+            assert_eq!(stats.edge_labels["knows"], 1);
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn newer_layouts_are_refused() {
+        let path = std::env::temp_dir().join(format!("grafeno-future-{}.redb", NodeId::new()));
+        drop(Grafeno::open(&path).unwrap());
+        {
+            let db = Database::create(&path).unwrap();
+            let tx = db.begin_write().unwrap();
+            tx.open_table(META)
+                .unwrap()
+                .insert(SCHEMA_KEY, SCHEMA_VERSION + 1)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+        assert!(matches!(Grafeno::open(&path), Err(Error::Invalid(_))));
+        std::fs::remove_file(&path).unwrap();
+    }
 }

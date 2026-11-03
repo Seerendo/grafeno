@@ -210,6 +210,92 @@ pub(crate) fn search(
     Ok(hits)
 }
 
+/// Checks the text index of a namespace against its stored texts. Returns
+/// the number of indexed texts.
+pub(crate) fn check(
+    texts: &impl ReadableTable<RecordKey, &'static str>,
+    lengths: &impl ReadableTable<RecordKey, u32>,
+    postings: &impl ReadableTable<PostingKey, u32>,
+    stats: &impl ReadableTable<&'static str, (u64, u64)>,
+    ns: &str,
+    nodes: &std::collections::HashSet<u128>,
+    problems: &mut Vec<String>,
+) -> Result<u64> {
+    let (mut documents, mut total_terms, mut expected_postings) = (0u64, 0u64, 0u64);
+    for item in texts.range((ns, 0u128)..).map_err(storage)? {
+        let (key, value) = item.map_err(storage)?;
+        let (key_ns, id) = key.value();
+        if key_ns != ns {
+            break;
+        }
+        let node = NodeId::from_u128(id);
+        documents += 1;
+        if !nodes.contains(&id) {
+            problems.push(format!("text of missing node {node}"));
+        }
+        let terms = tokenize(value.value());
+        total_terms += terms.len() as u64;
+        let frequencies = term_frequencies(&terms);
+        expected_postings += frequencies.len() as u64;
+        let length = lengths.get((ns, id)).map_err(storage)?.map(|g| g.value());
+        if length != Some(terms.len() as u32) {
+            problems.push(format!(
+                "text length of node {node} is {length:?}, expected {}",
+                terms.len()
+            ));
+        }
+        for (term, frequency) in frequencies {
+            let stored = postings
+                .get((ns, term, id))
+                .map_err(storage)?
+                .map(|g| g.value());
+            if stored != Some(frequency) {
+                problems.push(format!(
+                    "posting {term:?} of node {node} is {stored:?}, expected {frequency}"
+                ));
+            }
+        }
+    }
+    let mut actual_postings = 0u64;
+    for item in postings.range((ns, "", 0u128)..).map_err(storage)? {
+        let (key, _) = item.map_err(storage)?;
+        if key.value().0 != ns {
+            break;
+        }
+        actual_postings += 1;
+    }
+    if actual_postings != expected_postings {
+        problems.push(format!(
+            "{actual_postings} postings in the text index, expected {expected_postings}"
+        ));
+    }
+    let mut actual_lengths = 0u64;
+    for item in lengths.range((ns, 0u128)..).map_err(storage)? {
+        let (key, _) = item.map_err(storage)?;
+        if key.value().0 != ns {
+            break;
+        }
+        actual_lengths += 1;
+    }
+    if actual_lengths != documents {
+        problems.push(format!(
+            "{actual_lengths} text lengths for {documents} texts"
+        ));
+    }
+    let counted = stats
+        .get(ns)
+        .map_err(storage)?
+        .map(|g| g.value())
+        .unwrap_or((0, 0));
+    if counted != (documents, total_terms) {
+        problems.push(format!(
+            "text statistics say {counted:?} (texts, terms), the index has {:?}",
+            (documents, total_terms)
+        ));
+    }
+    Ok(documents)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
