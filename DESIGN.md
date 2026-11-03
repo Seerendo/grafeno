@@ -43,8 +43,9 @@ grafeno/
 │   ├── grafeno           redb storage, transactions, traversals,          [phases 1-2]
 │   │                     full-text index (BM25), vector index (HNSW)
 │   ├── grafeno-memory    hybrid recall, token-budgeted context            [phase 2]
-│   ├── grafeno-server    HTTP/gRPC + MCP                                  [phase 3]
-│   └── grafeno-node      napi-rs bindings                                 [phase 3]
+│   └── grafeno-server    `grafeno` binary: HTTP API + MCP over stdio      [phase 3]
+└── clients/
+    └── typescript        `grafeno-client`, fetch-based HTTP client         [phase 3]
 ```
 
 The indexes live in the `grafeno` crate, not in a separate one, because they
@@ -133,16 +134,37 @@ query ─┬─ text ──────▶ BM25 ───┐
   their valid time. Tokens are estimated (4 characters per token) unless the
   client passes its model's tokenizer.
 
-### MCP (phase 3)
+### Server (phase 3)
 
-Planned tools: `remember` (store an episode or fact), `recall` (hybrid
-search), `relate` (create an edge), `forget` (invalidate or retract),
-`neighbors`, `path`, `context_for`.
+One binary, `grafeno`, with two modes. The endpoints, options and MCP setup
+are documented in [crates/grafeno-server/README.md](crates/grafeno-server/README.md).
+
+- **HTTP** (`grafeno serve`, axum): JSON under `/v1/{namespace}/…`, an
+  optional static bearer token, and engine calls on tokio's blocking pool
+  (redb is synchronous). `POST /batch` applies many operations in one
+  transaction, with `$name` references between them, so a client can sync a
+  note, its chunks and its links atomically. Clients may choose their own
+  node ids (`PUT /nodes/{id}`, `upsert_node`), which makes syncing idempotent.
+- **MCP** (`grafeno mcp`): newline-delimited JSON-RPC over stdio, written by
+  hand (a few hundred lines; no SDK dependency). Seven tools shaped for
+  language models: `remember`, `recall`, `context`, `relate`, `update`,
+  `forget` and `get_node`. Tool results use names and ISO dates rather than
+  raw records, and unnamed memories are named by the start of their text.
+- **Docker**: a two-stage image (Debian trixie), port 7810, data in `/data`.
+
+A database file is locked by the process that opens it, so the HTTP and MCP
+modes cannot share a file. An MCP mode that forwards to an HTTP server
+(`grafeno mcp --url`) would remove that limit.
+
+Node bindings (napi-rs) were left out: Grafito runs Grafeno as a sidecar
+container and talks HTTP, so a native addon would add per-platform builds
+without a current user. They remain possible for embedded use.
 
 ## Integration with Grafito
 
-- When a note syncs: a `Note` node + chunks with embeddings + edges for
-  `[[links]]` (`links_to`) and `#tags` (`tagged`). Namespace = the user's vault.
+- When a note syncs, one batch: upsert the `Note` node with Grafito's id,
+  replace its chunks and its edges for `[[links]]` (`links_to`) and `#tags`
+  (`tagged`). Namespace = the user's vault.
 - `search_notes` and the agent loop use `recall` / `context_for`.
 - The assistant keeps its own memory per user (preferences, facts), with
   provenance pointing to the conversation.
@@ -156,7 +178,8 @@ search), `relate` (create an edge), `forget` (invalidate or retract),
    k hops, shortest path, subgraph).
 2. **Retrieval** (done): full-text and vector indexes, hybrid recall,
    `context_for`.
-3. Server, MCP, Node bindings; Grafito as the first client.
+3. **Server** (done): HTTP API with atomic batches, MCP server, TypeScript
+   client, Docker image. Next: Grafito as the first client.
 4. Memory: consolidation, importance and decay, entity resolution.
 5. A Cypher/GQL subset, Python bindings, read replicas.
 
@@ -167,4 +190,7 @@ search), `relate` (create an edge), `forget` (invalidate or retract),
 - Binary record format (postcard, rkyv).
 - Whether Grafito's graph moves entirely to Grafeno or is only mirrored.
 - Filtered vector search (labels, ACL) inside HNSW instead of post-filtering.
-- Toolchain for phase 3: napi-rs on Windows works best with MSVC.
+- Authentication beyond one static token (per-namespace tokens, or trusting
+  the application in front, as Grafito does).
+- On Windows, building needs the MSVC toolchain (Visual Studio Build Tools):
+  tokio's `windows-sys` does not build with the self-contained GNU toolchain.

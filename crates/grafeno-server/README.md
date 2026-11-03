@@ -1,0 +1,152 @@
+# grafeno-server
+
+The `grafeno` binary serves a Grafeno database in one of two ways:
+
+- `grafeno serve`: a JSON HTTP API, for applications such as Grafito.
+- `grafeno mcp`: an MCP server over stdio, for agents (Claude Code, Claude
+  Desktop and any other MCP client).
+
+```bash
+cargo install --path crates/grafeno-server
+```
+
+```bash
+grafeno serve --db memory.redb --token change-me
+```
+
+```bash
+grafeno mcp --db ~/.grafeno/memory.redb --namespace me
+```
+
+A database file can be open in only one process at a time, so an HTTP server
+and an MCP server cannot share a file. Use `--memory` for a throwaway
+in-memory database.
+
+| Option        | Environment         | Default            | Command         |
+| ------------- | ------------------- | ------------------ | --------------- |
+| `--db`        | `GRAFENO_DB`        | `grafeno.redb`     | `serve`, `mcp`  |
+| `--memory`    |                     | off                | `serve`, `mcp`  |
+| `--addr`      | `GRAFENO_ADDR`      | `127.0.0.1:7810`   | `serve`         |
+| `--token`     | `GRAFENO_TOKEN`     | none (no auth)     | `serve`         |
+| `--namespace` | `GRAFENO_NAMESPACE` | `default`          | `mcp`           |
+
+## Docker
+
+```bash
+docker build -t grafeno .
+```
+
+```bash
+docker run -p 7810:7810 -v grafeno-data:/data -e GRAFENO_TOKEN=change-me grafeno
+```
+
+The image listens on `0.0.0.0:7810` and stores data in `/data`. Set a token
+whenever the port is reachable by anything but the application.
+
+## HTTP API
+
+All bodies are JSON. Everything under `/v1` needs `Authorization: Bearer
+<token>` when the server has a token. Errors look like
+`{"error": {"code": "not_found", "message": "…"}}`, with codes `bad_request`
+(malformed body), `invalid` (rejected input), `not_found`, `unauthorized` and
+`internal`.
+
+Ids are UUIDs. Times in responses are microseconds since the Unix epoch;
+requests accept either that or an ISO 8601 string (`2024-05-01`,
+`2024-05-01T10:30:00Z`).
+
+| Method   | Path                                  | Body / query                                            | Returns                       |
+| -------- | ------------------------------------- | ------------------------------------------------------- | ----------------------------- |
+| `GET`    | `/health`                             |                                                         | `{status, version}`           |
+| `POST`   | `/v1/{ns}/nodes`                      | node (with `id`: upsert)                                | `{id, created}`               |
+| `GET`    | `/v1/{ns}/nodes`                      | `?label=`                                               | nodes                         |
+| `GET`    | `/v1/{ns}/nodes/{id}`                 |                                                         | node with `text`              |
+| `PUT`    | `/v1/{ns}/nodes/{id}`                 | node                                                    | `{id, created}`               |
+| `PATCH`  | `/v1/{ns}/nodes/{id}`                 | patch                                                   | node with `text`              |
+| `DELETE` | `/v1/{ns}/nodes/{id}`                 |                                                         | 204                           |
+| `GET`    | `/v1/{ns}/nodes/{id}/neighbors`       | `?direction=&label=a,b&valid_at=&known_at=`             | `[{node, edge}]`              |
+| `POST`   | `/v1/{ns}/edges`                      | edge                                                    | `{id}`                        |
+| `GET`    | `/v1/{ns}/edges/{id}`                 |                                                         | edge                          |
+| `DELETE` | `/v1/{ns}/edges/{id}`                 |                                                         | 204                           |
+| `POST`   | `/v1/{ns}/edges/{id}/invalidate`      | `{at}`                                                  | edge                          |
+| `POST`   | `/v1/{ns}/edges/{id}/retract`         |                                                         | edge                          |
+| `POST`   | `/v1/{ns}/k-hop`                      | `{start, depth, direction, filter}`                     | `[{node, hops}]`              |
+| `POST`   | `/v1/{ns}/path`                       | `{from, to, max_depth, direction, filter}`              | `{path}` (or `null`)          |
+| `POST`   | `/v1/{ns}/subgraph`                   | `{seeds, depth, direction, filter}`                     | `{nodes, edges}`              |
+| `POST`   | `/v1/{ns}/search/text`                | `{query, limit}`                                        | `[{node, score}]`             |
+| `POST`   | `/v1/{ns}/search/vector`              | `{embedding, limit, ef}`                                | `[{node, score}]`             |
+| `POST`   | `/v1/{ns}/recall`                     | recall query                                            | `[{node, score, signals}]`    |
+| `POST`   | `/v1/{ns}/context`                    | recall query + `{budget, fact_share, max_facts, facts}` | `{items, facts, tokens, rendered}` |
+| `POST`   | `/v1/{ns}/batch`                      | `{ops}`                                                 | `{results, refs}`             |
+
+- **node**: `{labels, props?, sources?, text?, embedding?}`. `PUT` and upserts
+  replace the whole node; a missing `text` or `embedding` is removed, edges
+  are kept.
+- **patch**: `{props?, add_labels?, remove_labels?, text?, embedding?}`.
+  `props` is merged (`null` removes a key); `text: null` or
+  `embedding: null` removes them.
+- **edge**: `{from, label, to, props?, sources?, valid_from?, valid_to?}`.
+- **filter**: `{labels?, valid_at?, known_at?}`. Without `known_at`, retracted
+  edges are left out.
+- **recall query**: `{text?, embedding?, limit?, labels?, candidates?,
+  expand?}`, where `expand` is `true` (default), `false`, or
+  `{depth, direction, filter, decay, seeds}`.
+
+### Batches
+
+A batch runs in one transaction: if an operation fails, nothing is written
+and the error message starts with `operation N:`. Operations can name the
+nodes they create with `ref` (`"$name"`) and later operations can use that
+name wherever they take a node id. Operations: `create_node`, `upsert_node`
+(`node.id` required), `update_node` (`{id, patch}`), `delete_node`,
+`create_edge`, `delete_edge`, `delete_edges_from` (`{from, label?}`),
+`invalidate_edge` (`{id, at}`) and `retract_edge`.
+
+Syncing a note and replacing its links in one request:
+
+```json
+{ "ops": [
+  { "op": "upsert_node", "ref": "$note",
+    "node": { "id": "0190f5c2-7a3e-7cde-8f01-00000000000a", "labels": ["Note"],
+              "props": { "title": "Rust" }, "text": "The borrow checker…" } },
+  { "op": "delete_edges_from", "from": "$note", "label": "links_to" },
+  { "op": "create_edge", "edge": { "from": "$note", "label": "links_to",
+                                   "to": "0190f5c2-7a3e-7cde-8f01-00000000000b" } }
+] }
+```
+
+## MCP
+
+`grafeno mcp` speaks MCP (protocol versions 2025-06-18, 2025-03-26 and
+2024-11-05) over stdin and stdout, and logs to stderr. Its tools:
+
+| Tool       | What it does                                                                   |
+| ---------- | ------------------------------------------------------------------------------ |
+| `remember` | Stores a memory (text, optional name, labels and links to existing nodes).     |
+| `recall`   | Hybrid search; returns ids, names, snippets and why each result matched.       |
+| `context`  | Relevant memories and facts as compact text within a token budget.             |
+| `relate`   | Records a fact (edge) between two nodes, with optional valid dates.           |
+| `update`   | Replaces a node's text, renames it, merges properties or changes labels.      |
+| `forget`   | Invalidates (default), retracts or deletes a fact; deletes a node.            |
+| `get_node` | A node with its text, properties and connecting facts.                        |
+
+Every tool takes an optional `namespace`, which defaults to `--namespace`.
+
+Claude Code:
+
+```bash
+claude mcp add grafeno -- grafeno mcp --db ~/.grafeno/memory.redb --namespace me
+```
+
+Claude Desktop (`claude_desktop_config.json`) or other clients:
+
+```json
+{
+  "mcpServers": {
+    "grafeno": {
+      "command": "grafeno",
+      "args": ["mcp", "--db", "/path/to/memory.redb", "--namespace", "me"]
+    }
+  }
+}
+```

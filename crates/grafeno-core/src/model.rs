@@ -32,18 +32,21 @@ impl Node {
         self.props.get(key)
     }
 
-    /// A short human name: the `name`, `title` or `label` property, or the
-    /// first label and the start of the id.
-    pub fn display_name(&self) -> String {
+    /// The `name`, `title` or `label` property, if the node has one.
+    pub fn explicit_name(&self) -> Option<&str> {
         ["name", "title", "label"]
             .iter()
             .find_map(|key| self.prop(key).and_then(Value::as_str))
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                let label = self.labels.first().map(String::as_str).unwrap_or("Node");
-                let id = self.id.to_string();
-                format!("{label} {}", &id[id.len() - 8..])
-            })
+    }
+
+    /// A short human name: [`Node::explicit_name`], or the first label and
+    /// the start of the id.
+    pub fn display_name(&self) -> String {
+        self.explicit_name().map(str::to_owned).unwrap_or_else(|| {
+            let label = self.labels.first().map(String::as_str).unwrap_or("Node");
+            let id = self.id.to_string();
+            format!("{label} {}", &id[id.len() - 8..])
+        })
     }
 }
 

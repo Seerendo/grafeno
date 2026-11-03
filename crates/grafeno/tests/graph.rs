@@ -331,3 +331,94 @@ fn data_survives_reopening() {
     }
     std::fs::remove_file(&path).unwrap();
 }
+
+#[test]
+fn upsert_creates_then_replaces_with_client_ids() {
+    let db = Grafeno::in_memory().unwrap();
+    let id = NodeId::from_u128(0x0123_4567_89ab_4cde_8f01_2345_6789_abcd);
+    let other = note(&db, "Other");
+    let created = db
+        .write(|tx| {
+            let created = tx.upsert_node(
+                NS,
+                id,
+                NewNode::new("Note")
+                    .label("Draft")
+                    .prop("title", "First")
+                    .text("first version")
+                    .embedding(vec![1.0, 0.0]),
+            )?;
+            tx.create_edge(NS, NewEdge::new(id, "links_to", other))?;
+            Ok(created)
+        })
+        .unwrap();
+    assert!(created);
+    let created_at = db
+        .begin_read()
+        .unwrap()
+        .node(NS, id)
+        .unwrap()
+        .unwrap()
+        .created_at;
+
+    let created = db
+        .write(|tx| {
+            tx.upsert_node(
+                NS,
+                id,
+                NewNode::new("Note")
+                    .prop("title", "Second")
+                    .text("second version"),
+            )
+        })
+        .unwrap();
+    assert!(!created);
+
+    let read = db.begin_read().unwrap();
+    let node = read.node(NS, id).unwrap().unwrap();
+    assert_eq!(node.labels, vec!["Note"]);
+    assert_eq!(node.display_name(), "Second");
+    assert_eq!(node.created_at, created_at);
+    assert!(read.nodes_with_label(NS, "Draft").unwrap().is_empty());
+    assert!(read.search_text(NS, "first", 5).unwrap().is_empty());
+    assert_eq!(read.search_text(NS, "second", 5).unwrap()[0].node, id);
+    assert!(
+        read.embedding(NS, id).unwrap().is_none(),
+        "a missing embedding is removed"
+    );
+    assert_eq!(
+        read.neighbors(NS, id, Direction::Out, &EdgeFilter::any())
+            .unwrap()
+            .len(),
+        1,
+        "edges are kept"
+    );
+}
+
+#[test]
+fn delete_edges_from_replaces_derived_links() {
+    let db = Grafeno::in_memory().unwrap();
+    let (a, b, c) = (note(&db, "A"), note(&db, "B"), note(&db, "C"));
+    link(&db, a, b);
+    link(&db, a, c);
+    link(&db, b, a);
+    db.write(|tx| tx.create_edge(NS, NewEdge::new(a, "mentions", b)))
+        .unwrap();
+
+    let deleted = db
+        .write(|tx| tx.delete_edges_from(NS, a, Some("links_to")))
+        .unwrap();
+    assert_eq!(deleted, 2);
+    let read = db.begin_read().unwrap();
+    let out = read
+        .neighbors(NS, a, Direction::Out, &EdgeFilter::any())
+        .unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].edge.label, "mentions");
+    assert_eq!(
+        read.neighbors(NS, a, Direction::In, &EdgeFilter::any())
+            .unwrap()
+            .len(),
+        1
+    );
+}

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use grafeno::{Direction, Edge, EdgeFilter, EdgeId, Node, NodeId, ReadTx, Result};
+use serde::Serialize;
 
 use crate::{RecallQuery, recall};
 
@@ -49,7 +50,7 @@ impl ContextOptions {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ContextItem {
     pub node: NodeId,
     pub name: String,
@@ -62,7 +63,7 @@ pub struct ContextItem {
     pub truncated: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ContextFact {
     pub edge: EdgeId,
     pub from: NodeId,
@@ -73,7 +74,7 @@ pub struct ContextFact {
 }
 
 /// Recalled knowledge packed for a prompt.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Context {
     pub items: Vec<ContextItem>,
     pub facts: Vec<ContextFact>,
@@ -98,7 +99,14 @@ pub fn context_for(
 
     for recalled in recall(read, ns, query)? {
         let node = &recalled.node;
-        let name = node.display_name();
+        let mut text = item_body(read, ns, node)?;
+        let name = readable_name(node, &text);
+        // An unnamed item's name is the start of its own text: don't repeat it.
+        let heading = if node.explicit_name().is_some() || text.is_empty() {
+            name.clone()
+        } else {
+            String::new()
+        };
         let number = context.items.len() + 1;
         let header_cost = if context.items.is_empty() {
             count(MEMORY_HEADER)
@@ -106,18 +114,17 @@ pub fn context_for(
             0
         };
         let available = item_budget.saturating_sub(context.tokens + header_cost);
-        let mut text = item_body(read, ns, node)?;
 
-        let mut block = render_item(number, &name, &node.labels, &text);
+        let mut block = render_item(number, &heading, &node.labels, &text);
         let mut cost = count(&block);
         let mut truncated = false;
         if cost > available {
-            let frame = count(&render_item(number, &name, &node.labels, ""));
+            let frame = count(&render_item(number, &heading, &node.labels, ""));
             if text.is_empty() || available < frame + MIN_TRUNCATED_TOKENS {
                 continue;
             }
             text = truncate(&text, available - frame, count);
-            block = render_item(number, &name, &node.labels, &text);
+            block = render_item(number, &heading, &node.labels, &text);
             cost = count(&block);
             if cost > available {
                 continue;
@@ -187,18 +194,21 @@ fn add_facts(
         let from = name_of(read, ns, edge.from, &names, &mut other_names)?;
         let to = name_of(read, ns, edge.to, &names, &mut other_names)?;
         let line = format!("- {from} {} {to}{}\n", edge.label, validity(&edge));
-        let header_cost = if context.facts.is_empty() {
-            count(FACTS_HEADER)
+        // One blank line between the memories and the facts.
+        let rendered = &context.rendered;
+        let header = if !context.facts.is_empty() {
+            ""
+        } else if rendered.is_empty() || rendered.ends_with("\n\n") {
+            FACTS_HEADER.trim_start()
         } else {
-            0
+            FACTS_HEADER
         };
+        let header_cost = if header.is_empty() { 0 } else { count(header) };
         let cost = count(&line);
         if context.tokens + header_cost + cost > options.budget {
             continue;
         }
-        if header_cost > 0 {
-            context.rendered.push_str(FACTS_HEADER);
-        }
+        context.rendered.push_str(header);
         context.rendered.push_str(&line);
         context.tokens += header_cost + cost;
         context.facts.push(ContextFact {
@@ -222,12 +232,33 @@ fn name_of(
     if let Some(name) = names.get(&id).or_else(|| cache.get(&id)) {
         return Ok(name.clone());
     }
-    let name = read
-        .node(ns, id)?
-        .map(|node| node.display_name())
-        .unwrap_or_else(|| id.to_string());
+    let name = match read.node(ns, id)? {
+        Some(node) => {
+            let text = if node.explicit_name().is_some() {
+                String::new()
+            } else {
+                read.text(ns, id)?.unwrap_or_default()
+            };
+            readable_name(&node, &text)
+        }
+        None => id.to_string(),
+    };
     cache.insert(id, name.clone());
     Ok(name)
+}
+
+/// The node's explicit name, or else the start of its text in quotes (an
+/// unnamed memory reads better as "“Ana prefers answers…”" than by its id).
+fn readable_name(node: &Node, text: &str) -> String {
+    const NAME_CHARS: usize = 40;
+    if node.explicit_name().is_some() || text.trim().is_empty() {
+        return node.display_name();
+    }
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match text.char_indices().nth(NAME_CHARS) {
+        Some((end, _)) => format!("“{}…”", text[..end].trim_end()),
+        None => format!("“{text}”"),
+    }
 }
 
 fn validity(edge: &Edge) -> String {
@@ -257,10 +288,15 @@ fn item_body(read: &ReadTx, ns: &str, node: &Node) -> Result<String> {
 
 fn render_item(number: usize, name: &str, labels: &[String], body: &str) -> String {
     let labels = labels.join(", ");
-    if body.is_empty() {
-        format!("[{number}] {name} ({labels})\n")
+    let heading = if name.is_empty() {
+        format!("[{number}] ({labels})")
     } else {
-        format!("[{number}] {name} ({labels})\n{body}\n\n")
+        format!("[{number}] {name} ({labels})")
+    };
+    if body.is_empty() {
+        format!("{heading}\n")
+    } else {
+        format!("{heading}\n{body}\n\n")
     }
 }
 

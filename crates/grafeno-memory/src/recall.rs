@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use grafeno::{Direction, EdgeFilter, Node, NodeId, ReadTx, Result};
+use serde::Serialize;
 
 /// Reciprocal rank fusion constant (Cormack, Clarke and Büttcher, 2009).
 const RRF_K: f32 = 60.0;
@@ -90,14 +91,15 @@ impl RecallQuery {
 }
 
 /// Why a node was recalled. Ranks start at 1.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Signal {
     Text { rank: usize, score: f32 },
     Vector { rank: usize, similarity: f32 },
     Graph { seed: NodeId, hops: usize },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Recalled {
     pub node: Node,
     /// Fused score: comparable within one recall, not across queries.

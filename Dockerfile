@@ -1,0 +1,24 @@
+# Grafeno server image: `grafeno serve` on port 7810, data in /data.
+#
+#   docker build -t grafeno .
+#   docker run -p 7810:7810 -v grafeno-data:/data -e GRAFENO_TOKEN=change-me grafeno
+
+FROM rust:1-slim-trixie AS build
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked -p grafeno-server \
+    && cp target/release/grafeno /usr/local/bin/grafeno
+
+FROM debian:trixie-slim
+RUN useradd --system --uid 10001 --no-create-home grafeno \
+    && mkdir /data && chown grafeno /data
+COPY --from=build /usr/local/bin/grafeno /usr/local/bin/grafeno
+USER grafeno
+ENV GRAFENO_DB=/data/grafeno.redb \
+    GRAFENO_ADDR=0.0.0.0:7810
+VOLUME /data
+EXPOSE 7810
+ENTRYPOINT ["grafeno"]
+CMD ["serve"]

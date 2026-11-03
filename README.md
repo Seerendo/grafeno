@@ -13,6 +13,21 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
   transactions, neighbors, k hops, shortest path, subgraph.
 - **Phase 2, retrieval:** BM25 full-text index, HNSW vector index, hybrid
   recall (RRF + graph expansion) and `context_for`.
+- **Phase 3, server:** the `grafeno` binary with an HTTP API (`grafeno serve`)
+  and an MCP server for agents (`grafeno mcp`), a TypeScript client and a
+  Docker image. See [crates/grafeno-server](crates/grafeno-server/README.md).
+
+Give an agent long-term memory over MCP, for example in Claude Code:
+
+```bash
+cargo install --path crates/grafeno-server
+```
+
+```bash
+claude mcp add grafeno -- grafeno mcp --db ~/.grafeno/memory.redb
+```
+
+Or embed it as a library:
 
 ```rust
 use grafeno::{Grafeno, NewEdge, NewNode, Timestamp};
@@ -50,8 +65,15 @@ println!("{}", context.rendered);
 
 ## Development
 
+On Windows, install Visual Studio Build Tools (C++ workload) and use the MSVC
+Rust toolchain.
+
 ```bash
 cargo test
+```
+
+```bash
+cd clients/typescript && npm test
 ```
 
 ```bash
@@ -67,3 +89,5 @@ cargo run -p grafeno-memory --example context
 | `grafeno-core`   | Model: `Node`, `Edge`, UUID v7 ids, `Timestamp`              |
 | `grafeno`        | Database, transactions, traversals, BM25 and HNSW indexes     |
 | `grafeno-memory` | Hybrid recall and token-budgeted context                      |
+| `grafeno-server` | The `grafeno` binary: HTTP API and MCP server                 |
+| `clients/typescript` | `grafeno-client`, the TypeScript HTTP client              |

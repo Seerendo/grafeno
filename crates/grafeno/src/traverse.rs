@@ -5,14 +5,17 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use grafeno_core::{Edge, EdgeId, Error, Node, NodeId, Result, Timestamp};
 use redb::ReadOnlyTable;
+use serde::{Deserialize, Serialize};
 
 use crate::ReadTx;
 use crate::store::{AdjKey, adjacency};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Direction {
     Out,
     In,
+    #[default]
     Both,
 }
 
@@ -62,13 +65,13 @@ impl EdgeFilter {
 }
 
 /// A neighbor: the node at the other end and the edge that leads to it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Neighbor {
     pub node: NodeId,
     pub edge: Edge,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Path {
     /// From the origin to the target, both included.
     pub nodes: Vec<NodeId>,
@@ -76,7 +79,7 @@ pub struct Path {
     pub edges: Vec<EdgeId>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Subgraph {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,

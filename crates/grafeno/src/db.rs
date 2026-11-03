@@ -205,6 +205,18 @@ impl WriteTx {
     }
 
     pub fn create_node(&mut self, ns: &str, new: NewNode) -> Result<NodeId> {
+        let id = NodeId::new();
+        self.upsert_node(ns, id, new)?;
+        Ok(id)
+    }
+
+    /// Creates the node with the given id, or replaces it entirely if it
+    /// exists: labels, properties, sources, text and embedding (a missing
+    /// text or embedding is removed). Its edges and `created_at` are kept.
+    /// Returns whether the node was created.
+    ///
+    /// This lets a client keep its own ids and sync idempotently.
+    pub fn upsert_node(&mut self, ns: &str, id: NodeId, new: NewNode) -> Result<bool> {
         check_namespace(ns)?;
         if new.labels.is_empty() {
             return Err(Error::Invalid("a node needs at least one label".into()));
@@ -214,22 +226,37 @@ impl WriteTx {
         labels.sort();
         labels.dedup();
         let now = Timestamp::now();
+        let existing = self.node(ns, id)?;
+        if let Some(old) = &existing {
+            let mut index = self.tx.open_table(NODE_LABELS).map_err(storage)?;
+            for label in old.labels.iter().filter(|label| !labels.contains(label)) {
+                index
+                    .remove((ns, label.as_str(), id.as_u128()))
+                    .map_err(storage)?;
+            }
+        }
         let node = Node {
-            id: NodeId::new(),
+            id,
             labels,
             props: new.props,
             sources: new.sources,
-            created_at: now,
+            created_at: existing.as_ref().map_or(now, |old| old.created_at),
             updated_at: now,
         };
         self.put_node(ns, &node)?;
-        if let Some(text) = &new.text {
-            text::index(&self.tx, ns, node.id, text)?;
+        match &new.text {
+            Some(text) => text::index(&self.tx, ns, id, text)?,
+            None => {
+                text::remove(&self.tx, ns, id)?;
+            }
         }
-        if let Some(embedding) = &new.embedding {
-            vector::insert(&self.tx, ns, node.id, embedding)?;
+        match &new.embedding {
+            Some(embedding) => vector::insert(&self.tx, ns, id, embedding)?,
+            None => {
+                vector::remove(&self.tx, ns, id)?;
+            }
         }
-        Ok(node.id)
+        Ok(existing.is_none())
     }
 
     /// Merges `props` into the node; a `null` value removes the property.
@@ -376,6 +403,26 @@ impl WriteTx {
             self.put_edge(ns, &edge)?;
         }
         Ok(())
+    }
+
+    /// Deletes the outgoing edges of `from` (only those with `label`, if
+    /// given), without keeping history. Returns how many were deleted.
+    ///
+    /// Useful to replace derived edges, such as a note's links, on each sync.
+    pub fn delete_edges_from(
+        &mut self,
+        ns: &str,
+        from: NodeId,
+        label: Option<&str>,
+    ) -> Result<usize> {
+        let edges = {
+            let table = self.tx.open_table(ADJ_OUT).map_err(storage)?;
+            adjacency(&table, ns, from, label)?
+        };
+        for (edge, _) in &edges {
+            self.delete_edge(ns, *edge)?;
+        }
+        Ok(edges.len())
     }
 
     /// Deletes the edge without keeping history.

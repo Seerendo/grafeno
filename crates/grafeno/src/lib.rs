@@ -34,7 +34,7 @@ pub use traverse::{Direction, EdgeFilter, Neighbor, Path, Subgraph};
 
 /// A search result: a node and its score (BM25 for text, cosine similarity
 /// for vectors). Higher is better.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 pub struct Hit {
     pub node: NodeId,
     pub score: f32,

@@ -2,6 +2,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::{Error, Result};
+
 /// An instant in microseconds since the Unix epoch (UTC).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -30,6 +32,68 @@ impl Timestamp {
         self.0
     }
 
+    /// Parses an ISO 8601 date or date-time: `2024-05-01`,
+    /// `2024-05-01T10:30`, `2024-05-01T10:30:00.250Z` or
+    /// `2024-05-01T10:30:00-05:00`. Without an offset, UTC is assumed.
+    pub fn parse(text: &str) -> Result<Self> {
+        let invalid = || Error::Invalid(format!("invalid date {text:?}, expected ISO 8601"));
+        let number = |part: &str| -> Result<i64> {
+            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(invalid());
+            }
+            part.parse().map_err(|_| invalid())
+        };
+        let (date, time) = match text.split_once(['T', ' ']) {
+            Some((date, time)) => (date, Some(time)),
+            None => (text, None),
+        };
+        let mut parts = date.splitn(3, '-');
+        let (Some(year), Some(month), Some(day)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return Err(invalid());
+        };
+        let (year, month, day) = (number(year)?, number(month)?, number(day)?);
+        if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
+            return Err(invalid());
+        }
+        let mut micros = days_from_civil(year, month, day) * 86_400_000_000;
+
+        if let Some(time) = time {
+            let (clock, offset) = if let Some(clock) = time.strip_suffix(['Z', 'z']) {
+                (clock, 0)
+            } else if let Some(at) = time.rfind(['+', '-']) {
+                let (clock, offset) = time.split_at(at);
+                let sign = if offset.starts_with('-') { -1 } else { 1 };
+                let (hours, minutes) = offset[1..].split_once(':').ok_or_else(invalid)?;
+                let (hours, minutes) = (number(hours)?, number(minutes)?);
+                if hours > 23 || minutes > 59 {
+                    return Err(invalid());
+                }
+                (clock, sign * (hours * 60 + minutes) * 60_000_000)
+            } else {
+                (time, 0)
+            };
+            let (clock, fraction) = match clock.split_once('.') {
+                Some((clock, fraction)) => (clock, Some(fraction)),
+                None => (clock, None),
+            };
+            let mut fields = clock.split(':');
+            let hours = number(fields.next().ok_or_else(invalid)?)?;
+            let minutes = number(fields.next().ok_or_else(invalid)?)?;
+            let seconds = fields.next().map(number).transpose()?.unwrap_or(0);
+            if fields.next().is_some() || hours > 23 || minutes > 59 || seconds > 59 {
+                return Err(invalid());
+            }
+            micros += ((hours * 60 + minutes) * 60 + seconds) * 1_000_000 - offset;
+            if let Some(fraction) = fraction {
+                number(fraction)?;
+                let digits: String = fraction.chars().chain("000000".chars()).take(6).collect();
+                micros += number(&digits)?;
+            }
+        }
+        Ok(Self(micros))
+    }
+
     /// The UTC calendar date as `YYYY-MM-DD` (proleptic Gregorian).
     pub fn date(self) -> String {
         // Howard Hinnant's `civil_from_days`.
@@ -47,9 +111,63 @@ impl Timestamp {
     }
 }
 
+/// Days since 1970-01-01 (Howard Hinnant's `days_from_civil`).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = year - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        2 if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_iso_dates() {
+        let parse = |text| Timestamp::parse(text).unwrap();
+        assert_eq!(parse("1970-01-01"), Timestamp::from_secs(0));
+        assert_eq!(parse("2026-11-03"), Timestamp::from_secs(1_793_664_000));
+        assert_eq!(
+            parse("2026-11-03T01:02:03Z"),
+            Timestamp::from_secs(1_793_667_723)
+        );
+        assert_eq!(
+            parse("2026-11-03T01:02"),
+            Timestamp::from_secs(1_793_667_720)
+        );
+        assert_eq!(
+            parse("2026-11-03T01:02:03-05:00"),
+            Timestamp::from_secs(1_793_685_723)
+        );
+        assert_eq!(
+            parse("1970-01-01T00:00:00.25Z"),
+            Timestamp::from_micros(250_000)
+        );
+        for bad in [
+            "",
+            "2026-13-01",
+            "2026-02-29",
+            "2026-11-03T25:00",
+            "yesterday",
+            "2026-11",
+        ] {
+            assert!(Timestamp::parse(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(parse(&parse("2000-02-29").date()), parse("2000-02-29"));
+    }
 
     #[test]
     fn formats_dates() {

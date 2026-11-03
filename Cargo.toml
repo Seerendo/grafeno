@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/grafeno-core", "crates/grafeno", "crates/grafeno-memory"]
+members = ["crates/grafeno-core", "crates/grafeno", "crates/grafeno-memory", "crates/grafeno-server"]
 
 [workspace.package]
 version = "0.1.0"
