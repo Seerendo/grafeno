@@ -1,0 +1,9 @@
+[package]
+name = "grafeno-memory"
+description = "Hybrid recall and token-budgeted context for agents on top of Grafeno"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+grafeno.workspace = true

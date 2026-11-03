@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/grafeno-core", "crates/grafeno", "crates/grafeno-memory"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[workspace.dependencies]
+grafeno = { path = "crates/grafeno" }
+grafeno-core = { path = "crates/grafeno-core" }
+redb = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+unicode-normalization = "0.1"
+uuid = { version = "1", default-features = false, features = ["serde"] }
+
+# Debug builds are lightly optimized, and dependencies (redb above all) fully:
+# index tests insert thousands of vectors.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

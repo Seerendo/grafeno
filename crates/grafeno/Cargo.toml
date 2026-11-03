@@ -1,0 +1,13 @@
+[package]
+name = "grafeno"
+description = "Graph engine for agent memory and knowledge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+grafeno-core.workspace = true
+redb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+unicode-normalization.workspace = true
