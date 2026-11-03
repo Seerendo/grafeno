@@ -1,0 +1,45 @@
+[Unit]
+Description=Grafeno graph engine
+Documentation=https://github.com/Seerendo/grafeno
+After=network.target
+
+[Service]
+Type=simple
+User=grafeno
+Group=grafeno
+ExecStart=/usr/bin/grafeno serve --config /etc/grafeno/grafeno.toml
+Restart=on-failure
+RestartSec=2
+# /var/lib/grafeno, owned by the grafeno user.
+StateDirectory=grafeno
+StateDirectoryMode=0750
+# Hardening: the service can write its data folder and nothing else.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+RestrictRealtime=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0027
+ReadWritePaths=/var/lib/grafeno
+
+[Install]
+WantedBy=multi-user.target

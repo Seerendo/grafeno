@@ -254,3 +254,11 @@ pub(crate) fn label_page(
     }
     Ok(out)
 }
+
+/// `(ns, normalized name, node_id) -> ()`: the names and aliases of nodes,
+/// for finding an entity by name (see `memory::normalize_name`).
+pub(crate) const NAMES: TableDefinition<LabelKey, ()> = TableDefinition::new("names");
+/// `(ns, node_id) -> (importance, accesses, last access in microseconds)`.
+/// Nodes without a row have the default memory state.
+pub(crate) const MEMORY: TableDefinition<RecordKey, (f32, u32, i64)> =
+    TableDefinition::new("memory");

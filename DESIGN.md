@@ -22,7 +22,7 @@ MCP.
    organization, agent). No query crosses namespaces unless asked to.
 5. **Hybrid retrieval**: vectors (HNSW) + full text (BM25) + graph expansion,
    fused with RRF, and output that fits a token budget.
-6. **Memory primitives** (phase 4): episodes, entities, facts, importance and
+6. **Memory primitives** (phase 7): episodes, entities, facts, importance and
    decay, duplicate merging, consolidation. LLM extraction stays outside the
    core (a plugin or the client), so the engine is not tied to a provider.
 7. **Interfaces**: Rust API, HTTP/gRPC server, MCP server, Node (napi-rs) and
@@ -47,8 +47,10 @@ grafeno/
 │   ├── grafeno-query     GQ: lexer, parser, executor                      [phase 5]
 │   └── grafeno-server    `grafeno` binary: HTTP API, MCP over stdio,      [phases 3-5]
 │                         shell, administration commands
-└── clients/
-    └── typescript        `grafeno-client`, fetch-based HTTP client         [phase 3]
+├── clients/
+│   └── typescript        `grafeno-client`, fetch-based HTTP client         [phase 3]
+├── studio/               Grafeno Studio, the web interface                 [phase 6]
+└── packaging/            Windows installer, .deb/.rpm, systemd unit        [phase 6]
 ```
 
 The indexes live in the `grafeno` crate, not in a separate one, because they
@@ -79,11 +81,14 @@ short-lived agents.
 | `namespace_counts` | `ns`                      | `(nodes, edges)`           |
 | `label_counts` | `(ns, label)`                 | nodes with the label       |
 | `edge_label_counts` | `(ns, label)`            | edges with the label       |
+| `names`        | `(ns, normalized name, node_id)` | `()`                    |
+| `memory`       | `(ns, node_id)`               | `(importance, accesses, last_access)` |
 
-- The layout has a version (`SCHEMA_VERSION`, now 3) in `meta`. Opening an
+- The layout has a version (`SCHEMA_VERSION`, now 4) in `meta`. Opening an
   older file upgrades it in one transaction: version 1 gets its counters
   computed, version 2 gets the new adjacency and posting tables (built from
-  the records) and loses the old ones. A newer layout is refused.
+  the records) and loses the old ones, version 3 gets the names index. A
+  newer layout is refused.
 - Adjacency entries hold the edge's record time and valid time
   (`recorded_at`, `expired_at`, `valid_from`, `valid_to`), so traversals
   filter without reading edge records. Postings hold the length of their
@@ -179,6 +184,37 @@ A database file is locked by the process that opens it, so the HTTP and MCP
 modes cannot share a file. An MCP mode that forwards to an HTTP server
 (`grafeno mcp --url`) would remove that limit.
 
+### Studio and distribution (phase 6)
+
+- **Grafeno Studio** (`studio/`): React, Vite and TypeScript, with
+  Cytoscape.js for the graph and the TypeScript client for every call.
+  Views: overview (namespaces, counts per label), explorer (paged nodes,
+  detail with facts, editing), graph (search to seed, double-click to
+  expand, "valid at" date for time travel), query (GQ editor, history,
+  table or JSON), search (full text, recall with its signals, context with
+  a token budget) and administration (check, rebuild, export, import).
+- The build is embedded in the binary (`include_dir`, when `studio/dist`
+  exists at compile time; otherwise `/studio/` explains how to build it) and
+  served at `/studio/` without authentication; the API it calls still needs
+  the token, which the Studio asks for. It uses relative paths and hash
+  routing, so the same build can be hosted elsewhere with `--cors-origin`.
+- **Settings file** (`grafeno.toml`): `db`, `addr`, `token`, `studio`,
+  `cors_origins`. `grafeno config init` writes it with a random token; the
+  installers call it. `grafeno serve --config` and `grafeno shell --config`
+  read it; flags and environment variables take precedence.
+- **Services**: on Windows, `grafeno service install|uninstall` registers
+  the `Grafeno` service with the Service Control Manager (`windows-service`;
+  stops on the SCM's stop request, logs to `grafeno.log`). On Linux, a
+  systemd unit runs `grafeno serve --config` as the `grafeno` user, with
+  sandboxing (`systemd-analyze security`: 1.3); the server stops gracefully
+  on SIGTERM.
+- **Packages**: a static musl binary for every Linux distribution, packed
+  as `.tar.gz`, `.deb` (`cargo-deb`) and `.rpm` (`cargo-generate-rpm`) by
+  `packaging/linux/Dockerfile`; an Inno Setup installer for Windows
+  (`packaging/windows/grafeno.iss`); `install.sh` downloads a release and
+  checks its SHA-256. `.github/workflows/release.yml` builds them on tags.
+- Uninstalling never deletes data or settings.
+
 ### Query language and shell (phase 5)
 
 - **GQ** (`grafeno-query`): a hand-written lexer and recursive-descent
@@ -225,6 +261,53 @@ Node bindings (napi-rs) were left out: Grafito runs Grafeno as a sidecar
 container and talks HTTP, so a native addon would add per-platform builds
 without a current user. They remain possible for embedded use.
 
+### Memory (phase 7)
+
+- **Names**: the `names` index holds each node's `name`, `title` and
+  `label` properties and its `aliases` (a list of strings), normalized:
+  lowercase, without accents or punctuation, spaces collapsed. "Ana García",
+  "ana  garcia" and "ANA GARCÍA" are the same key. `find_by_name` and
+  `GET /v1/{ns}/resolve` look it up; MCP `remember` with a `name` uses it to
+  update an existing entity (with a label in common) instead of creating a
+  duplicate.
+- **Importance and accesses**: each node has a memory state, importance
+  from 0 to 1 (0.5 by default), accesses and the last access (the last update
+  until the first access). Only states that differ from the default are
+  stored. Recall touches what it returns when asked (`touch`; MCP always
+  does).
+- **Ranking**: recall multiplies each fused score by `1 + 0.5 × importance +
+  0.3 × recency`, where recency halves every 30 days since the last access
+  (all configurable, or off). The boost is applied to a pool of
+  `max(5 × limit, 100)` candidates, so it can reorder results but not invent
+  them.
+- **Decay**: strength = importance × recency × (1 + ln(1 + accesses) / 4),
+  capped at 1. `weak_memories` lists nodes below a threshold (0.1); nothing
+  is deleted automatically. `archive` adds the `Archived` label, which recall
+  leaves out unless `include_archived`.
+- **Duplicates**: pairs with the same label and a similar normalized name (1
+  for equal names, at least 0.7 when one contains the other, word Jaccard
+  otherwise) or a cosine similarity of at least 0.92 between embeddings.
+  Pairs joined by a `distinct_from` edge are not proposed again.
+- **Merging**: `merge_nodes(keep, merge)` moves the edges to the kept node
+  (dropping edges between the two and identical ones), joins labels and
+  sources, keeps the kept node's properties and adds the missing ones, turns
+  the other names into `aliases`, joins the texts, keeps one embedding,
+  combines memory states (highest importance, sum of accesses) and deletes
+  the merged node, all in one transaction.
+- **Consolidation**: `consolidation_groups` finds entities with at least 3
+  memories (`Memory`, `Episode`, `Note`) older than 7 days pointing at them.
+  The summary is written by the agent (the engine calls no model):
+  `write_summary` stores a `Summary` node with `summarizes` edges to its
+  sources and an `about` edge, gives it the highest importance of its
+  sources and archives them. Provenance is kept: the sources stay, archived.
+- Exposed through the library (`grafeno` and `grafeno-memory::maintenance`),
+  HTTP (`/resolve`, `/duplicates`, `/merge`, `/touch`, `/weak`, `/archive`,
+  `/consolidation`, `/summaries`, `importance` in `PATCH /nodes/{id}`), MCP
+  (`merge`, `maintain`, `consolidate`, `importance` in `remember` and
+  `update`), GQ (`n.@importance`, `n.@accesses`, `n.@last_access`, `SET
+  n.@importance`) and the Studio's Memory view. Export and import keep memory
+  states.
+
 ## Integration with Grafito
 
 - When a note syncs, one batch: upsert the `Note` node with Grafito's id,
@@ -251,10 +334,12 @@ without a current user. They remain possible for embedded use.
 5. **Shell and query language** (done): `grafeno shell` (a console like
    `psql`, on a file or a server) and GQ, a Cypher-style language with time
    travel ([docs/query-language.md](docs/query-language.md)).
-6. Grafeno Studio: a web interface served by `grafeno serve` (explorer,
-   graph view with a time slider, search and context lab, editor,
-   administration).
-7. Memory: consolidation, importance and decay, entity resolution.
+6. **Studio and installers** (done): Grafeno Studio embedded in the binary;
+   Windows installer and service; `.deb`, `.rpm`, `install.sh` and a
+   systemd service ([docs/install.md](docs/install.md)).
+7. **Memory** (done): entity resolution by normalized names and aliases,
+   importance, accesses and decay in ranking, duplicates and merging,
+   archiving, consolidation into summaries.
 8. Integrations (Grafito first), Python bindings, read replicas.
 
 A performance pass (layout version 3) followed phase 4: traversals 3-4×

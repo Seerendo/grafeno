@@ -92,7 +92,7 @@ test("recall and context", async () => {
   assert.equal(recalled[0].node.id, refs.$pref);
   assert.deepEqual(
     recalled[0].signals.map((signal) => signal.kind),
-    ["text", "vector"],
+    ["text", "vector", "memory"],
   );
   assert.equal(recalled[1].node.id, refs.$ana);
 
@@ -163,6 +163,46 @@ test("GQ queries", async () => {
   assert.deepEqual(result.columns, ["person", "company", "w.@valid_from"]);
   assert.deepEqual(result.rows, [["Ana", "Acme", "2024-01-01T00:00:00Z"]]);
   await assert.rejects(graph.query("MATCH (n RETURN n"), { status: 400, code: "invalid_query" });
+});
+
+test("memory: names, importance, duplicates, merge and summaries", async () => {
+  const memory = new Grafeno({ url, token }).namespace("memory-test");
+  const { refs } = await memory.batch([
+    { op: "create_node", ref: "$ana", node: { labels: ["Person"], props: { name: "Ana García" } } },
+    { op: "create_node", ref: "$dup", node: { labels: ["Person"], props: { name: "ANA GARCIA" } } },
+    ...["likes tea", "moved to Lima", "works at Acme"].map((text, i) => ({
+      op: "create_node" as const,
+      ref: `$m${i}`,
+      node: { labels: ["Memory"], text: `Ana ${text}` },
+    })),
+    ...[0, 1, 2].map((i) => ({ op: "create_edge" as const, edge: { from: `$m${i}`, label: "about", to: "$ana" } })),
+  ]);
+
+  assert.equal((await memory.resolve("ana garcia", "Person")).length, 2);
+  const [pair] = await memory.duplicates();
+  assert.equal(pair.score, 1);
+  const report = await memory.merge(refs.$ana, refs.$dup);
+  assert.equal(report.merged, refs.$dup);
+  assert.deepEqual(await memory.duplicates(), []);
+
+  const node = await memory.patchNode(refs.$m0, { importance: 0.9 });
+  assert.ok(Math.abs(node.memory.importance - 0.9) < 1e-6);
+  await memory.touch([refs.$m0]);
+  assert.equal((await memory.getNode(refs.$m0)).memory.accesses, 1);
+  assert.deepEqual(await memory.weak(), []);
+
+  const groups = await memory.consolidation({ older_than_days: 0 });
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].entity.id, refs.$ana);
+  const { id } = await memory.summarize({
+    text: "Ana likes tea, lives in Lima and works at Acme.",
+    sources: groups[0].memories.map((m) => m.id),
+    about: refs.$ana,
+  });
+  const recalled = await memory.recall({ text: "Lima", expand: false });
+  assert.deepEqual(recalled.map((r) => r.node.id), [id]);
+  assert.equal((await memory.recall({ text: "Lima", expand: false, include_archived: true })).length, 2);
+  assert.equal(await memory.archive([id]), 1);
 });
 
 test("errors carry status and code", async () => {

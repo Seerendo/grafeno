@@ -514,3 +514,251 @@ async fn queries_read_and_write() {
             .contains("line 1, column")
     );
 }
+
+#[tokio::test]
+async fn studio_and_cors_options() {
+    use grafeno_server::http::{Options, router_with};
+    let state = || AppState {
+        db: Arc::new(Grafeno::in_memory().unwrap()),
+        token: Some(Arc::from("secret")),
+    };
+    let request = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
+
+    // The Studio is public (the API it calls needs the token).
+    let app = router_with(state(), &Options::default());
+    let response = app.clone().oneshot(request("/")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(response.headers()[header::LOCATION], "/studio/");
+    let response = app.clone().oneshot(request("/studio/")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html")
+    );
+    let response = app
+        .clone()
+        .oneshot(request("/studio/explorer/some-client-route"))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "unknown paths get the app"
+    );
+    if grafeno_server::studio::INCLUDED {
+        let response = app
+            .clone()
+            .oneshot(request("/studio/assets/missing.js"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    // No CORS headers unless origins are configured.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .header(header::ORIGIN, "http://elsewhere")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !response
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+    );
+
+    let app = router_with(
+        state(),
+        &Options {
+            studio: false,
+            cors_origins: vec!["http://studio.example".into()],
+        },
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request("/studio/"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let preflight = Request::builder()
+        .method("OPTIONS")
+        .uri("/v1/namespaces")
+        .header(header::ORIGIN, "http://studio.example")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+        .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(preflight).await.unwrap();
+    assert_eq!(
+        response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+        "http://studio.example"
+    );
+    let other = Request::builder()
+        .uri("/health")
+        .header(header::ORIGIN, "http://evil.example")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(other).await.unwrap();
+    assert!(
+        !response
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+    );
+}
+
+#[tokio::test]
+async fn memory_endpoints() {
+    let app = app(None);
+    let ops = json!({ "ops": [
+        { "op": "create_node", "ref": "$ana", "node": { "labels": ["Person"], "props": { "name": "Ana García" } } },
+        { "op": "create_node", "ref": "$dup", "node": { "labels": ["Person"], "props": { "name": "ana garcia" } } },
+        { "op": "create_node", "ref": "$m1", "node": { "labels": ["Memory"], "text": "Ana likes tea" } },
+        { "op": "create_node", "ref": "$m2", "node": { "labels": ["Memory"], "text": "Ana moved to Lima" } },
+        { "op": "create_node", "ref": "$m3", "node": { "labels": ["Memory"], "text": "Ana works at Acme" } },
+        { "op": "create_edge", "edge": { "from": "$m1", "label": "about", "to": "$ana" } },
+        { "op": "create_edge", "edge": { "from": "$m2", "label": "about", "to": "$ana" } },
+        { "op": "create_edge", "edge": { "from": "$m3", "label": "about", "to": "$dup" } }
+    ]});
+    let (status, body) = call(&app, "POST", "/v1/agent/batch", Some(ops)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let refs = |name: &str| body["refs"][name].as_str().unwrap().to_owned();
+    let (ana, dup, m1) = (refs("$ana"), refs("$dup"), refs("$m1"));
+
+    let (status, found) = call(
+        &app,
+        "GET",
+        "/v1/agent/resolve?name=ANA%20GARCIA&label=Person",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(found.as_array().unwrap().len(), 2);
+
+    let (_, pairs) = call(&app, "GET", "/v1/agent/duplicates", None).await;
+    assert_eq!(pairs[0]["score"], 1.0, "{pairs}");
+
+    let (status, report) = call(
+        &app,
+        "POST",
+        "/v1/agent/merge",
+        Some(json!({ "keep": ana, "merge": dup })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["edges_moved"], 1);
+    let (_, pairs) = call(&app, "GET", "/v1/agent/duplicates", None).await;
+    assert!(pairs.as_array().unwrap().is_empty());
+
+    // Importance through PATCH, accesses through touch and recall.
+    let (status, node) = call(
+        &app,
+        "PATCH",
+        &format!("/v1/agent/nodes/{m1}"),
+        Some(json!({ "importance": 0.9 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/agent/touch",
+        Some(json!({ "ids": [m1] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, results) = call(
+        &app,
+        "POST",
+        "/v1/agent/recall",
+        Some(json!({ "text": "tea", "touch": true, "expand": false })),
+    )
+    .await;
+    assert_eq!(results[0]["node"]["id"], m1.as_str());
+    assert!(
+        results[0]["signals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["kind"] == "memory")
+    );
+    let (_, node) = call(&app, "GET", &format!("/v1/agent/nodes/{m1}"), None).await;
+    assert_eq!(node["memory"]["accesses"], 2, "{node}");
+    assert!((node["memory"]["importance"].as_f64().unwrap() - 0.9).abs() < 1e-6);
+    let (status, _) = call(
+        &app,
+        "PATCH",
+        &format!("/v1/agent/nodes/{m1}"),
+        Some(json!({ "importance": 3 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, weak) = call(&app, "GET", "/v1/agent/weak?threshold=0.2", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(weak.as_array().unwrap().is_empty(), "{weak}");
+
+    let (_, groups) = call(
+        &app,
+        "GET",
+        "/v1/agent/consolidation?older_than_days=0",
+        None,
+    )
+    .await;
+    assert_eq!(groups.as_array().unwrap().len(), 1, "{groups}");
+    assert_eq!(groups[0]["entity"]["id"], ana.as_str());
+    let sources: Vec<Value> = groups[0]["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].clone())
+        .collect();
+    assert_eq!(sources.len(), 3);
+
+    let (status, summary) = call(
+        &app,
+        "POST",
+        "/v1/agent/summaries",
+        Some(json!({ "text": "Ana likes tea, lives in Lima and works at Acme.", "sources": sources, "about": ana })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{summary}");
+    let (_, results) = call(
+        &app,
+        "POST",
+        "/v1/agent/recall",
+        Some(json!({ "text": "Lima", "expand": false })),
+    )
+    .await;
+    assert_eq!(results.as_array().unwrap().len(), 1);
+    assert_eq!(results[0]["node"]["id"], summary["id"]);
+    let (_, results) = call(
+        &app,
+        "POST",
+        "/v1/agent/recall",
+        Some(
+            json!({ "text": "Lima", "expand": false, "include_archived": true, "ranking": false }),
+        ),
+    )
+    .await;
+    assert_eq!(results.as_array().unwrap().len(), 2);
+
+    let (status, archived) = call(
+        &app,
+        "POST",
+        "/v1/agent/archive",
+        Some(json!({ "ids": [summary["id"]] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(archived["archived"], 1);
+    let (_, check) = call(&app, "GET", "/v1/agent/check", None).await;
+    assert_eq!(check["problems"], json!([]), "{check}");
+}

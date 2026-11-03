@@ -40,6 +40,13 @@ impl Context<'_> {
         })
     }
 
+    fn memory(&self, node: &Node) -> Result<grafeno::MemoryState, QueryError> {
+        Ok(match self.write {
+            Some(tx) => tx.memory(self.ns, node)?,
+            None => self.read.memory(self.ns, node)?,
+        })
+    }
+
     fn embedding(&self, id: NodeId) -> Result<Option<Vec<f32>>, QueryError> {
         Ok(match self.write {
             Some(tx) => tx.embedding(self.ns, id)?,
@@ -117,7 +124,7 @@ fn time_or_null(time: Option<Timestamp>) -> Value {
     time.map_or(Value::Null, Value::Time)
 }
 
-const NODE_META: &str = "@id, @labels, @text, @embedding, @sources, @created_at, @updated_at";
+const NODE_META: &str = "@id, @labels, @text, @embedding, @sources, @created_at, @updated_at, @importance, @accesses, @last_access";
 const EDGE_META: &str =
     "@id, @label, @from, @to, @valid_from, @valid_to, @recorded_at, @expired_at, @sources";
 
@@ -136,6 +143,17 @@ pub(crate) fn node_meta(ctx: &Context, node: &Node, name: &str) -> Result<Value,
         }),
         "sources" => ids(&node.sources),
         "created_at" => Value::Time(node.created_at),
+        // Through the shortest decimal form, so 0.9 reads as 0.9 and not as the
+        // f64 closest to the stored f32.
+        "importance" => Value::Float(
+            ctx.memory(node)?
+                .importance
+                .to_string()
+                .parse()
+                .unwrap_or_default(),
+        ),
+        "accesses" => Value::Int(i64::from(ctx.memory(node)?.accesses)),
+        "last_access" => Value::Time(ctx.memory(node)?.last_access),
         "updated_at" => Value::Time(node.updated_at),
         other => {
             return Err(error(format!(

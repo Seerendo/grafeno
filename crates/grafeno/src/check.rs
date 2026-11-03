@@ -11,11 +11,12 @@ use redb::ReadableTable;
 use serde::Serialize;
 
 use crate::db::{ReadTx, WriteTx};
+use crate::memory::names_of;
 use crate::stats::{bump_edge_label, bump_namespace, label_counts};
 use crate::store::{
-    ADJ_IN, ADJ_OUT, EDGE_LABEL_COUNTS, EDGES, HNSW_LINKS, LABEL_COUNTS, NODE_LABELS, NODES,
-    NS_COUNTS, POSTINGS, TEXT_LENGTHS, TEXT_STATS, TEXTS, VECTOR_META, VECTORS, adjacency_value,
-    scan_records, storage,
+    ADJ_IN, ADJ_OUT, EDGE_LABEL_COUNTS, EDGES, HNSW_LINKS, LABEL_COUNTS, MEMORY, NAMES,
+    NODE_LABELS, NODES, NS_COUNTS, POSTINGS, TEXT_LENGTHS, TEXT_STATS, TEXTS, VECTOR_META, VECTORS,
+    adjacency_value, scan_records, storage,
 };
 use crate::{text, vector};
 
@@ -167,6 +168,55 @@ impl ReadTx {
             problems.push("edge label counters do not match the edges".into());
         }
 
+        // The names index and memory states.
+        let mut expected_names = 0usize;
+        for node in &nodes {
+            for name in names_of(node) {
+                expected_names += 1;
+                if self
+                    .names
+                    .get((ns, name.as_str(), node.id.as_u128()))
+                    .map_err(storage)?
+                    .is_none()
+                {
+                    problems.push(format!("names index misses {name:?} of node {}", node.id));
+                }
+            }
+        }
+        let mut indexed_names = 0usize;
+        for item in self.names.range((ns, "", 0u128)..).map_err(storage)? {
+            let (key, _) = item.map_err(storage)?;
+            if key.value().0 != ns {
+                break;
+            }
+            indexed_names += 1;
+        }
+        if indexed_names != expected_names {
+            problems.push(format!(
+                "{indexed_names} entries in the names index, expected {expected_names}"
+            ));
+        }
+        for item in self.memory.range((ns, 0u128)..).map_err(storage)? {
+            let (key, value) = item.map_err(storage)?;
+            let (key_ns, id) = key.value();
+            if key_ns != ns {
+                break;
+            }
+            if !ids.contains(&id) {
+                problems.push(format!(
+                    "memory state of missing node {}",
+                    NodeId::from_u128(id)
+                ));
+            }
+            let (importance, _, _) = value.value();
+            if !(0.0..=1.0).contains(&importance) {
+                problems.push(format!(
+                    "importance {importance} of node {} is out of range",
+                    NodeId::from_u128(id)
+                ));
+            }
+        }
+
         let texts = text::check(
             &self.texts,
             &self.text_lengths,
@@ -244,9 +294,17 @@ impl WriteTx {
         // entries of the namespaces after it.
         let other = |key_ns: &str| key_ns != ns;
         let tx = &self.tx;
-        tx.open_table(NODE_LABELS)
+        for definition in [NODE_LABELS, NAMES] {
+            tx.open_table(definition)
+                .map_err(storage)?
+                .retain_in((ns, "", 0u128).., |key, _| other(key.0))
+                .map_err(storage)?;
+        }
+        // Memory states are records too: only those of missing nodes go.
+        let ids: HashSet<u128> = nodes.iter().map(|node| node.id.as_u128()).collect();
+        tx.open_table(MEMORY)
             .map_err(storage)?
-            .retain_in((ns, "", 0u128).., |key, _| other(key.0))
+            .retain_in((ns, 0u128).., |key, _| other(key.0) || ids.contains(&key.1))
             .map_err(storage)?;
         for definition in [ADJ_OUT, ADJ_IN] {
             tx.open_table(definition)

@@ -68,7 +68,17 @@ fn handshake_and_tool_list() {
     assert_eq!(
         names,
         [
-            "remember", "recall", "context", "relate", "update", "forget", "get_node", "query"
+            "remember",
+            "recall",
+            "context",
+            "relate",
+            "update",
+            "forget",
+            "get_node",
+            "query",
+            "merge",
+            "maintain",
+            "consolidate"
         ]
     );
     for tool in response["result"]["tools"].as_array().unwrap() {
@@ -278,4 +288,153 @@ fn read_only_queries() {
             .unwrap()
             .contains("line 1")
     );
+}
+
+#[test]
+fn remember_reuses_named_entities() {
+    let server = server();
+    let first = call(
+        &server,
+        "remember",
+        json!({ "name": "Ana García", "labels": ["Person"], "text": "Ana writes Rust", "importance": 0.8 }),
+    );
+    let ana = structured(&first)["id"].as_str().unwrap().to_owned();
+    assert_eq!(structured(&first)["reused"], false);
+
+    // Same person, written differently: updated, not duplicated.
+    let second = call(
+        &server,
+        "remember",
+        json!({ "name": "ana garcia", "labels": ["Person", "Engineer"], "text": "Ana lives in Lima", "props": { "city": "Lima" } }),
+    );
+    assert_eq!(structured(&second)["id"], ana.as_str());
+    assert_eq!(structured(&second)["reused"], true);
+    // A company with the same name is a different node.
+    let company = call(
+        &server,
+        "remember",
+        json!({ "name": "Ana García", "labels": ["Company"], "text": "a shop" }),
+    );
+    assert_ne!(structured(&company)["id"], ana.as_str());
+
+    let node = call(&server, "get_node", json!({ "id": ana }));
+    let node = structured(&node);
+    assert_eq!(node["labels"], json!(["Engineer", "Person"]));
+    assert_eq!(node["props"]["city"], "Lima");
+    assert_eq!(node["props"]["name"], "Ana García", "the first name stays");
+    let text = node["text"].as_str().unwrap();
+    assert!(
+        text.contains("Ana writes Rust") && text.contains("Ana lives in Lima"),
+        "{text}"
+    );
+    assert_eq!(node["importance"], 0.8);
+    assert_eq!(node["accesses"], 0);
+
+    // Recall records accesses and says why importance counted.
+    let results = call(&server, "recall", json!({ "query": "Lima", "depth": 0 }));
+    let first = &structured(&results)["results"][0];
+    assert_eq!(first["id"], ana.as_str());
+    assert!(
+        first["why"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|why| why == "importance 0.80"),
+        "{first}"
+    );
+    let node = call(&server, "get_node", json!({ "id": ana }));
+    assert_eq!(structured(&node)["accesses"], 1);
+
+    let updated = call(&server, "update", json!({ "id": ana, "importance": 0.3 }));
+    assert_eq!(structured(&updated)["importance"], 0.3);
+    let bad = call(&server, "update", json!({ "id": ana, "importance": 2 }));
+    assert_eq!(bad["isError"], true);
+}
+
+#[test]
+fn maintain_merge_and_consolidate() {
+    let server = server();
+    let id = |result: &Value| structured(result)["id"].as_str().unwrap().to_owned();
+    let bob = id(&call(
+        &server,
+        "remember",
+        json!({ "name": "Bob Smith", "labels": ["Person"], "text": "Bob" }),
+    ));
+    let robert = id(&call(
+        &server,
+        "remember",
+        json!({ "name": "Bob Smith Jr", "labels": ["Person"], "text": "Robert" }),
+    ));
+
+    let report = call(&server, "maintain", json!({}));
+    let report = structured(&report);
+    let pair = &report["duplicates"][0];
+    let ids = [
+        pair["a"]["id"].as_str().unwrap(),
+        pair["b"]["id"].as_str().unwrap(),
+    ];
+    assert!(
+        ids.contains(&bob.as_str()) && ids.contains(&robert.as_str()),
+        "{report}"
+    );
+    assert!(report["weak"].as_array().unwrap().is_empty());
+    assert!(
+        report["consolidation"].as_array().unwrap().is_empty(),
+        "memories are too recent"
+    );
+
+    let merged = call(&server, "merge", json!({ "keep": bob, "merge": robert }));
+    assert_eq!(structured(&merged)["id"], bob.as_str());
+    let gone = call(&server, "get_node", json!({ "id": robert }));
+    assert_eq!(gone["isError"], true);
+    let report = call(&server, "maintain", json!({}));
+    assert!(
+        structured(&report)["duplicates"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut memories = Vec::new();
+    for text in ["Bob likes chess", "Bob moved to Quito"] {
+        let result = call(
+            &server,
+            "remember",
+            json!({ "text": text, "links": [{ "label": "about", "to": bob }] }),
+        );
+        memories.push(id(&result));
+    }
+    let summary = call(
+        &server,
+        "consolidate",
+        json!({ "summary": "Bob likes chess and lives in Quito.", "sources": memories, "about": bob }),
+    );
+    let summary_id = id(&summary);
+    assert_eq!(structured(&summary)["summarized"], 2);
+
+    let results = call(&server, "recall", json!({ "query": "Quito", "depth": 0 }));
+    let found: Vec<&str> = structured(&results)["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        found,
+        [summary_id.as_str()],
+        "archived memories are left out"
+    );
+    let results = call(
+        &server,
+        "recall",
+        json!({ "query": "Quito", "depth": 0, "include_archived": true }),
+    );
+    assert_eq!(structured(&results)["results"].as_array().unwrap().len(), 2);
+
+    let empty = call(
+        &server,
+        "consolidate",
+        json!({ "summary": "nothing", "sources": [] }),
+    );
+    assert_eq!(empty["isError"], true);
 }

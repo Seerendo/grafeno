@@ -3,3 +3,6 @@ target
 clients/typescript/node_modules
 clients/typescript/dist
 *.redb
+studio/node_modules
+studio/dist
+dist

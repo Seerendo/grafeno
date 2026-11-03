@@ -30,17 +30,71 @@ pub struct AppState {
     pub token: Option<Arc<str>>,
 }
 
-pub async fn serve(state: AppState, addr: SocketAddr) -> std::io::Result<()> {
+/// What the HTTP server offers besides the API.
+#[derive(Clone, Debug)]
+pub struct Options {
+    /// Serve Grafeno Studio at `/studio/` (when the binary includes it).
+    pub studio: bool,
+    /// Origins allowed to call the API from a browser (CORS), such as a
+    /// Studio hosted elsewhere; `*` allows any origin.
+    pub cors_origins: Vec<String>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            studio: true,
+            cors_origins: Vec::new(),
+        }
+    }
+}
+
+/// Serves until Ctrl+C (or SIGTERM on Unix, as sent by systemd).
+pub async fn serve(state: AppState, addr: SocketAddr, options: Options) -> std::io::Result<()> {
+    serve_until(state, addr, options, shutdown_signal()).await
+}
+
+/// Serves until `shutdown` completes, then finishes the requests in flight.
+pub async fn serve_until(
+    state: AppState,
+    addr: SocketAddr,
+    options: Options,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    eprintln!("grafeno listening on http://{}", listener.local_addr()?);
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+    let local = listener.local_addr()?;
+    eprintln!("grafeno listening on http://{local}");
+    if options.studio && crate::studio::INCLUDED {
+        eprintln!("Grafeno Studio at http://{local}/studio/");
+    }
+    axum::serve(listener, router_with(state, &options))
+        .with_graceful_shutdown(shutdown)
         .await
 }
 
+/// Ctrl+C, or SIGTERM on Unix (what systemd sends to stop a service).
+pub async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 pub fn router(state: AppState) -> Router {
+    router_with(state, &Options::default())
+}
+
+pub fn router_with(state: AppState, options: &Options) -> Router {
     let v1 = Router::new()
         .route("/namespaces", get(namespaces))
         .route("/export", get(export))
@@ -70,12 +124,53 @@ pub fn router(state: AppState) -> Router {
         .route("/{ns}/context", post(context_handler))
         .route("/{ns}/batch", post(batch))
         .route("/{ns}/query", post(query))
+        .route("/{ns}/resolve", get(resolve))
+        .route("/{ns}/duplicates", get(duplicates))
+        .route("/{ns}/merge", post(merge))
+        .route("/{ns}/touch", post(touch))
+        .route("/{ns}/weak", get(weak))
+        .route("/{ns}/archive", post(archive_nodes))
+        .route("/{ns}/consolidation", get(consolidation))
+        .route("/{ns}/summaries", post(summaries))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth));
-    Router::new()
-        .route("/health", get(health))
-        .nest("/v1", v1)
-        .layer(DefaultBodyLimit::max(BODY_LIMIT))
-        .with_state(state)
+    let mut app = Router::new().route("/health", get(health)).nest("/v1", v1);
+    if options.studio {
+        app = app
+            .route("/", get(crate::studio::redirect))
+            .route("/studio", get(crate::studio::redirect))
+            .route("/studio/", get(crate::studio::index))
+            .route("/studio/{*path}", get(crate::studio::asset));
+    }
+    let mut app = app.layer(DefaultBodyLimit::max(BODY_LIMIT));
+    if !options.cors_origins.is_empty() {
+        app = app.layer(cors(&options.cors_origins));
+    }
+    app.with_state(state)
+}
+
+fn cors(origins: &[String]) -> tower_http::cors::CorsLayer {
+    use axum::http::{HeaderValue, Method};
+    use tower_http::cors::{AllowOrigin, CorsLayer};
+
+    let origin = if origins.iter().any(|origin| origin == "*") {
+        AllowOrigin::any()
+    } else {
+        AllowOrigin::list(
+            origins
+                .iter()
+                .filter_map(|origin| HeaderValue::from_str(origin.trim_end_matches('/')).ok()),
+        )
+    };
+    CorsLayer::new()
+        .allow_origin(origin)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
 }
 
 // ---------------------------------------------------------------- plumbing
@@ -370,10 +465,16 @@ pub struct PatchNode {
     text: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
     embedding: Option<Option<Vec<f32>>>,
+    /// From 0 to 1.
+    #[serde(default)]
+    importance: Option<f32>,
 }
 
 fn apply_patch(tx: &mut WriteTx, ns: &str, id: NodeId, patch: PatchNode) -> grafeno::Result<()> {
     tx.node(ns, id)?.ok_or(Error::NodeNotFound(id))?;
+    if let Some(importance) = patch.importance {
+        tx.set_importance(ns, id, importance)?;
+    }
     if let Some(props) = patch.props {
         tx.set_node_props(ns, id, props)?;
     }
@@ -685,7 +786,16 @@ async fn recall_handler(
     Body(input): Body<RecallInput>,
 ) -> ApiResult<Json<Vec<grafeno_memory::Recalled>>> {
     let query = input.resolve()?;
-    let results = blocking(&state, move |db| recall(&db.begin_read()?, &ns, &query)).await?;
+    let touch = input.touch;
+    let results = blocking(&state, move |db| {
+        let results = recall(&db.begin_read()?, &ns, &query)?;
+        if touch {
+            let ids: Vec<NodeId> = results.iter().map(|r| r.node.id).collect();
+            db.write(|tx| tx.touch(&ns, &ids, Timestamp::now()))?;
+        }
+        Ok(results)
+    })
+    .await?;
     Ok(Json(results))
 }
 
@@ -695,8 +805,14 @@ async fn context_handler(
     Body(input): Body<ContextInput>,
 ) -> ApiResult<Json<grafeno_memory::Context>> {
     let (query, options) = input.resolve()?;
+    let touch = input.query.touch;
     let context = blocking(&state, move |db| {
-        context_for(&db.begin_read()?, &ns, &query, &options)
+        let context = context_for(&db.begin_read()?, &ns, &query, &options)?;
+        if touch {
+            let ids: Vec<NodeId> = context.items.iter().map(|item| item.node).collect();
+            db.write(|tx| tx.touch(&ns, &ids, Timestamp::now()))?;
+        }
+        Ok(context)
     })
     .await?;
     Ok(Json(context))
@@ -984,4 +1100,233 @@ async fn query(
     .await
     .map_err(|error| ApiError::internal(error.to_string()))??;
     Ok(Json(result.to_json()))
+}
+
+// ---------------------------------------------------------------- memory
+
+#[derive(Deserialize)]
+struct ResolveParams {
+    name: String,
+    label: Option<String>,
+}
+
+/// Nodes named `name` (or with it as an alias), compared normalized.
+async fn resolve(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Params(params): Params<ResolveParams>,
+) -> ApiResult<Json<Vec<grafeno::Node>>> {
+    let nodes = blocking(&state, move |db| {
+        let read = db.begin_read()?;
+        let mut nodes = Vec::new();
+        for id in read.find_by_name(&ns, &params.name)? {
+            if let Some(node) = read.node(&ns, id)?
+                && params
+                    .label
+                    .as_deref()
+                    .is_none_or(|label| node.has_label(label))
+            {
+                nodes.push(node);
+            }
+        }
+        Ok(nodes)
+    })
+    .await?;
+    Ok(Json(nodes))
+}
+
+#[derive(Deserialize)]
+struct DuplicateParams {
+    label: Option<String>,
+    min_score: Option<f32>,
+    /// Compare embeddings too (default true).
+    vectors: Option<bool>,
+    limit: Option<usize>,
+}
+
+async fn duplicates(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Params(params): Params<DuplicateParams>,
+) -> ApiResult<Json<Vec<grafeno_memory::Duplicate>>> {
+    let base = grafeno_memory::DuplicateOptions::default();
+    let options = grafeno_memory::DuplicateOptions {
+        label: params.label,
+        min_score: params.min_score.unwrap_or(base.min_score),
+        vector_threshold: if params.vectors.unwrap_or(true) {
+            base.vector_threshold
+        } else {
+            None
+        },
+        limit: params.limit.unwrap_or(base.limit).min(MAX_PAGE),
+    };
+    let found = blocking(&state, move |db| {
+        grafeno_memory::find_duplicates(&db.begin_read()?, &ns, &options)
+    })
+    .await?;
+    Ok(Json(found))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MergeInput {
+    /// The node that stays.
+    keep: NodeId,
+    /// The node merged into it, then deleted.
+    merge: NodeId,
+}
+
+async fn merge(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Body(input): Body<MergeInput>,
+) -> ApiResult<Json<grafeno::MergeReport>> {
+    let report = blocking(&state, move |db| {
+        db.write(|tx| tx.merge_nodes(&ns, input.keep, input.merge))
+    })
+    .await?;
+    Ok(Json(report))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IdsInput {
+    ids: Vec<NodeId>,
+}
+
+/// Records an access to each node now (as recall with `touch` does).
+async fn touch(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Body(input): Body<IdsInput>,
+) -> ApiResult<StatusCode> {
+    blocking(&state, move |db| {
+        db.write(|tx| tx.touch(&ns, &input.ids, Timestamp::now()))
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct WeakParams {
+    half_life_days: Option<f64>,
+    threshold: Option<f32>,
+    label: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn weak(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Params(params): Params<WeakParams>,
+) -> ApiResult<Json<Vec<grafeno_memory::WeakMemory>>> {
+    let base = grafeno_memory::DecayOptions::default();
+    let options = grafeno_memory::DecayOptions {
+        half_life_secs: params
+            .half_life_days
+            .map_or(base.half_life_secs, |days| days * 86_400.0),
+        threshold: params.threshold.unwrap_or(base.threshold),
+        labels: params.label.into_iter().collect(),
+        limit: params.limit.unwrap_or(base.limit).min(MAX_PAGE),
+        now: Timestamp::now(),
+    };
+    let found = blocking(&state, move |db| {
+        grafeno_memory::weak_memories(&db.begin_read()?, &ns, &options)
+    })
+    .await?;
+    Ok(Json(found))
+}
+
+/// Adds the `Archived` label: recall skips these nodes, nothing is deleted.
+async fn archive_nodes(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Body(input): Body<IdsInput>,
+) -> ApiResult<Json<Value>> {
+    let archived = blocking(&state, move |db| {
+        db.write(|tx| grafeno_memory::archive(tx, &ns, &input.ids))
+    })
+    .await?;
+    Ok(Json(json!({ "archived": archived })))
+}
+
+#[derive(Deserialize)]
+struct ConsolidationParams {
+    older_than_days: Option<i64>,
+    min_size: Option<usize>,
+    limit: Option<usize>,
+    /// Comma-separated labels of the memories to group.
+    labels: Option<String>,
+}
+
+async fn consolidation(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Params(params): Params<ConsolidationParams>,
+) -> ApiResult<Json<Vec<grafeno_memory::ConsolidationGroup>>> {
+    let base = grafeno_memory::ConsolidationOptions::default();
+    let options = grafeno_memory::ConsolidationOptions {
+        memory_labels: params
+            .labels
+            .map(|labels| {
+                labels
+                    .split(',')
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or(base.memory_labels),
+        older_than_secs: params
+            .older_than_days
+            .map_or(base.older_than_secs, |days| days * 86_400),
+        min_size: params.min_size.unwrap_or(base.min_size),
+        limit: params.limit.unwrap_or(base.limit).min(MAX_PAGE),
+        now: Timestamp::now(),
+    };
+    let groups = blocking(&state, move |db| {
+        grafeno_memory::consolidation_groups(&db.begin_read()?, &ns, &options)
+    })
+    .await?;
+    Ok(Json(groups))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SummaryInput {
+    text: String,
+    sources: Vec<NodeId>,
+    #[serde(default)]
+    about: Option<NodeId>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    labels: Vec<String>,
+    #[serde(default)]
+    embedding: Option<Vec<f32>>,
+    /// Archive the summarized memories (default true).
+    #[serde(default)]
+    archive_sources: Option<bool>,
+}
+
+/// Stores a summary of several memories (written by an agent), linked to
+/// them with `summarizes`, and archives them.
+async fn summaries(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Body(input): Body<SummaryInput>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let summary = grafeno_memory::Summary {
+        text: input.text,
+        name: input.name,
+        labels: input.labels,
+        sources: input.sources,
+        about: input.about,
+        embedding: input.embedding,
+        archive_sources: input.archive_sources.unwrap_or(true),
+    };
+    let id = blocking(&state, move |db| {
+        db.write(|tx| grafeno_memory::write_summary(tx, &ns, summary))
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
 }

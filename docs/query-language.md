@@ -104,6 +104,7 @@ changed.
 | `SET n = {a: 1}`                         | replaces all properties                                   |
 | `SET n:Label:Other`                      | adds labels                                               |
 | `SET n.@text = '…'`, `SET n.@embedding = […]` | indexes text or a vector (`null` removes it)         |
+| `SET n.@importance = 0.9`                | sets the importance, from 0 to 1                         |
 | `SET r.@valid_to = '2025-01-01'`         | the fact stopped being true then (history is kept)        |
 | `REMOVE n.key, n:Label, n.@text`         | removes properties, labels, the text or the embedding    |
 | `DELETE n` (`DETACH DELETE n`)           | deletes nodes with their edges, or edges                  |
@@ -125,8 +126,12 @@ Read with `n.@name`. They are what a node or edge has besides properties.
 | `@embedding`   | `@valid_from`, `@valid_to` |
 | `@sources`     | `@recorded_at`, `@expired_at` |
 | `@created_at`, `@updated_at` | `@sources` |
+| `@importance` (0 to 1), `@accesses`, `@last_access` | |
 
 Times are time values; they compare with ISO strings and print as ISO 8601.
+`SET n.@importance = 0.9` changes a node's importance, which weighs in
+recall ranking and decay (see the memory section of
+[DESIGN.md](../DESIGN.md)).
 
 ## Expressions and functions
 

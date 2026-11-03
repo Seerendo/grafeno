@@ -1,0 +1,86 @@
+# Builds the release files when a tag like v0.1.0 is pushed, and attaches
+# them to a GitHub release:
+#   grafeno-<version>-windows-x64-setup.exe, grafeno-x86_64-pc-windows-msvc.zip,
+#   grafeno-x86_64-unknown-linux-musl.tar.gz, grafeno_<version>_amd64.deb,
+#   grafeno-<version>-1.x86_64.rpm, and a .sha256 for each.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace --locked
+
+  linux:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the .tar.gz, .deb and .rpm
+        run: docker buildx build -f packaging/linux/Dockerfile --output dist/linux .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/linux/*
+
+  windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Grafeno Studio
+        working-directory: studio
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Build grafeno.exe
+        run: cargo build --release --locked -p grafeno-server
+      - name: Build the installer and the zip
+        shell: pwsh
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+            Where-Object name -eq "grafeno-server" | Select-Object -ExpandProperty version
+          choco install innosetup --no-progress -y
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DAppVersion=$version" packaging\windows\grafeno.iss
+          New-Item -ItemType Directory -Force dist\zip | Out-Null
+          Copy-Item target\release\grafeno.exe, README.md dist\zip\
+          Compress-Archive -Path dist\zip\* -DestinationPath dist\grafeno-x86_64-pc-windows-msvc.zip
+          Get-ChildItem dist\*.exe, dist\*.zip | ForEach-Object {
+            "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $($_.Name)" | Out-File -Encoding ascii "$($_.FullName).sha256"
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/*.exe
+            dist/*.zip
+            dist/*.sha256
+
+  publish:
+    needs: [linux, windows]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: files
+          merge-multiple: true
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" files/* --repo "$GITHUB_REPOSITORY" --title "Grafeno $GITHUB_REF_NAME" --generate-notes

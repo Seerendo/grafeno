@@ -19,6 +19,7 @@ use grafeno_core::{Edge, Error, Node, NodeId, Result, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::db::{Grafeno, ReadTx};
+use crate::memory::MemoryState;
 use crate::store::{decode, storage};
 
 pub const EXPORT_FORMAT: &str = "grafeno-export";
@@ -41,6 +42,9 @@ pub enum Record {
         text: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         embedding: Option<Vec<f32>>,
+        /// Present when it differs from the default state.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        memory: Option<MemoryState>,
     },
     Edge {
         ns: String,
@@ -62,6 +66,7 @@ struct RawRecord {
     node: Option<Node>,
     text: Option<String>,
     embedding: Option<Vec<f32>>,
+    memory: Option<MemoryState>,
     edge: Option<Edge>,
 }
 
@@ -79,6 +84,7 @@ impl RawRecord {
                 node: self.node.clone().ok_or_else(|| missing("node"))?,
                 text: self.text,
                 embedding: self.embedding,
+                memory: self.memory,
             },
             "edge" => Record::Edge {
                 ns: self.ns.clone().ok_or_else(|| missing("ns"))?,
@@ -135,10 +141,12 @@ impl ReadTx {
                 }
                 let node: Node = decode(value.value())?;
                 let id: NodeId = node.id;
+                let memory = self.memory(ns, &node)?;
                 let record = Record::Node {
                     ns: ns.clone(),
                     text: self.text(ns, id)?,
                     embedding: self.embedding(ns, id)?,
+                    memory: (memory != MemoryState::default_for(&node)).then_some(memory),
                     node,
                 };
                 write_record(out, &record)?;
@@ -206,9 +214,15 @@ impl Grafeno {
                         node,
                         text,
                         embedding,
+                        memory,
                     } => {
+                        let id = node.id;
                         tx.restore_node(&ns, node, text.as_deref(), embedding.as_deref())
                             .map_err(|e| at(e.to_string()))?;
+                        if let Some(memory) = memory {
+                            tx.restore_memory(&ns, id, memory)
+                                .map_err(|e| at(e.to_string()))?;
+                        }
                         namespaces.insert(ns);
                         stats.nodes += 1;
                     }

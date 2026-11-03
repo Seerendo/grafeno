@@ -10,7 +10,11 @@ use std::io::{self, BufRead, Write};
 use grafeno::{
     Direction, EdgeFilter, Error, Grafeno, NewEdge, NewNode, Node, NodeId, Props, ReadTx, Value,
 };
-use grafeno_memory::{ContextOptions, Expansion, RecallQuery, Signal, context_for, recall};
+use grafeno_memory::{
+    ConsolidationOptions, ContextOptions, DecayOptions, DuplicateOptions, Expansion, Ranking,
+    RecallQuery, Signal, Summary, consolidation_groups, context_for, find_duplicates, recall,
+    weak_memories, write_summary,
+};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -26,7 +30,9 @@ hold). Before answering anything that may depend on earlier conversations or sto
 knowledge, call `context` (or `recall` to get ids). Store new facts, decisions and \
 preferences with `remember`, and connect nodes with `relate`. When something stops being \
 true, `forget` it with mode \"invalidate\" so its history is kept; use \"retract\" only for \
-mistakes. Ids are the UUIDs these tools return.";
+mistakes. Give lasting facts a higher `importance`. From time to time, call `maintain` to \
+merge duplicates and `consolidate` old memories into summaries. Ids are the UUIDs these \
+tools return.";
 
 const SNIPPET_CHARS: usize = 400;
 
@@ -142,6 +148,9 @@ impl McpServer {
             "forget" => self.forget(arguments),
             "get_node" => self.get_node(arguments),
             "query" => self.query(arguments),
+            "merge" => self.merge(arguments),
+            "maintain" => self.maintain(arguments),
+            "consolidate" => self.consolidate(arguments),
             _ => return Err((-32602, format!("unknown tool: {name}"))),
         };
         Ok(match outcome {
@@ -195,6 +204,8 @@ impl McpServer {
             #[serde(default)]
             links: Vec<Link>,
             #[serde(default)]
+            importance: Option<f32>,
+            #[serde(default)]
             namespace: Option<String>,
         }
         let args: Args = parse_args(arguments)?;
@@ -221,10 +232,61 @@ impl McpServer {
         if let Some(name) = args.name {
             new.props.insert("name".into(), Value::String(name));
         }
-        let (id, edges) = self
+        let explicit_labels = new.labels != ["Memory"];
+        let (id, edges, reused) = self
             .db
             .write(|tx| {
-                let id = tx.create_node(ns, new)?;
+                // A named entity that already exists is updated instead of
+                // stored twice: same normalized name (or alias) and, when
+                // labels were given, one label in common.
+                let mut existing = None;
+                if let Some(name) = new.props.get("name").and_then(Value::as_str) {
+                    for candidate in tx.find_by_name(ns, name)? {
+                        let Some(node) = tx.node(ns, candidate)? else {
+                            continue;
+                        };
+                        if !explicit_labels || new.labels.iter().any(|label| node.has_label(label))
+                        {
+                            existing = Some(node);
+                            break;
+                        }
+                    }
+                }
+                let (id, reused) = match existing {
+                    Some(node) => {
+                        let id = node.id;
+                        let text = new.text.take().unwrap_or_default();
+                        let old = tx.text(ns, id)?.unwrap_or_default();
+                        if !old.to_lowercase().contains(&text.to_lowercase()) {
+                            let joined = if old.is_empty() {
+                                text
+                            } else {
+                                format!("{old}\n\n{text}")
+                            };
+                            tx.set_text(ns, id, &joined)?;
+                        }
+                        let mut props = std::mem::take(&mut new.props);
+                        props.remove("name");
+                        if !props.is_empty() {
+                            tx.set_node_props(ns, id, props)?;
+                        }
+                        if explicit_labels {
+                            for label in &new.labels {
+                                tx.add_label(ns, id, label)?;
+                            }
+                        }
+                        if let Some(embedding) = &new.embedding
+                            && tx.embedding(ns, id)?.is_none()
+                        {
+                            tx.set_embedding(ns, id, embedding)?;
+                        }
+                        (id, true)
+                    }
+                    None => (tx.create_node(ns, new)?, false),
+                };
+                if let Some(importance) = args.importance {
+                    tx.set_importance(ns, id, importance)?;
+                }
                 let mut edges = Vec::new();
                 for link in args.links {
                     let mut edge = NewEdge::new(id, link.label, parse_id(&link.to)?);
@@ -236,10 +298,12 @@ impl McpServer {
                     edge.valid_to = link.valid_to.as_ref().map(TimeInput::resolve).transpose()?;
                     edges.push(tx.create_edge(ns, edge)?);
                 }
-                Ok((id, edges))
+                Ok((id, edges, reused))
             })
             .map_err(describe)?;
-        Ok(ToolOutput::Json(json!({ "id": id, "edges": edges })))
+        Ok(ToolOutput::Json(
+            json!({ "id": id, "edges": edges, "reused": reused }),
+        ))
     }
 
     fn recall(&self, arguments: Value) -> ToolResult {
@@ -252,6 +316,7 @@ impl McpServer {
             .iter()
             .map(|result| (result.node.id, result.node.display_name()))
             .collect();
+        let ids: Vec<NodeId> = results.iter().map(|result| result.node.id).collect();
         let mut out = Vec::new();
         for result in results {
             let text = read
@@ -272,6 +337,7 @@ impl McpServer {
                         };
                         format!("{hops} hop(s) from {seed_name}")
                     }
+                    Signal::Memory { importance, .. } => format!("importance {importance:.2}"),
                 });
             }
             out.push(json!({
@@ -283,7 +349,19 @@ impl McpServer {
                 "why": why,
             }));
         }
+        drop(read);
+        self.touch(ns, &ids)?;
         Ok(ToolOutput::Json(json!({ "results": out })))
+    }
+
+    /// Records an access to recalled nodes, which slows their decay.
+    fn touch(&self, ns: &str, ids: &[NodeId]) -> Result<(), String> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.db
+            .write(|tx| tx.touch(ns, ids, grafeno::Timestamp::now()))
+            .map_err(describe)
     }
 
     fn context(&self, arguments: Value) -> ToolResult {
@@ -293,6 +371,9 @@ impl McpServer {
         let options = ContextOptions::with_budget(args.budget.unwrap_or(1_500));
         let read = self.db.begin_read().map_err(describe)?;
         let context = context_for(&read, ns, &query, &options).map_err(describe)?;
+        drop(read);
+        let ids: Vec<NodeId> = context.items.iter().map(|item| item.node).collect();
+        self.touch(ns, &ids)?;
         Ok(ToolOutput::Text(if context.items.is_empty() {
             "No relevant memories found.".into()
         } else {
@@ -362,6 +443,8 @@ impl McpServer {
             #[serde(default)]
             remove_labels: Vec<String>,
             #[serde(default)]
+            importance: Option<f32>,
+            #[serde(default)]
             namespace: Option<String>,
         }
         let args: Args = parse_args(arguments)?;
@@ -385,6 +468,9 @@ impl McpServer {
                 }
                 if let Some(text) = &args.text {
                     tx.set_text(ns, id, text)?;
+                }
+                if let Some(importance) = args.importance {
+                    tx.set_importance(ns, id, importance)?;
                 }
                 Ok(())
             })
@@ -506,6 +592,7 @@ impl McpServer {
             .map_err(describe)?
             .ok_or_else(|| format!("no node with id {id}"))?;
         let text = read.text(ns, id).map_err(describe)?;
+        let memory = read.memory(ns, &node).map_err(describe)?;
         let mut facts = Vec::new();
         for neighbor in read
             .neighbors(ns, id, Direction::Both, &EdgeFilter::any())
@@ -532,7 +619,161 @@ impl McpServer {
             "sources": node.sources,
             "created": node.created_at.date(),
             "updated": node.updated_at.date(),
+            "importance": round2(memory.importance),
+            "accesses": memory.accesses,
+            "last_access": memory.last_access.date(),
             "facts": facts,
+        })))
+    }
+
+    fn merge(&self, arguments: Value) -> ToolResult {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            keep: String,
+            merge: String,
+            #[serde(default)]
+            namespace: Option<String>,
+        }
+        let args: Args = parse_args(arguments)?;
+        let ns = self.ns(&args.namespace);
+        let keep = parse_id(&args.keep).map_err(describe)?;
+        let merged = parse_id(&args.merge).map_err(describe)?;
+        let report = self
+            .db
+            .write(|tx| tx.merge_nodes(ns, keep, merged))
+            .map_err(describe)?;
+        Ok(ToolOutput::Json(json!({
+            "id": report.kept,
+            "merged": report.merged,
+            "facts_moved": report.edges_moved,
+            "facts_dropped": report.edges_dropped,
+        })))
+    }
+
+    fn maintain(&self, arguments: Value) -> ToolResult {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            #[serde(default)]
+            limit: Option<usize>,
+            #[serde(default)]
+            namespace: Option<String>,
+        }
+        let args: Args = parse_args(arguments)?;
+        let ns = self.ns(&args.namespace);
+        let limit = args.limit.unwrap_or(10);
+        let read = self.db.begin_read().map_err(describe)?;
+        let brief = |node: &Node| json!({ "id": node.id, "name": node.display_name(), "labels": node.labels });
+
+        let options = DuplicateOptions {
+            limit,
+            ..DuplicateOptions::default()
+        };
+        let duplicates: Vec<Value> = find_duplicates(&read, ns, &options)
+            .map_err(describe)?
+            .iter()
+            .map(|pair| {
+                json!({
+                    "a": brief(&pair.a),
+                    "b": brief(&pair.b),
+                    "score": round2(pair.score),
+                    "reasons": pair.reasons,
+                })
+            })
+            .collect();
+
+        let options = DecayOptions {
+            limit,
+            ..DecayOptions::default()
+        };
+        let weak: Vec<Value> = weak_memories(&read, ns, &options)
+            .map_err(describe)?
+            .iter()
+            .map(|item| {
+                let mut value = brief(&item.node);
+                value["strength"] = json!(round2(item.strength));
+                value["last_access"] = json!(item.memory.last_access.date());
+                value
+            })
+            .collect();
+
+        let options = ConsolidationOptions {
+            limit,
+            ..ConsolidationOptions::default()
+        };
+        let mut consolidation = Vec::new();
+        for group in consolidation_groups(&read, ns, &options).map_err(describe)? {
+            let mut memories = Vec::new();
+            for memory in &group.memories {
+                let text = read
+                    .text(ns, memory.id)
+                    .map_err(describe)?
+                    .unwrap_or_default();
+                memories.push(json!({ "id": memory.id, "text": snippet(&text) }));
+            }
+            consolidation.push(json!({ "about": brief(&group.entity), "memories": memories }));
+        }
+
+        Ok(ToolOutput::Json(json!({
+            "duplicates": duplicates,
+            "weak": weak,
+            "consolidation": consolidation,
+            "hint": "Merge true duplicates with `merge`; relate different ones with \
+                distinct_from. Summarize each consolidation group with `consolidate`. Weak \
+                memories can be left alone, made more important with `update`, or deleted \
+                with `forget`.",
+        })))
+    }
+
+    fn consolidate(&self, arguments: Value) -> ToolResult {
+        fn yes() -> bool {
+            true
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            summary: String,
+            sources: Vec<String>,
+            #[serde(default)]
+            about: Option<String>,
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            embedding: Option<Vec<f32>>,
+            #[serde(default = "yes")]
+            archive_sources: bool,
+            #[serde(default)]
+            namespace: Option<String>,
+        }
+        let args: Args = parse_args(arguments)?;
+        let ns = self.ns(&args.namespace);
+        if args.sources.is_empty() {
+            return Err("`sources` must name the memories being summarized".into());
+        }
+        let summary = Summary {
+            text: args.summary,
+            name: args.name,
+            sources: parse_ids(&args.sources)?,
+            about: args
+                .about
+                .as_deref()
+                .map(parse_id)
+                .transpose()
+                .map_err(describe)?,
+            embedding: args.embedding,
+            archive_sources: args.archive_sources,
+            ..Summary::default()
+        };
+        let count = summary.sources.len();
+        let id = self
+            .db
+            .write(|tx| write_summary(tx, ns, summary))
+            .map_err(describe)?;
+        Ok(ToolOutput::Json(json!({
+            "id": id,
+            "summarized": count,
+            "archived": args.archive_sources,
         })))
     }
 }
@@ -553,6 +794,8 @@ struct QueryArgs {
     #[serde(default)]
     budget: Option<usize>,
     #[serde(default)]
+    include_archived: bool,
+    #[serde(default)]
     namespace: Option<String>,
 }
 
@@ -572,6 +815,8 @@ impl QueryArgs {
                 depth,
                 ..Expansion::default()
             }),
+            ranking: Some(Ranking::default()),
+            include_archived: self.include_archived,
         })
     }
 }
@@ -605,6 +850,10 @@ fn snippet(text: &str) -> String {
     }
 }
 
+fn round2(value: f32) -> f64 {
+    (f64::from(value) * 100.0).round() / 100.0
+}
+
 fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
@@ -623,12 +872,23 @@ fn tools() -> Value {
         "description": "ISO 8601 date or date-time, such as 2024-05-01 or 2024-05-01T10:30:00Z."
     });
     let id = |description: &str| json!({ "type": "string", "description": description });
+    let importance = json!({
+        "type": "number", "minimum": 0, "maximum": 1,
+        "description": "How much this matters, from 0 to 1 (default 0.5). Important memories rank \
+            higher and fade slower."
+    });
+    let include_archived = json!({
+        "type": "boolean",
+        "description": "Also return archived memories (replaced by summaries). Default: false."
+    });
     json!([
         {
             "name": "remember",
             "title": "Remember",
             "description": "Store a memory: a fact, decision, preference, person, project or document. \
-                It becomes searchable by `recall` and `context`. Optionally link it to existing nodes.",
+                It becomes searchable by `recall` and `context`. Optionally link it to existing nodes. \
+                With a `name` that already exists (ignoring case and accents, and with a label in \
+                common when labels are given), the existing node is updated instead and `reused` is true.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -638,6 +898,7 @@ fn tools() -> Value {
                     "props": { "type": "object", "description": "Extra structured properties." },
                     "sources": { "type": "array", "items": { "type": "string" }, "description": "Ids of the nodes this memory comes from." },
                     "embedding": { "type": "array", "items": { "type": "number" }, "description": "Optional embedding of the text." },
+                    "importance": importance.clone(),
                     "links": {
                         "type": "array",
                         "description": "Facts from the new node to existing nodes.",
@@ -670,6 +931,7 @@ fn tools() -> Value {
                     "labels": { "type": "array", "items": { "type": "string" }, "description": "Only nodes with one of these labels." },
                     "depth": { "type": "integer", "minimum": 0, "description": "Graph hops to expand from the best matches. Default: 1." },
                     "embedding": { "type": "array", "items": { "type": "number" }, "description": "Optional embedding of the query." },
+                    "include_archived": include_archived.clone(),
                     "namespace": namespace
                 },
                 "required": ["query"]
@@ -689,6 +951,7 @@ fn tools() -> Value {
                     "depth": { "type": "integer", "minimum": 0, "description": "Graph hops to expand. Default: 1." },
                     "limit": { "type": "integer", "minimum": 1, "description": "Maximum memories considered. Default: 20." },
                     "embedding": { "type": "array", "items": { "type": "number" }, "description": "Optional embedding of the query." },
+                    "include_archived": include_archived,
                     "namespace": namespace
                 },
                 "required": ["query"]
@@ -728,6 +991,7 @@ fn tools() -> Value {
                     "props": { "type": "object", "description": "Properties to merge; null removes a property." },
                     "add_labels": { "type": "array", "items": { "type": "string" } },
                     "remove_labels": { "type": "array", "items": { "type": "string" } },
+                    "importance": importance,
                     "namespace": namespace
                 },
                 "required": ["id"]
@@ -766,7 +1030,8 @@ fn tools() -> Value {
             "title": "Query",
             "description": "Run a read-only GQ query (Cypher-like) for structured questions, such as \
                 MATCH (p:Person)-[:works_at]->(c) VALID AT '2024-01-01' RETURN p.name, c.name. \
-                Pseudo-properties: n.@id, n.@text, e.@valid_from, e.@valid_to. Returns at most 200 rows.",
+                Pseudo-properties: n.@id, n.@text, n.@importance, e.@valid_from, e.@valid_to. \
+                Returns at most 200 rows.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -775,6 +1040,56 @@ fn tools() -> Value {
                     "namespace": namespace
                 },
                 "required": ["query"]
+            }
+        },
+        {
+            "name": "merge",
+            "title": "Merge",
+            "description": "Merge two nodes that are the same thing: `merge` is folded into `keep`. \
+                Facts move to the kept node, labels and missing properties are joined, the merged \
+                node's name becomes an alias, and the merged node is deleted.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "keep": id("Id of the node that stays."),
+                    "merge": id("Id of the duplicate, which is deleted."),
+                    "namespace": namespace
+                },
+                "required": ["keep", "merge"]
+            }
+        },
+        {
+            "name": "maintain",
+            "title": "Maintain",
+            "description": "Review memory health: likely duplicates (by name or meaning), weak \
+                memories that are fading, and groups of older memories about one entity that \
+                could be summarized with `consolidate`. Changes nothing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "description": "Maximum items per section. Default: 10." },
+                    "namespace": namespace
+                }
+            }
+        },
+        {
+            "name": "consolidate",
+            "title": "Consolidate",
+            "description": "Replace several memories with one summary you wrote. The summary links \
+                to its sources and to the entity it is about, and the sources are archived (kept, \
+                but left out of recall).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "summary": { "type": "string", "description": "The summary text." },
+                    "sources": { "type": "array", "items": { "type": "string" }, "description": "Ids of the memories summarized." },
+                    "about": id("Id of the entity the memories are about."),
+                    "name": { "type": "string", "description": "Optional name for the summary." },
+                    "embedding": { "type": "array", "items": { "type": "number" }, "description": "Optional embedding of the summary." },
+                    "archive_sources": { "type": "boolean", "description": "Archive the sources. Default: true." },
+                    "namespace": namespace
+                },
+                "required": ["summary", "sources"]
             }
         }
     ])

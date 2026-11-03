@@ -27,9 +27,19 @@ export interface Node {
   updated_at: number;
 }
 
+/** How much a node matters and how often it is used, for ranking and decay. */
+export interface MemoryState {
+  /** From 0 to 1; 0.5 by default. */
+  importance: number;
+  accesses: number;
+  /** Microseconds since the epoch; the last update until the first access. */
+  last_access: number;
+}
+
 export interface NodeWithText extends Node {
   /** The indexed text, when the node has one. */
   text?: string;
+  memory: MemoryState;
 }
 
 export interface Edge {
@@ -65,6 +75,8 @@ export interface NodePatch {
   remove_labels?: string[];
   text?: string | null;
   embedding?: number[] | null;
+  /** From 0 to 1. */
+  importance?: number;
 }
 
 export interface EdgeInput {
@@ -120,12 +132,25 @@ export interface RecallInput {
   candidates?: number;
   /** `true` (default) expands with default options, `false` disables it. */
   expand?: boolean | Expansion;
+  /** Also return archived memories. */
+  include_archived?: boolean;
+  /** `true` (default) weighs importance and recency, `false` ranks by relevance alone. */
+  ranking?: boolean | Ranking;
+  /** Record an access to each returned node. */
+  touch?: boolean;
+}
+
+export interface Ranking {
+  importance_weight?: number;
+  recency_weight?: number;
+  half_life_days?: number;
 }
 
 export type Signal =
   | { kind: "text"; rank: number; score: number }
   | { kind: "vector"; rank: number; similarity: number }
-  | { kind: "graph"; seed: Id; hops: number };
+  | { kind: "graph"; seed: Id; hops: number }
+  | { kind: "memory"; importance: number; recency: number };
 
 export interface Recalled {
   node: Node;
@@ -258,6 +283,48 @@ export interface BatchResult {
   refs: Record<string, Id>;
 }
 
+export interface Duplicate {
+  a: Node;
+  b: Node;
+  /** From 0 to 1; 1 is the same normalized name. */
+  score: number;
+  reasons: string[];
+}
+
+export interface MergeReport {
+  kept: Id;
+  merged: Id;
+  edges_moved: number;
+  edges_dropped: number;
+}
+
+export interface WeakMemory {
+  node: Node;
+  /** importance × recency × use, from 0 to 1. */
+  strength: number;
+  memory: MemoryState;
+}
+
+export interface ConsolidationGroup {
+  /** The entity the memories are about. */
+  entity: Node;
+  memories: Node[];
+}
+
+export interface SummaryInput {
+  text: string;
+  /** The memories summarized. */
+  sources: Id[];
+  /** The entity they are about. */
+  about?: Id;
+  name?: string;
+  /** Default: `["Summary"]`. */
+  labels?: string[];
+  embedding?: number[];
+  /** Archive the sources (default true). */
+  archive_sources?: boolean;
+}
+
 export interface GrafenoOptions {
   /** Base URL, such as `http://127.0.0.1:7810`. */
   url: string;
@@ -288,7 +355,9 @@ export class Grafeno {
   constructor(options: GrafenoOptions) {
     this.#url = options.url.replace(/\/+$/, "");
     this.#token = options.token;
-    this.#fetch = options.fetch ?? fetch;
+    // Browsers refuse `fetch` called as a method of another object
+    // ("Illegal invocation"), so the global one is bound to `globalThis`.
+    this.#fetch = options.fetch ?? fetch.bind(globalThis);
   }
 
   /** Operations on one namespace (a user, organization or agent). */
@@ -531,4 +600,58 @@ export class Namespace {
   batch(ops: BatchOp[]): Promise<BatchResult> {
     return this.#call("POST", "/batch", { ops });
   }
+
+  // Memory
+
+  /** Nodes with this name or alias, ignoring case, accents and punctuation. */
+  resolve(name: string, label?: string): Promise<Node[]> {
+    return this.#call("GET", `/resolve${queryString({ name, label })}`);
+  }
+
+  /** Likely duplicates, best first: by name, and by meaning when `vectors` is not false. */
+  duplicates(options: { label?: string; min_score?: number; vectors?: boolean; limit?: number } = {}): Promise<Duplicate[]> {
+    return this.#call("GET", `/duplicates${queryString(options)}`);
+  }
+
+  /** Folds `merge` into `keep`: edges move, labels and missing properties join, `merge` is deleted. */
+  merge(keep: Id, merge: Id): Promise<MergeReport> {
+    return this.#call("POST", "/merge", { keep, merge });
+  }
+
+  /** Records an access to each node now. */
+  async touch(ids: Id[]): Promise<void> {
+    await this.#call("POST", "/touch", { ids });
+  }
+
+  /** Memories whose strength fell below the threshold, weakest first. */
+  weak(options: { half_life_days?: number; threshold?: number; label?: string; limit?: number } = {}): Promise<WeakMemory[]> {
+    return this.#call("GET", `/weak${queryString(options)}`);
+  }
+
+  /** Adds the `Archived` label, which recall skips. Returns how many were archived. */
+  async archive(ids: Id[]): Promise<number> {
+    const result = await this.#call<{ archived: number }>("POST", "/archive", { ids });
+    return result.archived;
+  }
+
+  /** Groups of older memories about one entity, ready to be summarized. */
+  consolidation(
+    options: { older_than_days?: number; min_size?: number; limit?: number; labels?: string[] } = {},
+  ): Promise<ConsolidationGroup[]> {
+    const { labels, ...rest } = options;
+    return this.#call("GET", `/consolidation${queryString({ ...rest, labels: labels?.join(",") })}`);
+  }
+
+  /** Stores a summary of several memories and (by default) archives them. */
+  summarize(input: SummaryInput): Promise<{ id: Id }> {
+    return this.#call("POST", "/summaries", input);
+  }
+}
+
+function queryString(values: Record<string, string | number | boolean | undefined>): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(values)) {
+    if (value !== undefined) params.set(key, String(value));
+  }
+  return params.size ? `?${params}` : "";
 }

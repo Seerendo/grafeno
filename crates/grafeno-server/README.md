@@ -1,8 +1,13 @@
 # grafeno-server
 
-The `grafeno` binary serves and manages a Grafeno database:
+The `grafeno` binary serves and manages a Grafeno database (installers:
+[docs/install.md](../../docs/install.md)):
 
-- `grafeno serve`: a JSON HTTP API, for applications such as Grafito.
+- `grafeno serve`: a JSON HTTP API, for applications such as Grafito, and
+  Grafeno Studio, the web interface, at `/studio/`.
+- `grafeno config init | path | token`: the settings file of an installed
+  server (`grafeno.toml`).
+- `grafeno service install | uninstall`: the Windows service.
 - `grafeno mcp`: an MCP server over stdio, for agents (Claude Code, Claude
   Desktop and any other MCP client).
 - `grafeno shell`: an interactive console for GQ queries and
@@ -25,6 +30,18 @@ grafeno mcp --db ~/.grafeno/memory.redb --namespace me
 A database file can be open in only one process at a time, so an HTTP server
 and an MCP server cannot share a file. Use `--memory` for a throwaway
 in-memory database.
+
+`grafeno serve` options (each also from the environment or `--config`):
+
+| Option            | Environment     | Default          |
+| ----------------- | --------------- | ---------------- |
+| `--config FILE`   | `GRAFENO_CONFIG`| none             |
+| `--db FILE`       | `GRAFENO_DB`    | `grafeno.redb`   |
+| `--memory`        |                 | off              |
+| `--addr ADDR`     | `GRAFENO_ADDR`  | `127.0.0.1:7810` |
+| `--token TOKEN`   | `GRAFENO_TOKEN` | none (no auth)   |
+| `--no-studio`     |                 | Studio on        |
+| `--cors-origin O` (repeatable, `*` for any) | | none   |
 
 ## Shell
 
@@ -127,7 +144,7 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `POST`   | `/v1/{ns}/nodes`                      | node (with `id`: upsert)                                | `{id, created}`               |
 | `GET`    | `/v1/{ns}/nodes`                      | `?label=&after=&limit=`                                 | `{items, next}`               |
 | `GET`    | `/v1/{ns}/edges`                      | `?label=&after=&limit=`                                 | `{items, next}`               |
-| `GET`    | `/v1/{ns}/nodes/{id}`                 |                                                         | node with `text`              |
+| `GET`    | `/v1/{ns}/nodes/{id}`                 |                                                         | node with `text` and `memory` |
 | `PUT`    | `/v1/{ns}/nodes/{id}`                 | node                                                    | `{id, created}`               |
 | `PATCH`  | `/v1/{ns}/nodes/{id}`                 | patch                                                   | node with `text`              |
 | `DELETE` | `/v1/{ns}/nodes/{id}`                 |                                                         | 204                           |
@@ -146,21 +163,34 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `POST`   | `/v1/{ns}/context`                    | recall query + `{budget, fact_share, max_facts, facts}` | `{items, facts, tokens, rendered}` |
 | `POST`   | `/v1/{ns}/batch`                      | `{ops}`                                                 | `{results, refs}`             |
 | `POST`   | `/v1/{ns}/query`                      | `{query, params?}` ([GQ](../../docs/query-language.md)) | `{columns, rows, stats}`      |
+| `GET`    | `/v1/{ns}/resolve`                    | `?name=&label=`                                         | nodes with that name or alias |
+| `GET`    | `/v1/{ns}/duplicates`                 | `?label=&min_score=&vectors=&limit=`                    | `[{a, b, score, reasons}]`    |
+| `POST`   | `/v1/{ns}/merge`                      | `{keep, merge}`                                         | `{kept, merged, edges_moved, edges_dropped}` |
+| `POST`   | `/v1/{ns}/touch`                      | `{ids}`                                                 | 204                           |
+| `GET`    | `/v1/{ns}/weak`                       | `?half_life_days=&threshold=&label=&limit=`             | `[{node, strength, memory}]`  |
+| `POST`   | `/v1/{ns}/archive`                    | `{ids}`                                                 | `{archived}`                  |
+| `GET`    | `/v1/{ns}/consolidation`              | `?older_than_days=&min_size=&labels=a,b&limit=`         | `[{entity, memories}]`        |
+| `POST`   | `/v1/{ns}/summaries`                  | `{text, sources, about?, name?, labels?, embedding?, archive_sources?}` | `{id}` (201)  |
 
 - **Listings** return up to `limit` items (default 100, at most 1000) in id
   order; when `next` is set, pass it as `after` to get the following page.
 - **node**: `{labels, props?, sources?, text?, embedding?}`. `PUT` and upserts
   replace the whole node; a missing `text` or `embedding` is removed, edges
   are kept.
-- **patch**: `{props?, add_labels?, remove_labels?, text?, embedding?}`.
-  `props` is merged (`null` removes a key); `text: null` or
+- **patch**: `{props?, add_labels?, remove_labels?, text?, embedding?,
+  importance?}`. `props` is merged (`null` removes a key); `text: null` or
   `embedding: null` removes them.
 - **edge**: `{from, label, to, props?, sources?, valid_from?, valid_to?}`.
 - **filter**: `{labels?, valid_at?, known_at?}`. Without `known_at`, retracted
   edges are left out.
 - **recall query**: `{text?, embedding?, limit?, labels?, candidates?,
-  expand?}`, where `expand` is `true` (default), `false`, or
-  `{depth, direction, filter, decay, seeds}`.
+  expand?, ranking?, include_archived?, touch?}`, where `expand` is `true`
+  (default), `false`, or `{depth, direction, filter, decay, seeds}`;
+  `ranking` is `true` (default: importance and recency weigh in), `false`, or
+  `{importance_weight, recency_weight, half_life_days}`; archived memories
+  are left out unless `include_archived`; `touch` records an access to each
+  result.
+- **memory** (in node responses): `{importance, accesses, last_access}`.
 
 ### Batches
 
@@ -192,14 +222,17 @@ Syncing a note and replacing its links in one request:
 
 | Tool       | What it does                                                                   |
 | ---------- | ------------------------------------------------------------------------------ |
-| `remember` | Stores a memory (text, optional name, labels and links to existing nodes).     |
-| `recall`   | Hybrid search; returns ids, names, snippets and why each result matched.       |
+| `remember` | Stores a memory (text, optional name, labels, importance and links). A known `name` updates that entity instead. |
+| `recall`   | Hybrid search; returns ids, names, snippets and why each result matched. Records accesses. |
 | `context`  | Relevant memories and facts as compact text within a token budget.             |
 | `relate`   | Records a fact (edge) between two nodes, with optional valid dates.           |
-| `update`   | Replaces a node's text, renames it, merges properties or changes labels.      |
+| `update`   | Replaces a node's text, renames it, merges properties, changes labels or importance. |
 | `forget`   | Invalidates (default), retracts or deletes a fact; deletes a node.            |
 | `get_node` | A node with its text, properties and connecting facts.                        |
 | `query`    | A read-only [GQ](../../docs/query-language.md) statement; at most 200 rows.   |
+| `merge`    | Folds a duplicate node into another one.                                       |
+| `maintain` | Lists likely duplicates, weak memories and groups ready to consolidate.        |
+| `consolidate` | Stores a summary of several memories and archives them.                     |
 
 Every tool takes an optional `namespace`, which defaults to `--namespace`.
 

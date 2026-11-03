@@ -5,6 +5,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+build = "build.rs"
+
 [lib]
 path = "src/lib.rs"
 
@@ -20,11 +22,55 @@ grafeno-memory = { path = "../grafeno-memory" }
 grafeno-query.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync"] }
 uuid.workspace = true
 rustyline = "15"
 ureq = { version = "3", features = ["json"] }
+include_dir = "0.7"
+tower-http = { version = "0.6", features = ["cors"] }
+toml = "0.9"
+getrandom = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+
+# `cargo deb` (packaging/linux/Dockerfile builds it). The scripts create the
+# grafeno user, /etc/grafeno/grafeno.toml with a token, and start the service.
+[package.metadata.deb]
+name = "grafeno"
+maintainer = "Seerendo <idarkmer@gmail.com>"
+copyright = "2026, Seerendo"
+extended-description = """\
+Grafeno is a graph engine for agent memory and knowledge: a property graph \
+with namespaces, facts with valid and record time, full-text and vector \
+search, hybrid recall, the GQ query language, an MCP server and the Grafeno \
+Studio web interface. The package runs it as the systemd service `grafeno`."""
+section = "database"
+priority = "optional"
+depends = ""
+maintainer-scripts = "../../packaging/linux/debian/"
+assets = [
+    ["target/release/grafeno", "usr/bin/", "755"],
+    ["../../packaging/linux/grafeno.service", "lib/systemd/system/grafeno.service", "644"],
+    ["../../packaging/linux/setup.sh", "usr/share/grafeno/setup.sh", "755"],
+    ["../../README.md", "usr/share/doc/grafeno/README.md", "644"],
+]
+
+# `cargo generate-rpm`.
+[package.metadata.generate-rpm]
+name = "grafeno"
+summary = "Graph engine for agent memory and knowledge"
+license = "Unspecified"
+post_install_script = "../../packaging/linux/rpm/post.sh"
+pre_uninstall_script = "../../packaging/linux/rpm/preun.sh"
+post_uninstall_script = "../../packaging/linux/rpm/postun.sh"
+assets = [
+    { source = "target/release/grafeno", dest = "/usr/bin/grafeno", mode = "755" },
+    { source = "../../packaging/linux/grafeno.service", dest = "/usr/lib/systemd/system/grafeno.service", mode = "644" },
+    { source = "../../packaging/linux/setup.sh", dest = "/usr/share/grafeno/setup.sh", mode = "755" },
+    { source = "../../README.md", dest = "/usr/share/doc/grafeno/README.md", mode = "644", doc = true },
+]

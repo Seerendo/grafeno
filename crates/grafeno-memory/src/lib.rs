@@ -22,9 +22,15 @@
 //! ```
 
 mod context;
+mod maintenance;
 mod recall;
 
 pub use context::{
     Context, ContextFact, ContextItem, ContextOptions, context_for, estimate_tokens,
 };
-pub use recall::{Expansion, RecallQuery, Recalled, Signal, recall};
+pub use maintenance::{
+    ConsolidationGroup, ConsolidationOptions, DISTINCT_FROM, DecayOptions, Duplicate,
+    DuplicateOptions, Summary, WeakMemory, archive, consolidation_groups, find_duplicates,
+    weak_memories, write_summary,
+};
+pub use recall::{ARCHIVED, Expansion, Ranking, RecallQuery, Recalled, Signal, recall};

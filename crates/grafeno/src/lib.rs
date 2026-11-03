@@ -24,6 +24,7 @@
 mod check;
 mod db;
 mod dump;
+mod memory;
 mod stats;
 mod store;
 mod text;
@@ -34,6 +35,7 @@ pub use check::{CheckReport, RebuildReport};
 pub use db::{Grafeno, ReadTx, SCHEMA_VERSION, WriteTx};
 pub use dump::{DumpStats, EXPORT_FORMAT, EXPORT_VERSION, Record};
 pub use grafeno_core::*;
+pub use memory::{DEFAULT_IMPORTANCE, MemoryState, MergeReport, names_of, normalize_name};
 pub use stats::{NamespaceInfo, NamespaceStats};
 pub use text::tokenize;
 pub use traverse::{Direction, EdgeFilter, Neighbor, Path, Subgraph};

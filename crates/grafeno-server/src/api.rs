@@ -3,10 +3,11 @@
 
 use std::collections::HashMap;
 
+use grafeno::MemoryState;
 use grafeno::{
     Direction, EdgeFilter, Error, NewEdge, NewNode, Node, NodeId, Props, ReadTx, Result, Timestamp,
 };
-use grafeno_memory::{ContextOptions, Expansion, RecallQuery};
+use grafeno_memory::{ContextOptions, Expansion, Ranking, RecallQuery};
 use serde::{Deserialize, Serialize};
 
 /// A point in time: microseconds since the Unix epoch, or an ISO 8601 string.
@@ -192,6 +193,57 @@ pub struct RecallInput {
     pub candidates: usize,
     #[serde(default)]
     pub expand: ExpandSetting,
+    /// Also return archived memories.
+    #[serde(default)]
+    pub include_archived: bool,
+    /// `true` (default) weighs importance and recency, `false` ranks by
+    /// relevance alone, or `{importance_weight, recency_weight, half_life_days}`.
+    #[serde(default)]
+    pub ranking: RankingSetting,
+    /// Record an access to each returned node (for decay).
+    #[serde(default)]
+    pub touch: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RankingInput {
+    #[serde(default)]
+    pub importance_weight: Option<f32>,
+    #[serde(default)]
+    pub recency_weight: Option<f32>,
+    #[serde(default)]
+    pub half_life_days: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum RankingSetting {
+    Enabled(bool),
+    Options(RankingInput),
+}
+
+impl Default for RankingSetting {
+    fn default() -> Self {
+        Self::Enabled(true)
+    }
+}
+
+impl RankingSetting {
+    pub fn resolve(&self) -> Option<Ranking> {
+        let base = Ranking::default();
+        match self {
+            Self::Enabled(false) => None,
+            Self::Enabled(true) => Some(base),
+            Self::Options(options) => Some(Ranking {
+                importance_weight: options.importance_weight.unwrap_or(base.importance_weight),
+                recency_weight: options.recency_weight.unwrap_or(base.recency_weight),
+                half_life_secs: options
+                    .half_life_days
+                    .map_or(base.half_life_secs, |days| days * 86_400.0),
+            }),
+        }
+    }
 }
 
 fn default_limit() -> usize {
@@ -225,6 +277,8 @@ impl RecallInput {
             labels: self.labels.clone(),
             candidates: self.candidates,
             expand,
+            ranking: self.ranking.resolve(),
+            include_archived: self.include_archived,
         })
     }
 }
@@ -273,12 +327,14 @@ pub struct NodeOutput {
     pub node: Node,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    pub memory: MemoryState,
 }
 
 impl NodeOutput {
     pub fn load(read: &ReadTx, ns: &str, node: Node) -> Result<Self> {
         let text = read.text(ns, node.id)?;
-        Ok(Self { node, text })
+        let memory = read.memory(ns, &node)?;
+        Ok(Self { node, text, memory })
     }
 }
 

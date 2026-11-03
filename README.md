@@ -23,6 +23,29 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
 - **Phase 5, shell and query language:** `grafeno shell`, a console like
   `psql` for a file or a server, and [GQ](docs/query-language.md), a
   Cypher-style language with time travel (`VALID AT`, `KNOWN AT`).
+- **Phase 6, Studio and installers:** Grafeno Studio, the web interface
+  (explorer, graph view with time travel, query editor, search and context
+  lab, administration) served by `grafeno serve` at `/studio/`; a Windows
+  installer with a Windows service; `.deb` and `.rpm` packages with a
+  systemd service; `install.sh` for any Linux. See
+  [docs/install.md](docs/install.md).
+- **Phase 7, memory:** entities found by normalized names and aliases (MCP
+  `remember` updates them instead of duplicating), importance, accesses and
+  decay in recall ranking, duplicate detection and merging, archiving, and
+  consolidation of old memories into summaries; a Memory view in the Studio.
+
+## Installing
+
+| System | Install |
+| ------ | ------- |
+| Windows | `grafeno-<version>-windows-x64-setup.exe` |
+| Debian, Ubuntu | `sudo apt install ./grafeno_<version>-1_amd64.deb` |
+| Fedora, RHEL | `sudo dnf install ./grafeno-<version>-1.x86_64.rpm` |
+| Any Linux | `curl -fsSL https://raw.githubusercontent.com/Seerendo/grafeno/main/install.sh \| sh` |
+
+Then open Grafeno Studio at <http://127.0.0.1:7810/studio/>, with the token
+from `grafeno config token`. Details, Docker and settings:
+[docs/install.md](docs/install.md).
 
 ```text
 $ grafeno shell --db memory.redb -n vault

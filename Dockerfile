@@ -1,11 +1,21 @@
-# Grafeno server image: `grafeno serve` on port 7810, data in /data.
+# Grafeno server image: `grafeno serve` on port 7810 (Grafeno Studio at
+# /studio/), data in /data.
 #
 #   docker build -t grafeno .
 #   docker run -p 7810:7810 -v grafeno-data:/data -e GRAFENO_TOKEN=change-me grafeno
 
+FROM node:24-slim AS studio
+WORKDIR /src
+COPY clients/typescript clients/typescript
+COPY studio/package.json studio/package-lock.json studio/
+RUN cd studio && npm ci --no-audit --no-fund
+COPY studio studio
+RUN cd studio && npm run build
+
 FROM rust:1-slim-trixie AS build
 WORKDIR /src
 COPY . .
+COPY --from=studio /src/studio/dist studio/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked -p grafeno-server \

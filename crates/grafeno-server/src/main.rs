@@ -1,15 +1,16 @@
-//! The `grafeno` command: serves a Grafeno database over HTTP or MCP.
-
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::process::ExitCode;
-use std::sync::Arc;
+//! The `grafeno` command: serves a Grafeno database over HTTP or MCP, runs
+//! it as a service, and manages it from a console.
 
 use clap::{Args, Parser, Subcommand};
 use grafeno::Grafeno;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::process::ExitCode;
 
+use grafeno_server::config::{self, Config};
+use grafeno_server::mcp;
+use grafeno_server::service::{self, Overrides, ServerSettings};
 use grafeno_server::shell::{Backend, Shell, read_script, stdin_script};
-use grafeno_server::{http, mcp};
 
 #[derive(Parser)]
 #[command(
@@ -24,17 +25,38 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Serve the JSON HTTP API.
+    /// Serve the JSON HTTP API and Grafeno Studio (at /studio/).
     Serve {
-        #[command(flatten)]
-        db: DbArgs,
-        /// Address to listen on.
-        #[arg(long, env = "GRAFENO_ADDR", default_value = "127.0.0.1:7810")]
-        addr: SocketAddr,
+        /// Settings file (`grafeno.toml`); flags and environment variables
+        /// take precedence over it.
+        #[arg(long, env = "GRAFENO_CONFIG")]
+        config: Option<PathBuf>,
+        /// Database file, created if missing. Default: grafeno.redb.
+        #[arg(long, env = "GRAFENO_DB")]
+        db: Option<PathBuf>,
+        /// Keep everything in memory instead of a file (lost on exit).
+        #[arg(long, conflicts_with = "db")]
+        memory: bool,
+        /// Address to listen on. Default: 127.0.0.1:7810.
+        #[arg(long, env = "GRAFENO_ADDR")]
+        addr: Option<SocketAddr>,
         /// If set, every `/v1` request needs `Authorization: Bearer <token>`.
         #[arg(long, env = "GRAFENO_TOKEN", hide_env_values = true)]
         token: Option<String>,
+        /// Do not serve Grafeno Studio.
+        #[arg(long)]
+        no_studio: bool,
+        /// Allow browsers on this origin to call the API (repeatable; `*`
+        /// for any), such as a Studio hosted elsewhere.
+        #[arg(long = "cors-origin")]
+        cors_origins: Vec<String>,
     },
+    /// Create or read the settings file of an installed server.
+    #[command(subcommand)]
+    Config(ConfigCommand),
+    /// Run Grafeno as a Windows service.
+    #[command(subcommand)]
+    Service(ServiceCommand),
     /// Serve MCP (Model Context Protocol) over stdin and stdout.
     Mcp {
         #[command(flatten)]
@@ -45,6 +67,9 @@ enum Command {
     },
     /// An interactive console for GQ queries and administration, like psql.
     Shell {
+        /// Connect to the server of this settings file (its address and token).
+        #[arg(long, conflicts_with_all = ["url", "db", "memory"])]
+        config: Option<PathBuf>,
         /// Database file to open directly (stop any server using it first).
         #[arg(long, conflicts_with_all = ["url", "memory"])]
         db: Option<PathBuf>,
@@ -122,6 +147,52 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Write a settings file with a new random token.
+    Init {
+        /// Where to write it. Default: the system location (`grafeno config path`).
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Database file of the server. Default: grafeno.redb in a data folder next to the settings.
+        #[arg(long)]
+        db: Option<PathBuf>,
+        #[arg(long, default_value = grafeno_server::config::DEFAULT_ADDR)]
+        addr: SocketAddr,
+        /// Replace an existing file (and its token).
+        #[arg(long)]
+        force: bool,
+    },
+    /// Print where installers keep the settings on this system.
+    Path,
+    /// Print the token of a settings file (for Grafeno Studio or clients).
+    Token {
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceCommand {
+    /// Register the `Grafeno` service and start it (as administrator).
+    Install {
+        /// Settings file the service reads. Default: the system location.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Register it without starting it.
+        #[arg(long)]
+        no_start: bool,
+    },
+    /// Stop and remove the service (as administrator).
+    Uninstall,
+    /// Entry point used by Windows to run the service.
+    #[command(hide = true)]
+    Run {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+}
+
 /// The database file of an administration command. Stop any server using
 /// it first: only one process can open it.
 #[derive(Args)]
@@ -181,18 +252,56 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
-        Command::Serve { db, addr, token } => {
-            let state = http::AppState {
-                db: Arc::new(db.open()?),
-                token: token.filter(|token| !token.is_empty()).map(Arc::from),
+        Command::Serve {
+            config,
+            db,
+            memory,
+            addr,
+            token,
+            no_studio,
+            cors_origins,
+        } => {
+            let config = config.map(|path| Config::load(&path)).transpose()?;
+            let overrides = Overrides {
+                db,
+                memory,
+                addr,
+                token,
+                no_studio,
+                cors_origins,
             };
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?
-                .block_on(http::serve(state, addr))?;
+            service::run_until_signal(ServerSettings::resolve(config, overrides))?;
         }
+        Command::Config(command) => match command {
+            ConfigCommand::Init {
+                path,
+                db,
+                addr,
+                force,
+            } => {
+                let path = path.unwrap_or_else(config::default_path);
+                let db = db.unwrap_or_else(|| {
+                    path.parent()
+                        .unwrap_or_else(|| std::path::Path::new("."))
+                        .join("data")
+                        .join("grafeno.redb")
+                });
+                config::init(&path, &db, addr, force)?;
+                println!("Wrote {}.", path.display());
+            }
+            ConfigCommand::Path => println!("{}", config::default_path().display()),
+            ConfigCommand::Token { path } => {
+                let path = path.unwrap_or_else(config::default_path);
+                match Config::load(&path)?.token {
+                    Some(token) => println!("{token}"),
+                    None => return Err(format!("{} has no token", path.display()).into()),
+                }
+            }
+        },
+        Command::Service(command) => service_command(command)?,
         Command::Mcp { db, namespace } => mcp::run(db.open()?, namespace)?,
         Command::Shell {
+            config,
             db,
             memory,
             url,
@@ -202,6 +311,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             file,
             json,
         } => {
+            let (url, token) = match config {
+                Some(path) => {
+                    let config = Config::load(&path)?;
+                    (Some(config.local_url()), token.or(config.token))
+                }
+                None => (url, token),
+            };
             let backend = match url {
                 Some(url) => Backend::remote(&url, token.filter(|t| !t.is_empty())),
                 None if memory => Backend::Local(Grafeno::in_memory()?),
@@ -319,4 +435,45 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn service_command(command: ServiceCommand) -> Result<(), Box<dyn std::error::Error>> {
+    use grafeno_server::service::windows;
+    match command {
+        ServiceCommand::Install { config, no_start } => {
+            let config = config.unwrap_or_else(config::default_path);
+            if !config.exists() {
+                return Err(format!(
+                    "{} does not exist; create it with `grafeno config init`",
+                    config.display()
+                )
+                .into());
+            }
+            windows::install(&config, !no_start)?;
+            println!(
+                "Installed the {} service{}.",
+                windows::NAME,
+                if no_start { "" } else { " and started it" }
+            );
+        }
+        ServiceCommand::Uninstall => {
+            windows::uninstall()?;
+            println!("Removed the {} service.", windows::NAME);
+        }
+        ServiceCommand::Run { config } => {
+            windows::dispatch(config.unwrap_or_else(config::default_path))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn service_command(command: ServiceCommand) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = command;
+    Err(
+        "`grafeno service` is for Windows. On Linux the packages install a systemd unit: \
+         `systemctl enable --now grafeno` (or use install.sh --service)."
+            .into(),
+    )
 }

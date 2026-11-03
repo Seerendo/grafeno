@@ -449,3 +449,28 @@ fn helpful_errors() {
         );
     }
 }
+
+#[test]
+fn memory_pseudo_properties() {
+    let db = company();
+    let result = run(
+        &db,
+        "MATCH (a:Person {name: 'Ana'}) SET a.@importance = 0.9 RETURN a.@importance, a.@accesses",
+    );
+    assert_eq!(result.to_json()["rows"], json!([[0.9, 0]]));
+    assert_eq!(
+        rows(
+            &db,
+            "MATCH (p:Person) WHERE p.@importance > 0.5 RETURN p.name"
+        ),
+        json!([["Ana"]])
+    );
+    assert!(fail(&db, "MATCH (a {name: 'Ana'}) SET a.@importance = 2").contains("between 0 and 1"));
+    let last = run(&db, "MATCH (a {name: 'Bob'}) RETURN a.@last_access");
+    assert!(
+        last.to_json()["rows"][0][0]
+            .as_str()
+            .unwrap()
+            .ends_with('Z')
+    );
+}

@@ -933,12 +933,20 @@ fn set(
                 (Target::Node(id), "embedding", value) => {
                     tx.set_embedding(ns, *id, &embedding_from(value)?)?
                 }
+                (Target::Node(id), "importance", Value::Int(_) | Value::Float(_)) => {
+                    let importance = match value {
+                        Value::Int(i) => i as f32,
+                        Value::Float(f) => f as f32,
+                        _ => unreachable!(),
+                    };
+                    tx.set_importance(ns, *id, importance)?
+                }
                 (Target::Edge(id), "valid_to", value) => {
                     tx.invalidate_edge(ns, *id, to_time(value)?)?
                 }
                 (Target::Node(_), other, _) => {
                     return Err(QueryError::runtime(format!(
-                        "SET can change @text and @embedding of a node, not @{other} (labels: SET n:Label)"
+                        "SET can change @text, @embedding and @importance of a node, not @{other} (labels: SET n:Label)"
                     )));
                 }
                 (Target::Edge(_), other, _) => {
