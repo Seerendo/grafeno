@@ -364,22 +364,44 @@ impl<'a> Runner<'a> {
                 known_at,
                 filter,
             } => {
-                let edges = self.time_filter(valid_at.as_ref(), known_at.as_ref())?;
-                let ctx = self.ctx(&edges);
                 let new_vars: Vec<String> = patterns
                     .iter()
                     .flat_map(Pattern::variables)
                     .map(str::to_owned)
                     .collect();
+                // `VALID AT at` may name a variable (one time per row, as
+                // with `temporal.series`); otherwise it is computed once.
+                let per_row = [valid_at, known_at]
+                    .into_iter()
+                    .flatten()
+                    .any(mentions_variables);
+                let shared = if per_row {
+                    EdgeFilter::any()
+                } else {
+                    self.time_filter(valid_at.as_ref(), known_at.as_ref(), &Row::new())?
+                };
                 let matched = |rows: Vec<Row>| -> Result<Vec<Row>, QueryError> {
-                    let mut rows = rows;
-                    for pattern in patterns {
-                        rows = match_pattern(&ctx, rows, pattern)?;
+                    let run =
+                        |edges: &EdgeFilter, rows: Vec<Row>| -> Result<Vec<Row>, QueryError> {
+                            let ctx = self.ctx(edges);
+                            let mut rows = rows;
+                            for pattern in patterns {
+                                rows = match_pattern(&ctx, rows, pattern)?;
+                            }
+                            if let Some(filter) = filter {
+                                rows = keep(&ctx, rows, filter)?;
+                            }
+                            Ok(rows)
+                        };
+                    if !per_row {
+                        return run(&shared, rows);
                     }
-                    if let Some(filter) = filter {
-                        rows = keep(&ctx, rows, filter)?;
+                    let mut out = Vec::new();
+                    for row in rows {
+                        let edges = self.time_filter(valid_at.as_ref(), known_at.as_ref(), &row)?;
+                        out.extend(run(&edges, vec![row])?);
                     }
-                    Ok(rows)
+                    Ok(out)
                 };
                 flow.rows = if *optional {
                     let mut out = Vec::new();
@@ -573,16 +595,16 @@ impl<'a> Runner<'a> {
         &self,
         valid_at: Option<&Expr>,
         known_at: Option<&Expr>,
+        row: &Row,
     ) -> Result<EdgeFilter, QueryError> {
         let any = EdgeFilter::any();
         let ctx = self.ctx(&any);
-        let empty = Row::new();
         let mut filter = EdgeFilter::any();
         if let Some(at) = valid_at {
-            filter = filter.valid_at(to_time(&eval(&ctx, at, Scope::Row(&empty))?)?);
+            filter = filter.valid_at(to_time(&eval(&ctx, at, Scope::Row(row))?)?);
         }
         if let Some(at) = known_at {
-            filter = filter.known_at(to_time(&eval(&ctx, at, Scope::Row(&empty))?)?);
+            filter = filter.known_at(to_time(&eval(&ctx, at, Scope::Row(row))?)?);
         }
         Ok(filter)
     }
@@ -597,6 +619,13 @@ impl<'a> Runner<'a> {
         let edges = EdgeFilter::any();
         eval(&self.ctx(&edges), expr, Scope::Row(row))
     }
+}
+
+/// Whether an expression reads a variable of the row.
+fn mentions_variables(expr: &Expr) -> bool {
+    let mut found = false;
+    expr.visit(&mut |inner| found |= matches!(inner, Expr::Var(_)));
+    found
 }
 
 fn keep(ctx: &Context, rows: Vec<Row>, filter: &Expr) -> Result<Vec<Row>, QueryError> {

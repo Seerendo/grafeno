@@ -350,7 +350,7 @@ without a current user. They remain possible for embedded use.
    importance, accesses and decay in ranking, duplicates and merging,
    archiving, consolidation into summaries.
 8. **Performance, query language and analysis** (in progress, in five
-   steps; see below). 8.1 is done.
+   steps; see below). 8.1 and 8.2 are done.
 9. **Desktop application**: from the browser to a desktop app (guidelines
    to come after phase 8).
 10. **Integrations**: Grafito first, Python bindings, read replicas.
@@ -380,7 +380,8 @@ later clauses (and `MERGE` on later rows) see earlier writes.
   and `db.search` / `db.searchVector` procedures. Left for later:
   `CALL { … }` subqueries, pattern comprehensions, map projections.
 
-**8.2 Statistics and time.**
+**8.2 Statistics and time** (done). Durations live in `grafeno-query`'s
+`temporal` module, on the engine's own calendar helpers (no date library).
 
 - Aggregates: `stdev`, `stdevp`, `variance`, `median`, `percentileCont`,
   `percentileDisc`, `mode`, `count(DISTINCT …)` for all of them.
@@ -393,7 +394,11 @@ later clauses (and `MERGE` on later rows) see earlier writes.
   (`duration.between(r.@valid_from, coalesce(r.@valid_to, now()))`), and
   `CALL temporal.series(start, end, step)`, to count what was valid at each
   point of a period in one query.
-- Studio: charts (bar, line, pie) over script results.
+- Studio: bar and line charts over script results, one shared Y axis,
+  categorical colors in a fixed, colorblind-validated order (no pie charts:
+  they compare close values badly).
+- Also: `VALID AT` / `KNOWN AT` may use row variables, `round(x, digits)`,
+  `log`, `exp`, `sign`, `pi()`, `timestamp()`.
 
 **8.3 Property indexes and safe queries.** Today `MATCH (p:Person) WHERE
 p.age > 32` scans every `Person`.

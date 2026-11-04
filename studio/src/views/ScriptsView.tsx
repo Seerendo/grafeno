@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { type QueryResult, describeError, go, labelColor } from "../api.ts";
+import { Chart, canChart } from "../components/Chart.tsx";
 import { type CodeEditorHandle, CodeEditor } from "../components/CodeEditor.tsx";
 import { MiniGraph, hasGraph } from "../components/MiniGraph.tsx";
 import { ResultTable } from "../components/ResultTable.tsx";
@@ -66,6 +67,10 @@ const SNIPPETS: { name: string; text: string }[] = [
   { name: "Classify (CASE)", text: "MATCH (p:Person)\nRETURN p.name,\n  CASE WHEN p.age < 30 THEN 'young' ELSE 'experienced' END AS band;" },
   { name: "Labels (CALL)", text: "CALL db.labels() YIELD label, count\nRETURN label, count ORDER BY count DESC;" },
   { name: "Full-text search (CALL)", text: "CALL db.search('rust', 10) YIELD node, score\nRETURN node, score;" },
+  { name: "Statistics", text: "MATCH (p:Person)\nRETURN count(p), avg(p.age), stdev(p.age), median(p.age),\n  percentileCont(p.age, 0.9) AS p90, min(p.age), max(p.age);" },
+  { name: "Group by month", text: "MATCH (n:Note)\nWITH date.truncate('month', n.@created_at) AS month, count(*) AS notes\nRETURN date(month) AS month, notes ORDER BY month;" },
+  { name: "How long facts held", text: "MATCH (p)-[r:works_at]->(c)\nRETURN p.name, c.name,\n  duration.between(r.@valid_from, coalesce(r.@valid_to, datetime())) AS held;" },
+  { name: "Valid at each month", text: "CALL temporal.series('2024-01-01', '2024-12-01', 'P1M') YIELD at\nOPTIONAL MATCH (p)-[r:works_at]->(c) VALID AT at\nRETURN date(at) AS month, count(r) AS facts ORDER BY month;" },
   { name: "Query plan (EXPLAIN)", text: "EXPLAIN MATCH (p:Person)-[:works_at]->(c)\nRETURN p.name, c.name;" },
   { name: "Cost per step (PROFILE)", text: "PROFILE MATCH (p:Person)-[:works_at]->(c)\nRETURN c.name, count(p);" },
 ];
@@ -129,7 +134,7 @@ export function ScriptsView() {
   const [running, setRunning] = useState(false);
   const [stopOnError, setStopOnError] = useState(true);
   const [tab, setTab] = useState<"messages" | number>("messages");
-  const [mode, setMode] = useState<"table" | "json" | "graph" | "profile">("table");
+  const [mode, setMode] = useState<"table" | "json" | "graph" | "chart" | "profile">("table");
   const [renaming, setRenaming] = useState<string | null>(null);
   const [split, setSplit] = useState(() => Number(localStorage.getItem(LAYOUT_KEY)) || 52);
   const [showSchema, setShowSchema] = useState(true);
@@ -440,6 +445,9 @@ export function ScriptsView() {
                   <button className={mode === "graph" ? "active" : ""} onClick={() => setMode("graph")} disabled={!hasGraph(current.rows)}>
                     <Icon name="graph" size={14} /> Graph
                   </button>
+                  <button className={mode === "chart" ? "active" : ""} onClick={() => setMode("chart")} disabled={!canChart(current.columns, current.rows)}>
+                    <Icon name="overview" size={14} /> Chart
+                  </button>
                   {current.profile && (
                     <button className={mode === "profile" ? "active" : ""} onClick={() => setMode("profile")}>
                       <Icon name="clock" size={14} /> Profile
@@ -498,7 +506,9 @@ export function ScriptsView() {
                 </div>
               )
             ) : current ? (
-              mode === "profile" && current.profile ? (
+              mode === "chart" && canChart(current.columns, current.rows) ? (
+                <Chart key={`${tab}-${current.columns.join(",")}`} columns={current.columns} rows={current.rows} />
+              ) : mode === "profile" && current.profile ? (
                 <ResultTable
                   columns={["step", "operation", "rows", "ms", "details"]}
                   rows={current.profile.map((step) => [step.step, step.operation, step.rows ?? null, (step.time_ms ?? 0).toFixed(2), step.details])}

@@ -8,6 +8,7 @@ use grafeno::{Direction, Edge, EdgeFilter, EdgeId, Node, NodeId, ReadTx, Timesta
 
 use crate::QueryError;
 use crate::ast::{AGGREGATES, BinOp, Expr, Key, Quantifier, UnOp};
+use crate::temporal::{self, DURATION_COMPONENTS, Duration, TIME_PARTS};
 use crate::value::{Value, compare, equals, sort_order};
 
 /// Variable bindings of one result row.
@@ -163,6 +164,7 @@ fn display(value: &Value) -> String {
         Value::Float(f) => f.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Time(t) => t.iso(),
+        Value::Duration(d) => d.iso(),
         other => other.to_json().to_string(),
     }
 }
@@ -243,6 +245,20 @@ pub(crate) fn property(ctx: &Context, target: &Value, key: &Key) -> Result<Value
         (Value::Edge(edge), Key::Prop(name)) => Ok(prop(&edge.props, name)),
         (Value::Edge(edge), Key::Meta(name)) => edge_meta(edge, name),
         (Value::Map(map), Key::Prop(name)) => Ok(map.get(name).cloned().unwrap_or(Value::Null)),
+        (Value::Time(time), Key::Prop(name)) => {
+            temporal::part(*time, name).map(Value::Int).ok_or_else(|| {
+                error(format!(
+                    "times have no part {name:?} (they have {TIME_PARTS})"
+                ))
+            })
+        }
+        (Value::Duration(duration), Key::Prop(name)) => {
+            duration.component(name).map(Value::Int).ok_or_else(|| {
+                error(format!(
+                    "durations have no component {name:?} (they have {DURATION_COMPONENTS})"
+                ))
+            })
+        }
         (other, _) => Err(error(format!(
             "cannot read a property of a {}",
             other.type_name()
@@ -311,6 +327,7 @@ pub(crate) fn eval(ctx: &Context, expr: &Expr, scope: Scope) -> Result<Value, Qu
                 .map(Value::Int)
                 .ok_or_else(|| error("integer overflow")),
             Value::Float(f) => Ok(Value::Float(-f)),
+            Value::Duration(d) => Ok(Value::Duration(d.negated())),
             other => Err(error(format!("cannot negate a {}", other.type_name()))),
         },
         Expr::Binary(BinOp::And, left, right) => {
@@ -553,6 +570,9 @@ fn binary(op: BinOp, left: &Value, right: &Value) -> Result<Value, QueryError> {
     if left.is_null() || right.is_null() {
         return Ok(Value::Null);
     }
+    if let Some(value) = temporal_arithmetic(op, left, right)? {
+        return Ok(value);
+    }
     let ordering = || compare(left, right);
     Ok(match op {
         BinOp::Eq => from_truth(equals(left, right)),
@@ -627,6 +647,80 @@ fn binary(op: BinOp, left: &Value, right: &Value) -> Result<Value, QueryError> {
     })
 }
 
+/// A time, or a string that reads as one.
+fn time_of(value: &Value) -> Option<Timestamp> {
+    match value {
+        Value::Time(t) => Some(*t),
+        Value::Str(s) => Timestamp::parse(s).ok(),
+        _ => None,
+    }
+}
+
+/// `time ± duration`, `duration ± duration`, `time - time`, and durations
+/// multiplied or divided by numbers. `None` when no side is a duration or
+/// both are not times.
+fn temporal_arithmetic(
+    op: BinOp,
+    left: &Value,
+    right: &Value,
+) -> Result<Option<Value>, QueryError> {
+    Ok(Some(match (op, left, right) {
+        (BinOp::Add, Value::Duration(a), Value::Duration(b)) => Value::Duration(a.plus(*b)?),
+        (BinOp::Sub, Value::Duration(a), Value::Duration(b)) => {
+            Value::Duration(a.plus(b.negated())?)
+        }
+        (BinOp::Add, other, Value::Duration(d)) | (BinOp::Add, Value::Duration(d), other) => {
+            match time_of(other) {
+                Some(time) => Value::Time(temporal::add(time, *d)?),
+                None => return Ok(None),
+            }
+        }
+        (BinOp::Sub, other, Value::Duration(d)) => match time_of(other) {
+            Some(time) => Value::Time(temporal::add(time, d.negated())?),
+            None => return Ok(None),
+        },
+        (BinOp::Sub, Value::Time(a), Value::Time(b)) => {
+            Value::Duration(Duration::of_micros(a.as_micros() - b.as_micros()))
+        }
+        (BinOp::Mul, Value::Duration(d), factor) | (BinOp::Mul, factor, Value::Duration(d)) => {
+            match number(factor) {
+                Some(factor) => Value::Duration(d.scale(factor)?),
+                None => return Ok(None),
+            }
+        }
+        (BinOp::Div, Value::Duration(d), divisor) => match number(divisor) {
+            Some(0.0) => return Err(error("division by zero")),
+            Some(divisor) => Value::Duration(d.scale(1.0 / divisor)?),
+            None => return Ok(None),
+        },
+        _ => return Ok(None),
+    }))
+}
+
+fn numbers(name: &str, values: &[Value]) -> Result<Vec<f64>, QueryError> {
+    values
+        .iter()
+        .map(|value| {
+            number(value).ok_or_else(|| {
+                error(format!(
+                    "{name}() needs numbers, got a {}",
+                    value.type_name()
+                ))
+            })
+        })
+        .collect()
+}
+
+/// Variance with `ddof` degrees of freedom removed (1: sample, 0: population).
+fn variance(values: &[f64], ddof: usize) -> Option<f64> {
+    if values.len() <= ddof {
+        return None;
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let squares: f64 = values.iter().map(|x| (x - mean).powi(2)).sum();
+    Some(squares / (values.len() - ddof) as f64)
+}
+
 fn aggregate(
     ctx: &Context,
     name: &str,
@@ -639,8 +733,30 @@ fn aggregate(
             "{name}() is an aggregate: use it in RETURN or WITH"
         )));
     };
-    let [arg] = args else {
-        return Err(error(format!("{name}() takes one argument")));
+    let (arg, percentile) = match (name, args) {
+        ("percentilecont" | "percentiledisc", [arg, p]) => {
+            let p = eval(
+                ctx,
+                p,
+                Scope::Row(&rows.first().cloned().unwrap_or_default()),
+            )?;
+            match number(&p) {
+                Some(p) if (0.0..=1.0).contains(&p) => (arg, p),
+                _ => {
+                    return Err(error(format!(
+                        "{name}() needs a percentile between 0 and 1, got {}",
+                        p.to_json()
+                    )));
+                }
+            }
+        }
+        ("percentilecont" | "percentiledisc", _) => {
+            return Err(error(format!(
+                "{name}() takes a value and a percentile (0 to 1)"
+            )));
+        }
+        (_, [arg]) => (arg, 0.0),
+        _ => return Err(error(format!("{name}() takes one argument"))),
     };
     let mut values = Vec::new();
     let mut seen = HashSet::new();
@@ -656,9 +772,76 @@ fn aggregate(
         "collect" => Value::List(values),
         "min" => values.into_iter().min_by(sort_order).unwrap_or(Value::Null),
         "max" => values.into_iter().max_by(sort_order).unwrap_or(Value::Null),
+        "sum" | "avg"
+            if values.iter().all(|v| matches!(v, Value::Duration(_))) && !values.is_empty() =>
+        {
+            let mut total = Duration::ZERO;
+            for value in &values {
+                if let Value::Duration(d) = value {
+                    total = total.plus(*d)?;
+                }
+            }
+            Value::Duration(if name == "avg" {
+                total.scale(1.0 / values.len() as f64)?
+            } else {
+                total
+            })
+        }
+        "stdev" | "stdevp" | "variance" | "variancep" => {
+            let numbers = numbers(name, &values)?;
+            let ddof = usize::from(matches!(name, "stdev" | "variance"));
+            match variance(&numbers, ddof) {
+                None if values.is_empty() => Value::Null,
+                // One value: no spread.
+                None => Value::Float(0.0),
+                Some(v) if name.starts_with("stdev") => Value::Float(v.sqrt()),
+                Some(v) => Value::Float(v),
+            }
+        }
+        "median" | "percentilecont" | "percentiledisc" => {
+            let mut numbers = numbers(name, &values)?;
+            if numbers.is_empty() {
+                return Ok(Value::Null);
+            }
+            numbers.sort_by(f64::total_cmp);
+            let p = if name == "median" { 0.5 } else { percentile };
+            if name == "percentiledisc" {
+                // The smallest value with at least p of the values at or below it.
+                let rank = ((p * numbers.len() as f64).ceil() as usize).max(1) - 1;
+                let value = &values[0];
+                let chosen = numbers[rank.min(numbers.len() - 1)];
+                return Ok(if matches!(value, Value::Int(_)) && chosen.fract() == 0.0 {
+                    Value::Int(chosen as i64)
+                } else {
+                    Value::Float(chosen)
+                });
+            }
+            // Linear interpolation between the closest ranks.
+            let position = p * (numbers.len() - 1) as f64;
+            let (low, high) = (position.floor() as usize, position.ceil() as usize);
+            let fraction = position - low as f64;
+            Value::Float(numbers[low] + (numbers[high] - numbers[low]) * fraction)
+        }
+        "mode" => {
+            // The most frequent value; ties go to the one that sorts first.
+            let mut counts: Vec<(Value, usize)> = Vec::new();
+            for value in values {
+                match counts
+                    .iter_mut()
+                    .find(|(seen, _)| seen.key() == value.key())
+                {
+                    Some((_, count)) => *count += 1,
+                    None => counts.push((value, 1)),
+                }
+            }
+            counts
+                .into_iter()
+                .max_by(|(a, x), (b, y)| x.cmp(y).then_with(|| sort_order(b, a)))
+                .map_or(Value::Null, |(value, _)| value)
+        }
         "sum" | "avg" => {
             if values.iter().any(|v| number(v).is_none()) {
-                return Err(error(format!("{name}() needs numbers")));
+                return Err(error(format!("{name}() needs numbers (or durations)")));
             }
             if name == "avg" {
                 if values.is_empty() {
@@ -727,6 +910,59 @@ fn int_arg(name: &str, value: &Value) -> Result<i64, QueryError> {
     }
 }
 
+/// `duration('P1DT2H')` or `duration({days: 1, hours: 2})`.
+fn duration_from(value: &Value) -> Result<Duration, QueryError> {
+    match value {
+        Value::Duration(d) => Ok(*d),
+        Value::Str(text) => Duration::parse(text),
+        Value::Map(map) => {
+            let mut total = Duration::ZERO;
+            for (key, amount) in map {
+                let amount = number(amount)
+                    .ok_or_else(|| error(format!("duration(): {key} needs a number")))?;
+                let part = match key.as_str() {
+                    "years" => Duration {
+                        months: 12,
+                        ..Duration::ZERO
+                    },
+                    "quarters" => Duration {
+                        months: 3,
+                        ..Duration::ZERO
+                    },
+                    "months" => Duration {
+                        months: 1,
+                        ..Duration::ZERO
+                    },
+                    "weeks" => Duration {
+                        days: 7,
+                        ..Duration::ZERO
+                    },
+                    "days" => Duration {
+                        days: 1,
+                        ..Duration::ZERO
+                    },
+                    "hours" => Duration::of_micros(3_600_000_000),
+                    "minutes" => Duration::of_micros(60_000_000),
+                    "seconds" => Duration::of_micros(1_000_000),
+                    "milliseconds" => Duration::of_micros(1_000),
+                    "microseconds" => Duration::of_micros(1),
+                    other => {
+                        return Err(error(format!(
+                            "duration(): unknown unit {other:?} (years, quarters, months, weeks, days, hours, minutes, seconds, milliseconds, microseconds)"
+                        )));
+                    }
+                };
+                total = total.plus(part.scale(amount)?)?;
+            }
+            Ok(total)
+        }
+        other => Err(error(format!(
+            "duration() needs an ISO 8601 string or a map, not a {}",
+            other.type_name()
+        ))),
+    }
+}
+
 fn node_of(ctx: &Context, id: NodeId) -> Result<Value, QueryError> {
     Ok(ctx
         .node(id)?
@@ -735,7 +971,10 @@ fn node_of(ctx: &Context, id: NodeId) -> Result<Value, QueryError> {
 
 fn function(ctx: &Context, name: &str, args: Vec<Value>) -> Result<Value, QueryError> {
     // Most functions return null for a null argument.
-    let strict = !matches!(name, "coalesce" | "now" | "datetime" | "time" | "range");
+    let strict = !matches!(
+        name,
+        "coalesce" | "now" | "datetime" | "time" | "range" | "date" | "timestamp" | "pi" | "e"
+    );
     if strict && args.iter().any(Value::is_null) {
         return Ok(Value::Null);
     }
@@ -931,6 +1170,17 @@ fn function(ctx: &Context, name: &str, args: Vec<Value>) -> Result<Value, QueryE
                 _ => Value::Null,
             }
         }
+        "round" if args.len() == 2 => {
+            let x = number(&args[0]).ok_or_else(|| {
+                error(format!(
+                    "round() needs a number, not a {}",
+                    args[0].type_name()
+                ))
+            })?;
+            let digits = int_arg(name, &args[1])?.clamp(-15, 15);
+            let scale = 10f64.powi(digits as i32);
+            Value::Float((x * scale).round() / scale)
+        }
         "abs" | "round" | "floor" | "ceil" | "sqrt" => {
             arity(name, &args, 1..=1)?;
             match (&args[0], name) {
@@ -964,8 +1214,69 @@ fn function(ctx: &Context, name: &str, args: Vec<Value>) -> Result<Value, QueryE
             }
         }
         "date" => {
+            arity(name, &args, 0..=1)?;
+            match first {
+                None => Value::Str(Timestamp::now().date()),
+                Some(Value::Null) => Value::Null,
+                Some(value) => Value::Str(to_time(value)?.date()),
+            }
+        }
+        "timestamp" => {
+            arity(name, &args, 0..=0)?;
+            Value::Int(Timestamp::now().as_micros().div_euclid(1_000))
+        }
+        "duration" => {
             arity(name, &args, 1..=1)?;
-            Value::Str(to_time(&args[0])?.date())
+            Value::Duration(duration_from(&args[0])?)
+        }
+        "duration.between" | "duration.inmonths" | "duration.indays" | "duration.inseconds" => {
+            arity(name, &args, 2..=2)?;
+            let (a, b) = (to_time(&args[0])?, to_time(&args[1])?);
+            Value::Duration(match name {
+                "duration.between" => temporal::between(a, b)?,
+                "duration.inmonths" => temporal::between_in("months", a, b)?,
+                "duration.indays" => temporal::between_in("days", a, b)?,
+                _ => temporal::between_in("seconds", a, b)?,
+            })
+        }
+        "date.truncate" | "datetime.truncate" => {
+            arity(name, &args, 2..=2)?;
+            let unit = string_arg(name, &args[0])?;
+            Value::Time(temporal::truncate(unit, to_time(&args[1])?)?)
+        }
+        "pi" => {
+            arity(name, &args, 0..=0)?;
+            Value::Float(std::f64::consts::PI)
+        }
+        "e" => {
+            arity(name, &args, 0..=0)?;
+            Value::Float(std::f64::consts::E)
+        }
+        "log" | "log10" | "exp" | "sign" | "sin" | "cos" | "tan" => {
+            arity(name, &args, 1..=1)?;
+            let x = number(&args[0]).ok_or_else(|| {
+                error(format!(
+                    "{name}() needs a number, not a {}",
+                    args[0].type_name()
+                ))
+            })?;
+            match name {
+                "sign" => Value::Int(if x > 0.0 {
+                    1
+                } else if x < 0.0 {
+                    -1
+                } else {
+                    0
+                }),
+                "log" if x <= 0.0 => Value::Null,
+                "log10" if x <= 0.0 => Value::Null,
+                "log" => Value::Float(x.ln()),
+                "log10" => Value::Float(x.log10()),
+                "exp" => Value::Float(x.exp()),
+                "sin" => Value::Float(x.sin()),
+                "cos" => Value::Float(x.cos()),
+                _ => Value::Float(x.tan()),
+            }
         }
         "now" => {
             arity(name, &args, 0..=0)?;

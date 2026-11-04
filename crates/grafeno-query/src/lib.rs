@@ -21,6 +21,10 @@
 //!   writes runs in one transaction, and its later clauses see its writes.
 //! - **Expressions**: `CASE`, list comprehensions, `all`/`any`/`none`/
 //!   `single`, `reduce`, slices, `^`.
+//! - **Statistics and time**: `stdev`, `variance`, `median`, percentiles,
+//!   `mode`; durations (`duration('P1M')`, calendar arithmetic,
+//!   `duration.between`), date parts (`t.year`), `date.truncate`, and
+//!   `temporal.series` with `VALID AT` per row.
 //! - `EXPLAIN` returns the plan; `PROFILE` adds rows and time per step.
 //! - **Pseudo-properties** (`@name`) expose what is not a property: `@id`,
 //!   `@labels`, `@text`, `@embedding`, `@sources`, `@created_at` on nodes;
@@ -35,6 +39,7 @@ mod exec;
 mod lexer;
 mod parser;
 mod procedures;
+mod temporal;
 mod value;
 
 use std::fmt;
@@ -43,6 +48,7 @@ pub use eval::Params;
 pub use exec::{
     MAX_PATH_LENGTH, PlanStep, QueryResult, WriteStats, execute, execute_read, is_write,
 };
+pub use temporal::Duration;
 pub use value::Value;
 
 /// A query that could not be parsed or run. Syntax errors carry the line

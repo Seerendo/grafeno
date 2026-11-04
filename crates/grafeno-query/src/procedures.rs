@@ -4,8 +4,12 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::QueryError;
-use crate::eval::Context;
+use crate::eval::{Context, to_time};
+use crate::temporal::{self, Duration};
 use crate::value::Value;
+
+/// `temporal.series` stops at this many points.
+const MAX_SERIES: usize = 10_000;
 
 /// A procedure: its name, arguments, the columns it yields, and what it does.
 pub(crate) struct Procedure {
@@ -51,6 +55,12 @@ pub(crate) const PROCEDURES: &[Procedure] = &[
         args: "embedding, limit = 10",
         columns: &["node", "score"],
         description: "Nearest nodes by embedding (cosine similarity), best first.",
+    },
+    Procedure {
+        name: "temporal.series",
+        args: "start, end, step",
+        columns: &["at"],
+        description: "Times from start to end (included) every step (a duration such as 'P1M'), for counting what was valid at each one.",
     },
     Procedure {
         name: "dbms.procedures",
@@ -167,6 +177,45 @@ pub(crate) fn call(
                         Value::Float(f64::from(hit.score)),
                     ]);
                 }
+            }
+            rows
+        }
+        "temporal.series" => {
+            let [start, end, step] = args else {
+                return Err(QueryError::runtime(
+                    "temporal.series() takes a start, an end and a step (such as 'P1M')",
+                ));
+            };
+            let (start, end) = (to_time(start)?, to_time(end)?);
+            let step = match step {
+                Value::Duration(d) => *d,
+                Value::Str(text) => Duration::parse(text)?,
+                other => {
+                    return Err(QueryError::runtime(format!(
+                        "temporal.series() needs a duration as step, not a {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            if step.approx_micros() <= 0.0 {
+                return Err(QueryError::runtime(
+                    "temporal.series() needs a positive step",
+                ));
+            }
+            let mut rows = Vec::new();
+            // Each point is start + n × step, so month steps stay on the
+            // calendar (Jan 31, Feb 29, Mar 31, …).
+            loop {
+                let at = temporal::add(start, step.scale(rows.len() as f64)?)?;
+                if at > end {
+                    break;
+                }
+                if rows.len() == MAX_SERIES {
+                    return Err(QueryError::runtime(format!(
+                        "temporal.series() would give more than {MAX_SERIES} points: use a larger step"
+                    )));
+                }
+                rows.push(vec![Value::Time(at)]);
             }
             rows
         }

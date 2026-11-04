@@ -315,7 +315,22 @@ pub(crate) enum Expr {
     },
 }
 
-pub(crate) const AGGREGATES: &[&str] = &["count", "sum", "avg", "min", "max", "collect"];
+pub(crate) const AGGREGATES: &[&str] = &[
+    "count",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "collect",
+    "stdev",
+    "stdevp",
+    "variance",
+    "variancep",
+    "median",
+    "percentilecont",
+    "percentiledisc",
+    "mode",
+];
 
 impl Expr {
     pub(crate) fn has_aggregate(&self) -> bool {

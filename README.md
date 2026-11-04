@@ -45,6 +45,11 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
   `MERGE`, `FOREACH`, `CALL` procedures, `CASE`, list comprehensions,
   quantifiers, `reduce`, pattern predicates in `WHERE`, `EXPLAIN` and
   `PROFILE` ([docs/query-language.md](docs/query-language.md)).
+- **Phase 8.2, statistics and time:** `stdev`, `variance`, `median`,
+  percentiles and `mode`; durations with calendar arithmetic,
+  `duration.between`, date parts and `date.truncate` for grouping by period;
+  `temporal.series` with per-row `VALID AT` to count what was true at each
+  point; bar and line charts in the Studio's script results.
 
 ## Installing
 

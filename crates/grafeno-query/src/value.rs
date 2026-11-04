@@ -7,6 +7,8 @@ use std::sync::Arc;
 use grafeno::{Edge, Node, Timestamp};
 use serde_json::json;
 
+use crate::temporal::Duration;
+
 /// A value in a query: a property value, a node, an edge, or a time.
 #[derive(Clone, Debug)]
 pub enum Value {
@@ -16,6 +18,8 @@ pub enum Value {
     Float(f64),
     Str(String),
     Time(Timestamp),
+    /// Months, days and microseconds (see the `temporal` module).
+    Duration(Duration),
     List(Vec<Value>),
     Map(BTreeMap<String, Value>),
     Node(Arc<Node>),
@@ -61,6 +65,7 @@ impl Value {
             Value::Float(f) => json!(f),
             Value::Str(s) => json!(s),
             Value::Time(t) => json!(t.iso()),
+            Value::Duration(d) => json!(d.iso()),
             Value::List(items) => {
                 serde_json::Value::Array(items.iter().map(Value::to_json).collect())
             }
@@ -103,6 +108,7 @@ impl Value {
             Value::Float(_) => "float",
             Value::Str(_) => "string",
             Value::Time(_) => "time",
+            Value::Duration(_) => "duration",
             Value::List(_) => "list",
             Value::Map(_) => "map",
             Value::Node(_) => "node",
@@ -125,6 +131,7 @@ impl Value {
             Value::Bool(b) => format!("b{b}"),
             Value::Str(s) => format!("s{s:?}"),
             Value::Time(t) => format!("t{}", t.as_micros()),
+            Value::Duration(d) => format!("d{},{},{}", d.months, d.days, d.micros),
             Value::List(items) => {
                 let keys: Vec<String> = items.iter().map(Value::key).collect();
                 format!("[{}]", keys.join(","))
@@ -215,6 +222,9 @@ pub(crate) fn compare(a: &Value, b: &Value) -> Option<Ordering> {
         (Value::Time(_), Value::Time(_) | Value::Str(_)) | (Value::Str(_), Value::Time(_)) => {
             Some(a.as_time()?.cmp(&b.as_time()?))
         }
+        (Value::Duration(x), Value::Duration(y)) => {
+            x.approx_micros().partial_cmp(&y.approx_micros())
+        }
         (Value::List(x), Value::List(y)) => {
             for (left, right) in x.iter().zip(y) {
                 match compare(left, right)? {
@@ -241,7 +251,8 @@ pub(crate) fn sort_order(a: &Value, b: &Value) -> Ordering {
             Value::Bool(_) => 5,
             Value::Int(_) | Value::Float(_) => 6,
             Value::Time(_) => 7,
-            Value::Null => 8,
+            Value::Duration(_) => 8,
+            Value::Null => 9,
         }
     }
     match (a, b) {

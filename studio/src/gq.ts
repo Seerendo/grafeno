@@ -14,6 +14,9 @@ export const KEYWORDS = [
 
 export const FUNCTIONS = [
   "all", "any", "none", "single", "reduce", "exists", "head", "size",
+  "stdev", "stdevp", "variance", "variancep", "median", "percentileCont", "percentileDisc", "mode",
+  "duration", "duration.between", "duration.inDays", "duration.inMonths", "duration.inSeconds",
+  "date.truncate", "datetime", "timestamp", "log", "log10", "exp", "sign", "pi", "e",
   "abs", "avg", "ceil", "coalesce", "collect", "count", "date", "endNode", "floor", "id", "keys", "labels",
   "last", "length", "max", "min", "now", "properties", "range", "replace", "round", "split", "sqrt",
   "startNode", "substring", "sum", "time", "toFloat", "toInteger", "toLower", "toString", "toUpper", "trim",

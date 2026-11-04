@@ -96,18 +96,29 @@ impl Timestamp {
 
     /// The UTC calendar date as `YYYY-MM-DD` (proleptic Gregorian).
     pub fn date(self) -> String {
-        // Howard Hinnant's `civil_from_days`.
-        let days = self.0.div_euclid(86_400_000_000);
-        let z = days + 719_468;
-        let era = z.div_euclid(146_097);
-        let doe = z - era * 146_097;
-        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-        let mp = (5 * doy + 2) / 153;
-        let day = doy - (153 * mp + 2) / 5 + 1;
-        let month = if mp < 10 { mp + 3 } else { mp - 9 };
-        let year = yoe + era * 400 + i64::from(month <= 2);
+        let (year, month, day) = self.civil();
         format!("{year:04}-{month:02}-{day:02}")
+    }
+
+    /// The UTC calendar date: year, month (1 to 12) and day (1 to 31).
+    pub fn civil(self) -> (i64, i64, i64) {
+        civil_from_days(self.days())
+    }
+
+    /// Whole days since 1970-01-01 (negative before it).
+    pub fn days(self) -> i64 {
+        self.0.div_euclid(86_400_000_000)
+    }
+
+    /// Microseconds since midnight UTC.
+    pub fn micros_of_day(self) -> i64 {
+        self.0.rem_euclid(86_400_000_000)
+    }
+
+    /// Midnight UTC of a calendar date, or `None` if there is no such date.
+    pub fn from_civil(year: i64, month: i64, day: i64) -> Option<Self> {
+        ((1..=12).contains(&month) && day >= 1 && day <= days_in_month(year, month))
+            .then(|| Self(days_from_civil(year, month, day) * 86_400_000_000))
     }
 
     /// ISO 8601 in UTC: `2024-05-01T10:30:00Z`, with microseconds only when
@@ -141,7 +152,22 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-fn days_in_month(year: i64, month: i64) -> i64 {
+/// The date of a day since 1970-01-01 (Howard Hinnant's `civil_from_days`).
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    (year, month, day)
+}
+
+/// Days in a month of the proleptic Gregorian calendar.
+pub fn days_in_month(year: i64, month: i64) -> i64 {
     match month {
         2 if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
         2 => 28,

@@ -173,6 +173,7 @@ CALL db.search('borrow checker', 5) YIELD node, score RETURN node.title, score;
 | `db.stats()` | `nodes`, `edges`, `texts`, `vectors`, `dimension` | counts of the namespace |
 | `db.search(text, limit = 10)` | `node`, `score` | full-text search (BM25), best first |
 | `db.searchVector(embedding, limit = 10)` | `node`, `score` | nearest nodes by embedding |
+| `temporal.series(start, end, step)` | `at` | times from start to end every step (see *Time and durations*) |
 | `dbms.procedures()` | `name`, `arguments`, `columns`, `description` | this list |
 
 `YIELD` picks and renames columns (`YIELD label AS l`); without it, every
@@ -192,6 +193,86 @@ the shell, the *Profile* view in the Studio).
 EXPLAIN MATCH (a:Person {name: 'Ana'})-[:knows]->(f) RETURN f.name;
 PROFILE MATCH (p:Person) WHERE p.age > 30 RETURN count(p);
 ```
+
+### Statistics
+
+Besides `count`, `sum`, `avg`, `min`, `max` and `collect`:
+
+| Aggregate | |
+| --- | --- |
+| `stdev(x)`, `stdevp(x)` | standard deviation of a sample, of a population |
+| `variance(x)`, `variancep(x)` | variance of a sample, of a population |
+| `median(x)` | the middle value (the mean of the two middle ones) |
+| `percentileCont(x, p)` | the `p` percentile (0 to 1), interpolated between values |
+| `percentileDisc(x, p)` | the `p` percentile, one of the values |
+| `mode(x)` | the most frequent value (ties: the one that sorts first) |
+
+They skip `null`s, take `DISTINCT` (`stdev(DISTINCT x)`), and give `null`
+over no values (the spread of one value is 0). `sum` and `avg` also add up
+durations.
+
+```text
+MATCH (p:Person)
+RETURN count(p), avg(p.age), stdev(p.age), median(p.age),
+       percentileCont(p.age, 0.9) AS p90;
+
+// Per group, keeping the groups with a high median
+MATCH (s:Sale)
+WITH s.region AS region, median(s.amount) AS typical, stdevp(s.amount) AS spread
+WHERE typical > 100
+RETURN region, typical, round(spread, 2) ORDER BY typical DESC;
+```
+
+### Time and durations
+
+Times are UTC instants (`datetime('2024-05-01')`, `datetime()` for now,
+pseudo-properties such as `r.@valid_from`). Their parts are properties:
+`t.year`, `t.quarter`, `t.month`, `t.week` and `t.weekYear` (ISO weeks),
+`t.day`, `t.dayOfWeek` (Monday is 1), `t.dayOfYear`, `t.hour`, `t.minute`,
+`t.second`, `t.millisecond`, `t.microsecond`, `t.epochSeconds`,
+`t.epochMillis`.
+
+A **duration** has months, days and microseconds, which do not convert into
+each other exactly (a month has 28 to 31 days). It is written in ISO 8601
+(`duration('P1Y2M10DT2H30M')`, `duration('PT90M')`, `duration('-P1D')`)
+or as a map (`duration({days: 3, hours: 12})`), and prints in ISO 8601.
+
+| Expression | Gives |
+| --- | --- |
+| `t + d`, `t - d` | a time: months added on the calendar (Jan 31 + P1M = Feb 29), then days, then the rest |
+| `d + d`, `d - d`, `d * n`, `d / n`, `-d` | a duration |
+| `b - a` (two times) | the exact duration between them, in hours, minutes and seconds |
+| `duration.between(a, b)` | the calendar duration: months, then days, then the rest (`P1Y2M5DT6H`) |
+| `duration.inMonths(a, b)`, `inDays`, `inSeconds` | the same span in one unit |
+| `d.years`, `d.months`, `d.days`, `d.hours`, `d.minutes`, `d.seconds` | a component (`d.monthsOfYear`, `d.minutesOfHour`… for the remainder) |
+| `date.truncate(unit, t)` | the start of the unit: `year`, `quarter`, `month`, `week` (Monday), `day`, `hour`, `minute`, `second`, `decade`, `century`, `millennium` |
+
+Durations compare by approximate length (a month counts as 30.44 days).
+
+```text
+// How long each fact held (still-true facts until now)
+MATCH (p)-[r:works_at]->(c)
+RETURN p.name, c.name,
+       duration.between(r.@valid_from, coalesce(r.@valid_to, datetime())) AS held;
+
+// Notes per month
+MATCH (n:Note)
+WITH date.truncate('month', n.@created_at) AS month, count(*) AS notes
+RETURN date(month) AS month, notes ORDER BY month;
+```
+
+**What was true over time.** `VALID AT` and `KNOWN AT` may use a variable,
+and `temporal.series(start, end, step)` yields one time per step, so one
+query counts what was valid at each point of a period:
+
+```text
+CALL temporal.series('2024-01-01', '2024-12-01', 'P1M') YIELD at
+OPTIONAL MATCH (p:Person)-[:works_at]->(:Company {name: 'Acme'}) VALID AT at
+RETURN date(at) AS month, count(p) AS people ORDER BY month;
+```
+
+A series has at most 10,000 points; month steps stay on the calendar
+(Jan 31, Feb 29, Mar 31…).
 
 ## Writing
 
@@ -300,8 +381,10 @@ ones decide it.
 | `size(x)` / `length(x)`, `head(list)`, `last(list)`, `range(a, b[, step])` | |
 | `lower`, `upper`, `trim`, `substring(s, start[, length])`, `replace(s, a, b)`, `split(s, sep)` | |
 | `coalesce(…)`, `toString`, `toInteger`, `toFloat` | |
-| `abs`, `round`, `floor`, `ceil`, `sqrt` | |
-| `datetime([x])` / `time([x])`, `date(t)` (`YYYY-MM-DD`), `now()` | |
+| `abs`, `round(x[, digits])`, `floor`, `ceil`, `sqrt`, `sign` | |
+| `log` (natural), `log10`, `exp`, `sin`, `cos`, `tan`, `pi()`, `e()` | |
+| `datetime([x])` / `time([x])`, `date([t])` (`YYYY-MM-DD`), `now()`, `timestamp()` (milliseconds) | |
+| `duration(x)`, `duration.between`, `duration.inMonths` / `inDays` / `inSeconds`, `date.truncate(unit, t)` | see *Time and durations* |
 | `exists(pattern)`, `exists(n.key)` | pattern predicate; whether a property is set |
 
 ## Not supported (yet)
@@ -310,6 +393,5 @@ ones decide it.
   map projections (`n {.name}`) and `=~` regular expressions.
 - Indexes on property values: a `MATCH` by property scans the nodes of its
   label, or of the namespace without a label (phase 8.3).
-- Statistical aggregates and durations (phase 8.2), and graph algorithms as
-  procedures (phase 8.5). Hybrid recall is in the shell's `\recall` and
+- Graph algorithms as procedures (phase 8.5). Hybrid recall is in the shell's `\recall` and
   `\context`, and in the HTTP API.
