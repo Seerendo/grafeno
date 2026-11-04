@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+
 import { type QueryResult, describeError, go, labelColor } from "../api.ts";
 import { Chart, canChart } from "../components/Chart.tsx";
 import { type CodeEditorHandle, CodeEditor } from "../components/CodeEditor.tsx";
 import { MiniGraph, hasGraph } from "../components/MiniGraph.tsx";
 import { ResultTable } from "../components/ResultTable.tsx";
 import { useStudio } from "../context.ts";
+import { saveText } from "../desktop.ts";
 import { PSEUDO_PROPERTIES, type Statement, errorPosition, splitStatements, statementAt } from "../gq.ts";
 import { Icon } from "../icons.tsx";
 
@@ -120,13 +122,9 @@ function csvCell(value: unknown): string {
   return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
+/** Saves text as a file: a save dialog in the desktop app, a download in a browser. */
 function download(name: string, text: string, type: string): void {
-  const url = URL.createObjectURL(new Blob([text], { type }));
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = name;
-  link.click();
-  URL.revokeObjectURL(url);
+  void saveText(name, text, type);
 }
 
 export function ScriptsView() {

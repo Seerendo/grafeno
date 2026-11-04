@@ -19,7 +19,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --workspace --locked
+      # The desktop app needs WebKitGTK and the Studio's build; its own job
+      # builds it.
+      - run: cargo test --workspace --locked --exclude grafeno-desktop
 
   linux:
     needs: test

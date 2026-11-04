@@ -1,6 +1,7 @@
 // The connection to a Grafeno server, and small helpers shared by the views.
 
 import { Grafeno, GrafenoError, type Node } from "../../clients/typescript/src/index.ts";
+import { desktopFetch, isDesktop } from "./desktop.ts";
 
 export type { Edge, NamespaceInfo, Node, NodeWithText, QueryResult } from "../../clients/typescript/src/index.ts";
 export { Grafeno, GrafenoError };
@@ -64,7 +65,9 @@ export function defaultUrl(): string {
 }
 
 export function clientFor(connection: Connection): Grafeno {
-  return new Grafeno({ url: connection.url, token: connection.token || undefined });
+  // In the desktop app, requests go through the app (no CORS, and the
+  // open database answers in-process).
+  return new Grafeno({ url: connection.url, token: connection.token || undefined, fetch: isDesktop ? desktopFetch : undefined });
 }
 
 /** Checks that the server answers and accepts the token. */

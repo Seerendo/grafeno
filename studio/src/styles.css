@@ -2654,6 +2654,95 @@ button.schema-item {
   }
 }
 
+/* ------------------------------------------------- desktop start screen */
+
+.start-card {
+  position: relative;
+  width: min(880px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  padding: 34px;
+  background: var(--glass-strong);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.3);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.3);
+  border: 1px solid var(--border-strong);
+  border-radius: 26px;
+  box-shadow: var(--shadow-lg), 0 0 90px var(--glow-a);
+  animation: pop var(--slow) var(--ease);
+}
+
+.start-card h1::before {
+  content: none;
+}
+
+.start-grid {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 34px;
+}
+
+.start-grid > * + * {
+  border-left: 1px solid var(--border);
+  padding-left: 34px;
+}
+
+@media (max-width: 760px) {
+  .start-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .start-grid > * + * {
+    border-left: 0;
+    padding-left: 0;
+  }
+}
+
+.recent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.recent-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: var(--radius-sm);
+}
+
+.recent-item:hover {
+  background: var(--hover);
+}
+
+.recent-open {
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+  gap: 12px;
+  border: 0;
+  background: none;
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.recent-open:hover {
+  background: none;
+}
+
+.recent-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.recent-item.missing {
+  opacity: 0.5;
+}
+
 /* ------------------------------------------------------------- charts */
 
 .chart {

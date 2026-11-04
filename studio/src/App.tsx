@@ -18,6 +18,7 @@ import { EdgeForm, NodeForm } from "./components/Forms.tsx";
 import { type ConfirmOptions, type NewEdgeOptions, type NewNodeOptions, type Studio, StudioContext, useStudio } from "./context.ts";
 import { Icon, type IconName, Logo } from "./icons.tsx";
 import { Modal, useNodeSearch } from "./ui.tsx";
+import { type DesktopSession, LOCAL_URL, desktop, isDesktop, saveText } from "./desktop.ts";
 import { AdminView } from "./views/AdminView.tsx";
 import { ExplorerView } from "./views/ExplorerView.tsx";
 import { GraphView } from "./views/GraphView.tsx";
@@ -25,6 +26,7 @@ import { MemoryView } from "./views/MemoryView.tsx";
 import { OverviewView } from "./views/OverviewView.tsx";
 import { ScriptsView } from "./views/ScriptsView.tsx";
 import { SearchView } from "./views/SearchView.tsx";
+import { StartView } from "./views/StartView.tsx";
 
 export { useStudio };
 
@@ -372,6 +374,9 @@ export function App() {
     writeSetting("grafeno.studio.theme", theme);
   }, [theme]);
 
+  // The database file open in the desktop app, when the Studio runs there.
+  const [local, setLocal] = useState<DesktopSession | null>(null);
+
   const connect = useCallback(async (candidate: Connection, remember?: boolean) => {
     setChecking(true);
     try {
@@ -388,13 +393,54 @@ export function App() {
     }
   }, []);
 
-  // Try a saved connection, then the server that served the Studio.
+  // Try a saved connection, then the server that served the Studio. In the
+  // desktop app: the database the app has open, or its start screen.
   useEffect(() => {
+    if (isDesktop) {
+      void desktop
+        .session()
+        .then((session) => {
+          if (!session) {
+            setChecking(false);
+            return;
+          }
+          setLocal(session);
+          return connect({ url: LOCAL_URL, token: "" });
+        })
+        .catch((problem) => {
+          setError(describeError(problem));
+          setChecking(false);
+        });
+      return;
+    }
     const saved = loadConnection();
     void connect(saved ?? { url: defaultUrl(), token: "" }, saved ? undefined : false).then(() => {
       if (!saved) setError(null);
     });
   }, [connect]);
+
+  const openLocal = useCallback(
+    async (path: string) => {
+      setChecking(true);
+      try {
+        const session = await desktop.open(path);
+        setLocal(session);
+        await connect({ url: LOCAL_URL, token: "" });
+      } catch (problem) {
+        setError(describeError(problem));
+        setLocal(null);
+        setConnection(null);
+        setChecking(false);
+      }
+    },
+    [connect],
+  );
+
+  const closeLocal = useCallback(async () => {
+    await desktop.close();
+    setLocal(null);
+    setConnection(null);
+  }, []);
 
   useEffect(() => {
     const onHash = () => setRoute(parseHash());
@@ -449,6 +495,52 @@ export function App() {
   }, []);
 
   const changed = useCallback(() => setRevision((value) => value + 1), []);
+
+  // The desktop app's menu: its items arrive as events.
+  const menuActions = useRef<(id: string) => void>(() => undefined);
+  menuActions.current = (id: string) => {
+    const day = new Date().toISOString().slice(0, 10);
+    const pick = async (create: boolean) => {
+      const path = await desktop.pickDatabase(create);
+      if (path) await openLocal(path);
+    };
+    if (id === "new" || id === "open") void pick(id === "new");
+    else if (id === "close" || id === "connect") {
+      if (local) void closeLocal();
+      else {
+        forgetConnection();
+        setConnection(null);
+      }
+    } else if (id === "palette") setPalette(true);
+    else if (id.startsWith("theme:")) setTheme(id.slice("theme:".length) as Theme);
+    else if (id.startsWith("view:")) go(id.slice("view:".length));
+    else if (id === "export" && client) {
+      void client
+        .export()
+        .then((text) => saveText(`grafeno-all-${day}.jsonl`, text, "application/x-ndjson"))
+        .then((saved) => saved && toast("Exported every namespace.", "ok"))
+        .catch((problem) => toast(describeError(problem), "error"));
+    } else if (id === "import" && client) {
+      void desktop
+        .pickOpen(["jsonl", "ndjson", "json"])
+        .then(async (path) => {
+          if (!path) return;
+          const stats = await client.import(await desktop.readText(path));
+          toast(`Imported ${stats.nodes} nodes and ${stats.edges} facts in ${stats.namespaces} namespaces.`, "ok");
+          changed();
+        })
+        .catch((problem) => toast(describeError(problem), "error"));
+    }
+  };
+  useEffect(() => {
+    if (!isDesktop) return;
+    const stopMenu = desktop.listen<string>("menu", (id) => menuActions.current(id));
+    const stopOpen = desktop.listen<string>("open-path", (path) => void openLocal(path));
+    return () => {
+      stopMenu();
+      stopOpen();
+    };
+  }, [openLocal]);
   const createNamespace = useCallback(
     async (name: string, description?: string) => {
       if (!client) return;
@@ -471,6 +563,9 @@ export function App() {
         </div>
       </div>
     );
+  }
+  if ((!connection || !client) && isDesktop) {
+    return <StartView error={error} busy={checking} saved={loadConnection()} onOpen={(path) => void openLocal(path)} onConnect={(candidate, remember) => void connect(candidate, remember)} />;
   }
   if (!connection || !client) {
     return (
@@ -552,14 +647,18 @@ export function App() {
           </button>
           <div className="spacer" />
           <NewMenu />
-          <span className="server-pill" title={connection.url}>
+          <span className="server-pill" title={local ? local.path : connection.url}>
             <span className="live-dot" />
-            {connection.url.replace(/^https?:\/\//, "")} · v{version}
+            {local ? local.name : connection.url.replace(/^https?:\/\//, "")} · v{version}
           </span>
           <button
             className="ghost icon-button"
-            title="Disconnect"
+            title={local ? "Close the database" : "Disconnect"}
             onClick={() => {
+              if (local) {
+                void closeLocal();
+                return;
+              }
               forgetConnection();
               setConnection(null);
             }}

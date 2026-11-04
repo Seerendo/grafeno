@@ -1,17 +1,15 @@
 import { useState } from "react";
 
+
 import { describeError } from "../api.ts";
 import { IndexesPanel } from "../components/IndexesPanel.tsx";
 import { useStudio } from "../context.ts";
+import { saveText } from "../desktop.ts";
 import type { CheckReport, DumpStats, RebuildReport } from "../../../clients/typescript/src/index.ts";
 
+/** Saves an export: a save dialog in the desktop app, a download in a browser. */
 function download(name: string, text: string): void {
-  const url = URL.createObjectURL(new Blob([text], { type: "application/x-ndjson" }));
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = name;
-  link.click();
-  URL.revokeObjectURL(url);
+  void saveText(name, text, "application/x-ndjson");
 }
 
 export function AdminView() {

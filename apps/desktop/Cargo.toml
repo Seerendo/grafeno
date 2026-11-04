@@ -1,0 +1,34 @@
+[package]
+name = "grafeno-desktop"
+description = "Grafeno as a desktop application: the Studio in a native window, with the engine inside"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+default-run = "grafeno-desktop"
+
+[[bin]]
+name = "grafeno-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+grafeno.workspace = true
+# The HTTP API, called in-process; the window gets the Studio from Tauri.
+grafeno-server = { path = "../../crates/grafeno-server", default-features = false }
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
+ureq = "3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["net"] }

@@ -605,7 +605,7 @@ Hit testing scans the nodes and edges under the pointer (linear, fine at
 the few thousand nodes a view draws). Keys: Delete, Esc, F (frame), H
 (hide), P (pin), + and -.
 
-**9.4 Desktop application (Tauri).** A new crate, `grafeno-desktop`
+**9.4 Desktop application (Tauri)** (done). A new crate, `grafeno-desktop`
 (`apps/desktop`), wraps the Studio in a native window.
 
 - Local mode: the app opens a database file (create, open, recent files)
@@ -617,6 +617,20 @@ the few thousand nodes a view draws). Keys: Delete, Esc, F (frame), H
 - Native menus and shortcuts, file dialogs for import and export, one
   instance per database, window size and position kept, links opened in
   the system browser.
+
+As built (`apps/desktop`, see its README): the window loads the Studio
+from Tauri's bundled assets, which keeps one origin (and the Studio's
+saved settings and scripts) across launches. Instead of a loopback port,
+the Studio's `fetch` goes through one app command, `request`: addresses
+under `http://grafeno.local` reach the open database's HTTP router in the
+same process (`tower::ServiceExt::oneshot`), and other addresses are sent
+by the app, so remote servers need no CORS for it and nothing listens on
+the machine. Opening a file holds redb's lock, so a file open in a service
+or another program is refused with a clear message. One app instance
+(tauri-plugin-single-instance): a second launch focuses the window and
+opens its file there. Recent databases live in the app's config folder.
+`grafeno-server` gained a `studio` feature (on by default) so the app
+does not embed the Studio twice.
 
 **9.5 Installers and icons.** One source for every icon: the graphene logo
 rendered to `.ico` (16-256 px), `.png` sizes and the Linux icon theme.

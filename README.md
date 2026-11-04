@@ -79,6 +79,10 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
   physics simulation on its own canvas: drag and pin nodes, lasso and
   move groups, connect by dragging, context menus, a minimap, and
   communities that collapse into one node.
+- **Phase 9.4, desktop application:** `apps/desktop`, a Tauri app that
+  opens database files with the engine inside the app (no service, no
+  port) or connects to a server, with native menus, dialogs and recent
+  databases ([apps/desktop/README.md](apps/desktop/README.md)).
 
 ## Installing
 
@@ -187,3 +191,4 @@ cargo run -p grafeno-memory --example context
 | `grafeno-query`  | GQ: parser, planner and executor of the query language, `CALL algo.*` |
 | `grafeno-server` | The `grafeno` binary: HTTP API, MCP server, shell, admin CLI   |
 | `clients/typescript` | `grafeno-client`, the TypeScript HTTP client              |
+| `apps/desktop`   | `grafeno-desktop`, the desktop application (Tauri)            |

@@ -73,3 +73,8 @@ hosted on any static server. Point it at a Grafeno server started with
 `--cors-origin <that origin>`.
 
 It calls the API through the TypeScript client in `../clients/typescript`.
+
+The same build is the desktop app's window (`../apps/desktop`). There,
+`src/desktop.ts` sends requests through the app, the start screen opens
+database files or connects to a server, files are saved with dialogs and
+the native menu drives the views.

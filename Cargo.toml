@@ -6,6 +6,7 @@ members = [
     "crates/grafeno-memory",
     "crates/grafeno-query",
     "crates/grafeno-server",
+    "apps/desktop",
 ]
 
 [workspace.package]

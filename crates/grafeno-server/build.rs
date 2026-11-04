@@ -9,7 +9,11 @@ fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dist = root.join("studio/dist");
     println!("cargo::rerun-if-changed={}", dist.display());
-    if let Ok(index) = std::fs::read(dist.join("index.html")) {
+    let wanted = std::env::var_os("CARGO_FEATURE_STUDIO").is_some();
+    if let Some(index) = wanted
+        .then(|| std::fs::read(dist.join("index.html")).ok())
+        .flatten()
+    {
         println!("cargo::rustc-cfg=studio");
         // `include_dir!` does not tell Cargo about the files it embeds. The
         // index names the content-hashed assets, so a new build changes it;
