@@ -1,0 +1,14 @@
+{
+  "name": "grafeno-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Builds and packages the Grafeno desktop application (Tauri)",
+  "scripts": {
+    "icons": "node scripts/icons.mjs",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

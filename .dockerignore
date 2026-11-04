@@ -6,3 +6,5 @@ clients/typescript/dist
 studio/node_modules
 studio/dist
 dist
+apps/desktop/node_modules
+apps/desktop/gen

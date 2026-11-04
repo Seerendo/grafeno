@@ -83,8 +83,24 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
   opens database files with the engine inside the app (no service, no
   port) or connects to a server, with native menus, dialogs and recent
   databases ([apps/desktop/README.md](apps/desktop/README.md)).
+- **Phase 9.5, installers and icons:** Grafeno Desktop installers for
+  Windows (`.exe`, `.msi`) and Linux (`.deb`, `.rpm`, `.AppImage`) with
+  `.redb` files opening in it, every icon rendered from one source, and a
+  Grafeno Studio menu entry with its icon in the server's Linux packages.
 
 ## Installing
+
+**Grafeno Desktop**, the desktop application (database files with the
+engine inside, or a connection to a server):
+
+| System | Install |
+| ------ | ------- |
+| Windows | `grafeno-desktop-<version>-windows-x64-setup.exe` or `.msi` |
+| Debian, Ubuntu | `sudo apt install ./grafeno-desktop_<version>_amd64.deb` |
+| Fedora, RHEL | `sudo dnf install ./grafeno-desktop-<version>-1.x86_64.rpm` |
+| Any Linux | `grafeno-desktop-<version>-x86_64.AppImage` |
+
+**The Grafeno server**, as a service for agents and applications:
 
 | System | Install |
 | ------ | ------- |

@@ -1,10 +1,14 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Grafeno",
+  "productName": "Grafeno Desktop",
   "mainBinaryName": "grafeno-desktop",
   "version": "0.1.0",
   "identifier": "dev.grafeno.desktop",
   "build": {
+    "beforeBuildCommand": {
+      "script": "npm run build",
+      "cwd": "../../studio"
+    },
     "frontendDist": "../../studio/dist"
   },
   "app": {
@@ -29,9 +33,49 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png", "icons/icon.ico"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ],
     "category": "DeveloperTool",
     "shortDescription": "A graph engine for agent memory and knowledge",
-    "longDescription": "Grafeno is a graph engine for agent memory and knowledge. The desktop application opens a database file and runs the engine inside the app, or connects to a Grafeno server."
+    "longDescription": "Grafeno is a graph engine for agent memory and knowledge. The desktop application opens a database file and runs the engine inside the app, or connects to a Grafeno server.",
+    "publisher": "Seerendo",
+    "copyright": "2026, Seerendo",
+    "homepage": "https://github.com/Seerendo/grafeno",
+    "fileAssociations": [
+      {
+        "ext": [
+          "redb"
+        ],
+        "name": "Grafeno database",
+        "description": "Grafeno database",
+        "role": "Editor",
+        "mimeType": "application/x-grafeno-database"
+      }
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "displayLanguageSelector": false
+      },
+      "wix": {
+        "language": "en-US"
+      }
+    },
+    "linux": {
+      "deb": {
+        "section": "database"
+      },
+      "rpm": {
+        "release": "1"
+      }
+    }
   }
 }

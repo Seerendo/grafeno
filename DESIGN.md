@@ -358,7 +358,7 @@ without a current user. They remain possible for embedded use.
    archiving, consolidation into summaries.
 8. **Performance, query language and analysis** (done, in five steps;
    see below).
-9. **Desktop application** (planned, in five steps; see below): Grafeno
+9. **Desktop application** (done, in five steps; see below): Grafeno
    as a desktop app with its own installers, a new design and a graph you
    can handle directly.
 10. **Integrations**: Grafito first, Python bindings, read replicas.
@@ -632,7 +632,7 @@ opens its file there. Recent databases live in the app's config folder.
 `grafeno-server` gained a `studio` feature (on by default) so the app
 does not embed the Studio twice.
 
-**9.5 Installers and icons.** One source for every icon: the graphene logo
+**9.5 Installers and icons** (done). One source for every icon: the graphene logo
 rendered to `.ico` (16-256 px), `.png` sizes and the Linux icon theme.
 
 - Desktop app installers from the Tauri bundler: Windows NSIS `.exe` (and
@@ -643,6 +643,20 @@ rendered to `.ico` (16-256 px), `.png` sizes and the Linux icon theme.
   get the icon too: the setup `.exe` and `grafeno.exe` on Windows, a
   `.desktop` entry and icons in the `.deb` and `.rpm`.
 - The release workflow builds both families on tags.
+
+As built: `npm run icons` in `apps/desktop` renders `docs/assets/logo.svg`
+with `tauri icon` and copies the results to `packaging/windows/grafeno.ico`
+and `packaging/linux/icons/`. The app is named **Grafeno Desktop**
+(package `grafeno-desktop`), so its Linux packages do not clash with the
+server's `grafeno`; its NSIS setup installs for the current user without
+administrator rights (the MSI is there for managed machines), and both
+installers and the Linux packages register `.redb` files to open in it.
+The server's `.deb` and `.rpm` add a **Grafeno Studio** menu entry
+(`xdg-open` on the service's Studio) with the icon in the hicolor theme.
+The release workflow gained `desktop-windows` and `desktop-linux` jobs
+(Ubuntu 22.04, so the AppImage runs on older systems).
+
+Phase 9 is complete.
 
 ## Open decisions
 
