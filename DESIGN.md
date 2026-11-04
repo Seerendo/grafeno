@@ -349,7 +349,107 @@ without a current user. They remain possible for embedded use.
 7. **Memory** (done): entity resolution by normalized names and aliases,
    importance, accesses and decay in ranking, duplicates and merging,
    archiving, consolidation into summaries.
-8. Integrations (Grafito first), Python bindings, read replicas.
+8. **Performance, query language and analysis** (planned, in five steps;
+   see below).
+9. **Desktop application**: from the browser to a desktop app (guidelines
+   to come after phase 8).
+10. **Integrations**: Grafito first, Python bindings, read replicas.
+
+### Phase 8 plan
+
+Each step ends with tests, benchmarks where they apply, documentation and
+its own commit.
+
+**8.1 GQ completeness.** The executor becomes a pipeline of clauses (rows
+flow from one clause to the next), which the remaining Cypher clauses need:
+
+- `OPTIONAL MATCH` (missing parts are `null`), `WITH` (projection and
+  aggregation between steps; `WITH … WHERE` filters aggregates, like SQL's
+  `HAVING`), `UNWIND`, `UNION` and `UNION ALL`.
+- `CASE` (simple and searched), list comprehensions
+  (`[x IN list WHERE … | …]`), pattern predicates in `WHERE`
+  (`WHERE (a)-[:knows]->(b)`, `WHERE NOT (a)--()`, `EXISTS { … }`).
+- `MERGE` (match or create, with `ON CREATE SET` and `ON MATCH SET`) and
+  `FOREACH` (writes per list item).
+- `CALL procedure(…) YIELD …`: built-in procedures (`db.labels()`,
+  `db.relationshipTypes()`, `db.propertyKeys()`, later the algorithms).
+- `EXPLAIN` and `PROFILE`: the plan, and rows and time per step.
+
+**8.2 Statistics and time.**
+
+- Aggregates: `stdev`, `stdevp`, `variance`, `median`, `percentileCont`,
+  `percentileDisc`, `mode`, `count(DISTINCT …)` for all of them.
+- A duration type (ISO 8601, such as `P1Y2M10D`, `PT4H`): date and time
+  arithmetic (`date + duration`, `b - a`), `duration.between(a, b)`,
+  `duration.inDays(a, b)`, components (`d.days`, `d.hours`).
+- Date parts and truncation: `t.year`, `t.month`, `t.week`, `t.dayOfWeek`,
+  `date.truncate('month', t)`, for grouping by period.
+- Valid time in numbers: how long a fact held
+  (`duration.between(r.@valid_from, coalesce(r.@valid_to, now()))`), and
+  `CALL temporal.series(start, end, step)`, to count what was valid at each
+  point of a period in one query.
+- Studio: charts (bar, line, pie) over script results.
+
+**8.3 Property indexes and safe queries.** Today `MATCH (p:Person) WHERE
+p.age > 32` scans every `Person`.
+
+- Declared indexes, as in Postgres and Neo4j:
+  `CREATE INDEX FOR (n:Person) ON (n.age)`, `DROP INDEX`, `SHOW INDEXES`,
+  also from the Studio. An index table keyed by `(ns, index, sortable
+  value, node)` (layout version 5) serves equality, ranges,
+  `STARTS WITH` and `IN`; it is kept in the write transaction and checked
+  and rebuilt like the other indexes. Uniqueness constraints build on it.
+- A planner: starts a pattern from its most selective part (an index, an
+  id, the smallest label by its counter), pushes `WHERE` filters into the
+  scan, and stops scanning as soon as `LIMIT` is met.
+- Guards, so one query cannot take the service down: a time limit, a
+  limit on rows read and on rows held in memory (sorts, aggregates,
+  `collect`), and cancellation when the client goes away. Defaults in
+  `grafeno.toml`; a query over its limits fails with a clear error and
+  leaves the server serving others.
+
+**8.4 Concurrent and bulk work.** redb has one writer and any number of
+readers (MVCC); readers already run in parallel.
+
+- A writer queue with group commit: concurrent small writes share one
+  commit (each request keeps its own all-or-nothing result), which removes
+  most of the per-write cost measured in
+  [docs/benchmarks.md](docs/benchmarks.md).
+- Selectable durability (`immediate` by default, `eventual` for loads that
+  can be repeated).
+- Bulk loading (`grafeno import --bulk`, `POST /v1/import?bulk=true`):
+  large transactions, text statistics and the vector graph built at the
+  end instead of per node.
+- Shared read caches across transactions (vectors and adjacency of hot
+  namespaces), invalidated by commits, for the "one lookup per visited
+  vector" limit.
+- Backpressure: a cap on concurrent queries and writes; beyond it the
+  server answers 503 with `Retry-After` instead of piling up work.
+- Benchmarks with many concurrent readers and writers, and loads of
+  millions of nodes.
+
+**8.5 Graph algorithms.** On disk, adjacency is already index-free: a
+node's edges by label are one contiguous key range, and each entry holds
+the neighbor's id and the edge's times. Algorithms that touch the whole
+graph work on an in-memory projection instead: a compact adjacency array
+(CSR, each node holding the positions of its neighbors) of a namespace or
+part of it (labels, edge labels, `VALID AT`), built on demand and reused
+while the data does not change.
+
+- Pathfinding: shortest paths weighted by a property (Dijkstra), A*, the
+  k shortest paths (Yen), all shortest paths.
+- Centrality: degree, PageRank, betweenness, closeness.
+- Communities: connected components (weak and strong), label propagation,
+  Louvain.
+- Similarity: node similarity by shared neighbors (Jaccard, overlap,
+  cosine) and k nearest neighbors by embedding.
+- Link prediction: common neighbors, Adamic-Adar, resource allocation,
+  preferential attachment.
+- Node embeddings: FastRP, whose vectors can be written back as node
+  embeddings and searched with the vector index.
+- Each runs as `CALL algo.<name>(…) YIELD …` in GQ, through HTTP, and from
+  the Studio (color by community, size by centrality). Modes: stream the
+  results, return statistics, or write them to a property.
 
 A performance pass (layout version 3) followed phase 4: traversals 3-4×
 faster, BM25 3× faster, vector inserts 2.5× faster in batches. Numbers and
