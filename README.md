@@ -4,7 +4,9 @@
 
 A graph engine in Rust for agent memory and knowledge: a property graph with
 namespaces, facts with valid time and record time, provenance, full-text and
-vector search, and hybrid recall that returns context within a token budget.
+vector search, hybrid recall that returns context within a token budget,
+a Cypher-like query language (GQ) with statistics and property indexes, and
+graph algorithms (paths, centrality, communities, similarity, embeddings).
 First client: [Grafito](https://github.com/Seerendo/grafito).
 
 The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
@@ -59,6 +61,12 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
   writes (11 times the writes per second on disk), eventual durability,
   bulk imports in chunks, and 503 with `Retry-After` when the server is
   full.
+- **Phase 8.5, graph algorithms:** `CALL algo.*` for weighted paths
+  (Dijkstra, A*, Yen, all shortest paths), centrality (degree, PageRank,
+  betweenness, closeness), communities (components, label propagation,
+  Louvain, triangles), similarity, link prediction and FastRP embeddings,
+  on a cached in-memory projection; over HTTP too, and in the Studio's
+  graph (color by community, size by centrality).
 
 ## Installing
 
@@ -81,6 +89,15 @@ vault->   RETURN p.name, c.name, date(w.@valid_from) AS since;
 --------+--------+------------
  Ana    | Acme   | 2020-01-01
 (1 row)
+```
+
+Graph algorithms run from GQ too
+([docs/query-language.md](docs/query-language.md#graph-algorithms)):
+
+```text
+vault=> CALL algo.pageRank({labels: 'Person'}) YIELD node, score
+vault->   RETURN node.name, score LIMIT 3;
+vault=> CALL algo.louvain() YIELD node, community SET node.community = community;
 ```
 
 Give an agent long-term memory over MCP, for example in Claude Code:
@@ -153,8 +170,8 @@ cargo run -p grafeno-memory --example context
 | Crate            | Contents                                                     |
 | ---------------- | ------------------------------------------------------------ |
 | `grafeno-core`   | Model: `Node`, `Edge`, UUID v7 ids, `Timestamp`              |
-| `grafeno`        | Database, transactions, traversals, BM25 and HNSW indexes     |
+| `grafeno`        | Database, transactions, traversals, BM25, HNSW and property indexes, group commit, graph algorithms (`algo`) |
 | `grafeno-memory` | Hybrid recall and token-budgeted context                      |
-| `grafeno-query`  | GQ: parser and executor of the query language                 |
+| `grafeno-query`  | GQ: parser, planner and executor of the query language, `CALL algo.*` |
 | `grafeno-server` | The `grafeno` binary: HTTP API, MCP server, shell, admin CLI   |
 | `clients/typescript` | `grafeno-client`, the TypeScript HTTP client              |

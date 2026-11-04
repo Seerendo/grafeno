@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path as FsPath;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use grafeno_core::{Edge, EdgeId, Error, NewEdge, NewNode, Node, NodeId, Props, Result, Timestamp};
@@ -8,6 +9,7 @@ use redb::{
     ReadableTableMetadata, TableDefinition, WriteTransaction,
 };
 
+use crate::algo::Shared;
 use crate::index::{INDEX_ENTRIES, INDEXES, IndexKey};
 use crate::memory::names_of;
 use crate::stats::{
@@ -65,6 +67,8 @@ pub struct Grafeno {
     eventual: AtomicBool,
     /// Commits with eventual durability since the last flush.
     unflushed: AtomicBool,
+    /// The commit counter and the projections cached for algorithms.
+    shared: Arc<Shared>,
 }
 
 impl Grafeno {
@@ -150,6 +154,7 @@ impl Grafeno {
             db,
             eventual: AtomicBool::new(false),
             unflushed: AtomicBool::new(false),
+            shared: Arc::default(),
         })
     }
 
@@ -178,8 +183,11 @@ impl Grafeno {
     }
 
     pub fn begin_read(&self) -> Result<ReadTx> {
-        let tx = self.db.begin_read().map_err(storage)?;
+        let (tx, generation) = self.shared.snapshot(|| self.db.begin_read());
+        let tx = tx.map_err(storage)?;
         Ok(ReadTx {
+            shared: self.shared.clone(),
+            generation,
             nodes: tx.open_table(NODES).map_err(storage)?,
             edges: tx.open_table(EDGES).map_err(storage)?,
             out: tx.open_table(ADJ_OUT).map_err(storage)?,
@@ -212,6 +220,7 @@ impl Grafeno {
         Ok(WriteTx {
             tx,
             vectors: vector::Cache::default(),
+            shared: self.shared.clone(),
         })
     }
 
@@ -382,6 +391,9 @@ pub struct ReadTx {
     pub(crate) memory: ReadOnlyTable<RecordKey, (f32, u32, i64)>,
     pub(crate) indexes: ReadOnlyTable<(&'static str, &'static str), &'static [u8]>,
     pub(crate) index_entries: ReadOnlyTable<IndexKey, ()>,
+    pub(crate) shared: Arc<Shared>,
+    /// The commit this snapshot sees, when known (for the projection cache).
+    pub(crate) generation: Option<u64>,
     _tx: ReadTransaction,
 }
 
@@ -526,11 +538,13 @@ pub struct WriteTx {
     pub(crate) tx: WriteTransaction,
     /// Decoded vectors and links, shared by the vector writes of this transaction.
     pub(crate) vectors: vector::Cache,
+    pub(crate) shared: Arc<Shared>,
 }
 
 impl WriteTx {
     pub fn commit(self) -> Result<()> {
-        self.tx.commit().map_err(storage)
+        let Self { tx, shared, .. } = self;
+        shared.committing(|| tx.commit().map_err(storage))
     }
 
     pub fn abort(self) -> Result<()> {

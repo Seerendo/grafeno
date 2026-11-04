@@ -161,6 +161,8 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/{ns}/context", post(context_handler))
         .route("/{ns}/batch", post(batch))
         .route("/{ns}/query", post(query))
+        .route("/algorithms", get(algorithms))
+        .route("/{ns}/algo/{name}", post(algorithm))
         .route("/{ns}/resolve", get(resolve))
         .route("/{ns}/duplicates", get(duplicates))
         .route("/{ns}/merge", post(merge))
@@ -1189,6 +1191,17 @@ async fn query(
     Path(ns): Path<String>,
     Body(input): Body<QueryInput>,
 ) -> ApiResult<Json<Value>> {
+    let params = grafeno_query::params_from_json(&input.params);
+    run_query(&state, ns, input.query, params).await.map(Json)
+}
+
+/// Runs a GQ query: reads on a snapshot, writes in the next group commit.
+async fn run_query(
+    state: &AppState,
+    ns: String,
+    query: String,
+    params: grafeno_query::Params,
+) -> ApiResult<Value> {
     let db = state.db.clone();
     // When the client goes away, this handler is dropped: the guard then
     // tells the query to stop.
@@ -1198,23 +1211,22 @@ async fn query(
         cancel: Some(cancel),
         ..state.limits.clone()
     };
-    let params = grafeno_query::params_from_json(&input.params);
-    if !grafeno_query::is_write(&input.query)? {
+    if !grafeno_query::is_write(&query)? {
         let result = tokio::task::spawn_blocking(move || {
-            grafeno_query::execute_read_with(&db.begin_read()?, &ns, &input.query, &params, &limits)
+            grafeno_query::execute_read_with(&db.begin_read()?, &ns, &query, &params, &limits)
         })
         .await
         .map_err(|error| ApiError::internal(error.to_string()))??;
-        return Ok(Json(result.to_json()));
+        return Ok(result.to_json());
     }
     // Writes join the next group commit. A failing query must make the
     // writer discard the group's transaction, so its error travels as an
     // engine error and the query error itself is kept aside.
     let failure: Arc<std::sync::Mutex<Option<grafeno_query::QueryError>>> = Arc::default();
     let kept = failure.clone();
-    let outcome = write(&state, move |tx| {
+    let outcome = write(state, move |tx| {
         let read = db.begin_read()?;
-        grafeno_query::execute_in(tx, &read, &ns, &input.query, &params, &limits).map_err(|error| {
+        grafeno_query::execute_in(tx, &read, &ns, &query, &params, &limits).map_err(|error| {
             let message = error.to_string();
             *kept.lock().expect("not poisoned") = Some(error);
             Error::Invalid(message)
@@ -1222,12 +1234,139 @@ async fn query(
     })
     .await;
     match outcome {
-        Ok(result) => Ok(Json(result.to_json())),
+        Ok(result) => Ok(result.to_json()),
         Err(error) => match failure.lock().expect("not poisoned").take() {
             Some(query_error) => Err(query_error.into()),
             None => Err(error),
         },
     }
+}
+
+// ---------------------------------------------------------------- algorithms
+
+/// The graph algorithms, as `CALL dbms.procedures()` lists them.
+async fn algorithms() -> Json<Value> {
+    Json(Value::Array(
+        grafeno_query::algorithms()
+            .map(|algorithm| {
+                json!({
+                    "name": algorithm.name,
+                    "arguments": algorithm.args,
+                    "columns": algorithm.columns,
+                    "description": algorithm.description,
+                })
+            })
+            .collect(),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AlgorithmInput {
+    /// The arguments before the settings: nodes by id, `k`.
+    #[serde(default)]
+    args: Vec<Value>,
+    #[serde(default)]
+    settings: serde_json::Map<String, Value>,
+    /// Stores the result in this node property (or `@embedding`) instead
+    /// of returning rows.
+    write: Option<String>,
+    /// With `write`, the column to store; the one after `node` by default.
+    column: Option<String>,
+}
+
+/// `CALL algo.<name>` over HTTP: the rows it yields (with nodes as
+/// `{@id, @labels, name}`), or, with `write`, how many nodes got the result.
+async fn algorithm(
+    State(state): State<AppState>,
+    Path((ns, name)): Path<(String, String)>,
+    Body(input): Body<AlgorithmInput>,
+) -> ApiResult<Json<Value>> {
+    let wanted = format!("algo.{name}");
+    let algorithm = grafeno_query::algorithms()
+        .find(|algorithm| {
+            algorithm.name.eq_ignore_ascii_case(&wanted)
+                || algorithm.name.eq_ignore_ascii_case(&name)
+        })
+        .ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "no algorithm {name} (GET /v1/algorithms lists them)"
+            ))
+        })?;
+    let mut params = grafeno_query::Params::new();
+    let mut call = Vec::new();
+    for (at, arg) in input.args.iter().enumerate() {
+        params.insert(format!("arg{at}"), grafeno_query::Value::from_json(arg));
+        call.push(format!("$arg{at}"));
+    }
+    params.insert(
+        "settings".into(),
+        grafeno_query::Value::from_json(&Value::Object(input.settings)),
+    );
+    call.push("$settings".into());
+    let call = format!("CALL {}({})", algorithm.name, call.join(", "));
+    let query = match input.write {
+        None => {
+            let columns: Vec<String> = algorithm
+                .columns
+                .iter()
+                .map(|column| match *column {
+                    "node" | "other" => {
+                        format!("{{id: {column}.@id, labels: {column}.@labels, name: {column}.name}} AS {column}")
+                    }
+                    "nodes" => {
+                        "[n IN nodes | {id: n.@id, labels: n.@labels, name: n.name}] AS nodes"
+                            .to_owned()
+                    }
+                    "edges" => "[e IN edges | e.@id] AS edges".to_owned(),
+                    other => other.to_owned(),
+                })
+                .collect();
+            format!(
+                "{call} YIELD {} RETURN {}",
+                algorithm.columns.join(", "),
+                columns.join(", ")
+            )
+        }
+        Some(property) => {
+            let valid = property == "@embedding"
+                || (!property.is_empty()
+                    && property
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && !property.starts_with(|c: char| c.is_ascii_digit()));
+            if !valid {
+                return Err(ApiError::bad_request(format!(
+                    "write needs a property name (letters, digits, _) or @embedding, not {property:?}"
+                )));
+            }
+            if algorithm.columns.first() != Some(&"node") {
+                return Err(ApiError::bad_request(format!(
+                    "{} yields no column per node to write",
+                    algorithm.name
+                )));
+            }
+            let column = input
+                .column
+                .unwrap_or_else(|| algorithm.columns[1].to_owned());
+            if !algorithm.columns.contains(&column.as_str()) || column == "node" {
+                return Err(ApiError::bad_request(format!(
+                    "{} yields {}: no column {column}",
+                    algorithm.name,
+                    algorithm.columns.join(", ")
+                )));
+            }
+            let target = if property == "@embedding" {
+                "node.@embedding".to_owned()
+            } else {
+                format!("node.{property}")
+            };
+            format!(
+                "{call} YIELD node, {column} SET {target} = {column} RETURN count(node) AS written"
+            )
+        }
+    };
+    run_query(&state, ns, query, params).await.map(Json)
 }
 
 // ---------------------------------------------------------------- memory

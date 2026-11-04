@@ -21,6 +21,7 @@
 //! # Ok::<(), grafeno::Error>(())
 //! ```
 
+pub mod algo;
 mod check;
 mod db;
 mod dump;

@@ -145,6 +145,33 @@ The rate holds as the database grows. Most of the time goes to the text
 postings (about 25 per text): bulk mode sorts them per chunk, which helps
 by a third; a different postings layout would be the next step.
 
+## Graph algorithms (`crates/grafeno/examples/algo_bench.rs`)
+
+100,000 nodes and 500,000 edges, in communities of 100 nodes with 90% of
+the edges inside one; in memory, release build, 2026-11-04:
+
+| Step | Time |
+| --- | --- |
+| Projection (one scan of the adjacency) | 102 ms |
+| The same projection again (cached) | 0 ms |
+| Projection with an edge weight property | 718 ms |
+| Dijkstra, one pair (13 hops) | 27 ms |
+| Yen, 5 shortest paths | 756 ms |
+| PageRank, 20 rounds | 17 ms |
+| Weakly connected components | 3 ms |
+| Label propagation | 309 ms |
+| Louvain (384 communities, modularity 0.899) | 427 ms |
+| Triangles (89,654) | 77 ms |
+| Betweenness, 100 sampled sources | 1.7 s |
+| FastRP, 64 dimensions | 104 ms |
+| Node similarity, top 10 per node (1,000,000 pairs) | 374 ms |
+
+A weight property costs a read of each edge record while projecting;
+without one, building reads only the adjacency. In GQ, each row an
+algorithm yields also reads its node (about 2 µs), so streaming a score
+for every one of 100,000 nodes adds about 0.2 s; `LIMIT` does not save
+that work, since rows are ranked first.
+
 ## Remaining limits
 
 - **Vector search reads each visited vector from redb** (about 0.4 µs per

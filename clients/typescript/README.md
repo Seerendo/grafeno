@@ -17,6 +17,11 @@ await vault.batch([
 
 const context = await vault.context({ text: question, budget: 1500 });
 prompt += context.rendered;
+
+// GQ queries and graph algorithms.
+const people = await vault.query("MATCH (p:Person) WHERE p.age > $age RETURN p.name", { age: 30 });
+const ranked = await vault.algorithm("pageRank", { settings: { labels: "Person" } });
+await vault.algorithm("louvain", { write: "community" });
 ```
 
 Field names follow the API (snake_case); see

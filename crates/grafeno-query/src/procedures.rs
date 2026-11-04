@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::QueryError;
+use crate::algorithms::{self, ALGORITHMS};
 use crate::eval::{Context, to_time};
 use crate::temporal::{self, Duration};
 use crate::value::Value;
@@ -88,6 +89,7 @@ pub(crate) fn find(name: &str) -> Result<&'static Procedure, QueryError> {
     let name = canonical(name);
     PROCEDURES
         .iter()
+        .chain(ALGORITHMS)
         .find(|procedure| procedure.name.eq_ignore_ascii_case(name))
         .ok_or_else(|| {
             QueryError::runtime(format!(
@@ -114,6 +116,9 @@ pub(crate) fn call(
     args: &[Value],
 ) -> Result<Vec<Vec<Value>>, QueryError> {
     let procedure = find(name)?;
+    if procedure.name.starts_with("algo.") {
+        return algorithms::call(ctx, procedure, args);
+    }
     let read = ctx.read;
     let ns = ctx.ns;
     let counted = |counts: std::collections::BTreeMap<String, u64>| -> Vec<Vec<Value>> {
@@ -240,6 +245,7 @@ pub(crate) fn call(
         }
         "dbms.procedures" => PROCEDURES
             .iter()
+            .chain(ALGORITHMS)
             .map(|procedure| {
                 vec![
                     Value::Str(procedure.name.into()),

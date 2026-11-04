@@ -1165,7 +1165,7 @@ fn candidates(
     }
 }
 
-fn uuid_from_text(text: &str) -> Option<NodeId> {
+pub(crate) fn uuid_from_text(text: &str) -> Option<NodeId> {
     let hex: String = text.chars().filter(|c| *c != '-').collect();
     if hex.len() != 32 {
         return None;

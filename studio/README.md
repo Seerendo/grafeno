@@ -11,15 +11,17 @@ terminal:
   nodes to archive or delete them.
 - **Graph**: draw the graph around search results or everything, create
   nodes, connect two nodes by clicking them, inspect and end facts, travel
-  in time with “valid at”.
+  in time with “valid at”, color nodes by community (Louvain, label
+  propagation, connected components) and size them by centrality
+  (PageRank, degree, betweenness), computed over the whole namespace.
 - **Scripts**: a GQ workspace like a SQL editor. Several scripts in tabs
   (kept in the browser, opened from and saved to `.gq` files), highlighting
   and completion (keywords, functions, the namespace's labels,
   pseudo-properties), a schema panel with snippets, Ctrl+Enter to run the
   statement under the cursor or the selection, F5 to run the whole script
   (each statement in its own transaction, stopping at the first error, whose
-  line is marked). Results per statement as a table, JSON or graph, with
-  CSV and JSON export, and a messages log with times and changes.
+  line is marked). Results per statement as a table, JSON, graph, bar or
+  line chart, or the `PROFILE` steps, with CSV and JSON export, and a messages log with times and changes.
 - **Search**: full text, recall with its signals, context within a token
   budget.
 - **Memory**: duplicates to merge, weak memories to archive, groups to

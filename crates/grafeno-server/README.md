@@ -169,6 +169,8 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `POST`   | `/v1/{ns}/context`                    | recall query + `{budget, fact_share, max_facts, facts}` | `{items, facts, tokens, rendered}` |
 | `POST`   | `/v1/{ns}/batch`                      | `{ops}`                                                 | `{results, refs}`             |
 | `POST`   | `/v1/{ns}/query`                      | `{query, params?}` ([GQ](../../docs/query-language.md)) | `{columns, rows, stats}`      |
+| `GET`    | `/v1/algorithms`                      |                                                         | `[{name, arguments, columns, description}]` |
+| `POST`   | `/v1/{ns}/algo/{name}`                | `{args?, settings?, write?, column?}`                   | `{columns, rows, stats}`      |
 | `GET`    | `/v1/{ns}/resolve`                    | `?name=&label=`                                         | nodes with that name or alias |
 | `GET`    | `/v1/{ns}/duplicates`                 | `?label=&min_score=&vectors=&limit=`                    | `[{a, b, score, reasons}]`    |
 | `POST`   | `/v1/{ns}/merge`                      | `{keep, merge}`                                         | `{kept, merged, edges_moved, edges_dropped}` |
@@ -178,6 +180,13 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `GET`    | `/v1/{ns}/consolidation`              | `?older_than_days=&min_size=&labels=a,b&limit=`         | `[{entity, memories}]`        |
 | `POST`   | `/v1/{ns}/summaries`                  | `{text, sources, about?, name?, labels?, embedding?, archive_sources?}` | `{id}` (201)  |
 
+- **Graph algorithms** (`pageRank`, `louvain`, `shortestPath`, … see
+  [GQ](../../docs/query-language.md#graph-algorithms)): `args` are the
+  arguments before the settings (node ids, `k`), `settings` the settings
+  map (`{"labels": "Person", "weight": "km"}`). Rows hold nodes as `{id,
+  labels, name}`. With `write: "rank"` (or `"@embedding"`) the result is
+  stored on each node instead, from `column` (the one after `node` by
+  default), and the answer is the number of nodes written.
 - **Listings** return up to `limit` items (default 100, at most 1000) in id
   order; when `next` is set, pass it as `after` to get the following page.
 - **node**: `{labels, props?, sources?, text?, embedding?}`. `PUT` and upserts

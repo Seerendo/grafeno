@@ -258,6 +258,26 @@ export interface DumpStats {
   edges: number;
 }
 
+/** A graph algorithm the server can run (`GET /v1/algorithms`). */
+export interface AlgorithmInfo {
+  name: string;
+  arguments: string;
+  columns: string[];
+  description: string;
+}
+
+/** How to run a graph algorithm over HTTP. */
+export interface AlgorithmOptions {
+  /** Arguments before the settings: node ids, `k`. */
+  args?: unknown[];
+  /** Projection and algorithm settings: `labels`, `edgeLabels`, `weight`, `direction`, … */
+  settings?: Record<string, unknown>;
+  /** Store the result in this node property (or `@embedding`) instead of returning rows. */
+  write?: string;
+  /** With `write`, the column to store (the one after `node` by default). */
+  column?: string;
+}
+
 /** What a writing query changed. */
 export interface WriteStats {
   nodes_created: number;
@@ -385,6 +405,11 @@ export class Grafeno {
   /** Every namespace that has nodes, in name order. */
   namespaces(): Promise<NamespaceInfo[]> {
     return this.request("GET", "/v1/namespaces");
+  }
+
+  /** The graph algorithms `CALL algo.*` and `algorithm()` can run. */
+  algorithms(): Promise<AlgorithmInfo[]> {
+    return this.request("GET", "/v1/algorithms");
   }
 
   /** A JSON Lines export of `namespaces` (all of them by default). */
@@ -612,6 +637,14 @@ export class Namespace {
    */
   query(query: string, params: Record<string, unknown> = {}): Promise<QueryResult> {
     return this.#call("POST", "/query", { query, params });
+  }
+
+  /**
+   * Runs a graph algorithm (`pageRank`, `louvain`, `shortestPath`, …). Rows hold
+   * nodes as `{id, labels, name}`; with `write`, one row with the nodes written.
+   */
+  algorithm(name: string, options: AlgorithmOptions = {}): Promise<QueryResult> {
+    return this.#call("POST", `/algo/${encodeURIComponent(name)}`, options);
   }
 
   /** Applies every operation in one transaction: all of them or none. */

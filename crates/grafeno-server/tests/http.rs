@@ -887,3 +887,87 @@ async fn a_full_server_answers_503() {
     let (status, _) = call(&app, "GET", "/health", None).await;
     assert_eq!(status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn graph_algorithms() {
+    let app = app(None);
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/g/query",
+        Some(json!({ "query": "CREATE (a:Person {name: 'Ana'})-[:knows {w: 1}]->(b:Person {name: 'Bob'})-[:knows {w: 1}]->(c:Person {name: 'Cy'}), (a)-[:knows {w: 5}]->(c) RETURN a.@id, c.@id" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (ana, cy) = (body["rows"][0][0].clone(), body["rows"][0][1].clone());
+
+    let (status, list) = call(&app, "GET", "/v1/algorithms", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        list.as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["name"] == "algo.pageRank")
+    );
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/g/algo/shortestPath",
+        Some(json!({ "args": [ana, cy], "settings": { "weight": "w" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["columns"], json!(["nodes", "edges", "cost"]));
+    let names: Vec<&str> = body["rows"][0][0]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Ana", "Bob", "Cy"]);
+    assert_eq!(body["rows"][0][2], 2.0);
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/g/algo/pageRank",
+        Some(json!({ "settings": { "direction": "both" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["rows"].as_array().unwrap().len(), 3);
+    assert!(body["rows"][0][0]["id"].is_string());
+
+    // Write mode stores the score as a property.
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/g/algo/louvain",
+        Some(json!({ "write": "community" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["rows"], json!([[3]]));
+    let (_, body) = call(
+        &app,
+        "POST",
+        "/v1/g/query",
+        Some(json!({ "query": "MATCH (p:Person) WHERE p.community IS NOT NULL RETURN count(p)" })),
+    )
+    .await;
+    assert_eq!(body["rows"], json!([[3]]));
+
+    for (uri, input) in [
+        ("/v1/g/algo/nope", json!({})),
+        ("/v1/g/algo/pageRank", json!({ "write": "bad name" })),
+        ("/v1/g/algo/shortestPath", json!({ "write": "x" })),
+        (
+            "/v1/g/algo/pageRank",
+            json!({ "settings": { "dampng": 1 } }),
+        ),
+    ] {
+        let (status, body) = call(&app, "POST", uri, Some(input)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+    }
+}

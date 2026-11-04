@@ -25,6 +25,11 @@
 //!   `mode`; durations (`duration('P1M')`, calendar arithmetic,
 //!   `duration.between`), date parts (`t.year`), `date.truncate`, and
 //!   `temporal.series` with `VALID AT` per row.
+//! - **Graph algorithms**: `CALL algo.<name>(…, {settings})` for paths
+//!   (Dijkstra, A*, Yen, all shortest paths), centrality (degree,
+//!   PageRank, betweenness, closeness), communities (components, label
+//!   propagation, Louvain, triangles), similarity, link prediction and
+//!   FastRP embeddings, plus `algo.*` pair functions.
 //! - `EXPLAIN` returns the plan; `PROFILE` adds rows and time per step.
 //! - **Pseudo-properties** (`@name`) expose what is not a property: `@id`,
 //!   `@labels`, `@text`, `@embedding`, `@sources`, `@created_at` on nodes;
@@ -33,6 +38,7 @@
 //!
 //! The full reference is in `docs/query-language.md`.
 
+mod algorithms;
 mod ast;
 mod eval;
 mod exec;
@@ -126,6 +132,26 @@ impl fmt::Display for QueryError {
 }
 
 impl std::error::Error for QueryError {}
+
+/// A graph algorithm `CALL algo.<name>` can run: its name (as written in
+/// queries), arguments and the columns it yields.
+#[derive(Clone, Copy, Debug)]
+pub struct Algorithm {
+    pub name: &'static str,
+    pub args: &'static str,
+    pub columns: &'static [&'static str],
+    pub description: &'static str,
+}
+
+/// Every graph algorithm.
+pub fn algorithms() -> impl Iterator<Item = Algorithm> {
+    algorithms::ALGORITHMS.iter().map(|procedure| Algorithm {
+        name: procedure.name,
+        args: procedure.args,
+        columns: procedure.columns,
+        description: procedure.description,
+    })
+}
 
 /// Parameters from a JSON object (`{"name": "Ana"}` → `$name`).
 pub fn params_from_json(object: &serde_json::Map<String, serde_json::Value>) -> Params {

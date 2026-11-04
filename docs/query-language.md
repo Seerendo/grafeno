@@ -182,6 +182,85 @@ column. Arguments can use the row's variables, so a `CALL` in the middle of
 a query runs once per row. A query may end with `CALL`: it returns what the
 procedure yields.
 
+### Graph algorithms
+
+`CALL algo.<name>(…, {settings})` runs a graph algorithm on the namespace
+and streams one row per result. `CALL algo.<name>` with no settings uses
+the whole namespace.
+
+```text
+// The five most central people, and the communities they form.
+CALL algo.pageRank({labels: 'Person', edgeLabels: 'knows'}) YIELD node, score
+RETURN node.name, score LIMIT 5;
+CALL algo.louvain() YIELD node, community
+RETURN community, count(*) AS size, collect(node.name)[..5] ORDER BY size DESC;
+
+// The cheapest route, weighted by the km property.
+MATCH (a:City {name: 'Lima'}), (b:City {name: 'Cusco'})
+CALL algo.shortestPath(a, b, {weight: 'km'}) YIELD nodes, cost
+RETURN [c IN nodes | c.name], cost;
+
+// Write mode: store what the procedure yields.
+CALL algo.pageRank() YIELD node, score SET node.rank = score;
+CALL algo.fastRP({dimension: 64}) YIELD node, embedding SET node.@embedding = embedding;
+```
+
+**The projection.** Algorithms run on an in-memory copy of the graph's
+structure (the nodes and, for each, its edges as an array), built from the
+adjacency index without reading node records. Read queries share it
+through a cache until the next commit changes the data, so running
+several algorithms on the same part of the graph projects it once. These
+settings choose what it holds, for every procedure:
+
+| Setting | |
+| --- | --- |
+| `labels` | nodes with these labels (a string or a list); all nodes by default |
+| `edgeLabels` | edges with these labels; all edges by default |
+| `weight` | the edge property with each edge's weight; edges without it weigh 1 |
+| `direction` | `'out'`, `'in'` or `'both'` (default per procedure, below) |
+| `validAt`, `knownAt` | facts true at a time, or what was known then (as in `MATCH`) |
+
+A setting the procedure does not know is an error, so typos do not pass
+unnoticed. Node arguments are nodes or their ids as strings.
+
+| Procedure | Yields | Settings (defaults) |
+| --- | --- | --- |
+| `algo.shortestPath(source, target)` | `nodes`, `edges`, `cost` | Dijkstra; without `weight` it is the fewest hops. `direction: 'out'` |
+| `algo.astar(source, target)` | `nodes`, `edges`, `cost` | A* guided by coordinates: `latitude` and `longitude` (straight-line km), or `x` and `y`. The straight line must never be longer than the weights say |
+| `algo.kShortestPaths(source, target, k)` | `rank`, `nodes`, `edges`, `cost` | the k cheapest loopless paths (Yen), cheapest first |
+| `algo.allShortestPaths(source, target)` | `nodes`, `edges`, `cost` | every cheapest path, `limit: 100` |
+| `algo.distances(source)` | `node`, `cost` | the cost to every node reached, nearest first |
+| `algo.degree()` | `node`, `score` | edges per node, or the sum of their weights. `direction: 'both'` |
+| `algo.pageRank()` | `node`, `score` | `damping: 0.85`, `iterations: 20`, `tolerance: 1e-7`, `sources` (personalized PageRank: jumps land only on these nodes). Scores add up to 1 |
+| `algo.betweenness()` | `node`, `score` | shortest paths through each node (Brandes, on every core); `sample: n` estimates it from n sources, `seed` |
+| `algo.closeness()` | `node`, `score` | Wasserman-Faust closeness, or `harmonic: true` |
+| `algo.wcc()`, `algo.scc()` | `node`, `component` | weakly and strongly connected components |
+| `algo.labelPropagation()` | `node`, `community` | `iterations: 10`, `seed` |
+| `algo.louvain()` | `node`, `community`, `modularity` | `resolution: 1` (higher, smaller communities), `levels: 10`, `iterations: 10` |
+| `algo.triangles()` | `node`, `triangles`, `coefficient` | triangles per node and the local clustering coefficient |
+| `algo.nodeSimilarity()` | `node`, `other`, `score` | by shared neighbors: `metric: 'jaccard'` (or `'overlap'`, `'cosine'`), `topK: 10` per node, `cutoff: 0`, `node` (only that one). `direction: 'out'`: people who like the same things |
+| `algo.knn()` | `node`, `other`, `score` | nearest nodes by embedding (cosine, from the vector index): `topK: 10`, `cutoff`, `node` |
+| `algo.linkPrediction(node)` | `other`, `score` | likely new edges: nodes two hops away, by `metric: 'adamicAdar'` (or `'commonNeighbors'`, `'resourceAllocation'`, `'preferentialAttachment'`, `'totalNeighbors'`, `'jaccard'`), `limit: 10` |
+| `algo.fastRP()` | `node`, `embedding` | structural embeddings: `dimension: 128`, `iterationWeights: [0, 1, 1]`, `selfInfluence: 0`, `normalizationStrength: 0`, `seed: 42` |
+
+Unless noted, directions default to `'out'`; FastRP defaults to
+`'both'`, and weak components, label propagation, Louvain, triangles and
+link prediction always follow edges both ways. Centralities come highest first; groups are numbered
+from 0 in node order.
+
+Functions score one pair of nodes from their neighbors (both
+directions), with no projection: `algo.commonNeighbors(a, b)`,
+`algo.adamicAdar(a, b)`, `algo.resourceAllocation(a, b)`,
+`algo.preferentialAttachment(a, b)`, `algo.totalNeighbors(a, b)`,
+`algo.jaccard(a, b)`, `algo.overlap(a, b)`; and `algo.cosine(list, list)`
+compares two vectors (`algo.cosine(a.@embedding, b.@embedding)`).
+
+**Modes.** Results stream as rows. For statistics, aggregate them
+(`CALL algo.louvain() YIELD community RETURN count(DISTINCT community)`);
+to keep them, `SET` them, which turns the query into one write
+transaction. Algorithms stop at the query's time limit or when it is
+cancelled.
+
 ### `EXPLAIN` and `PROFILE`
 
 `EXPLAIN` before a statement returns its plan as a table (step, operation,
@@ -435,5 +514,5 @@ without limits (`grafeno_query::execute_with` takes them).
 - `CALL { … }` subqueries, pattern comprehensions (`[(a)-->(b) | b.name]`),
   map projections (`n {.name}`) and `=~` regular expressions.
 - Indexes on several properties at once, or on edge properties.
-- Graph algorithms as procedures (phase 8.5). Hybrid recall is in the shell's `\recall` and
-  `\context`, and in the HTTP API.
+- Graph algorithms over several namespaces at once. Hybrid recall is in
+  the shell's `\recall` and `\context`, and in the HTTP API.

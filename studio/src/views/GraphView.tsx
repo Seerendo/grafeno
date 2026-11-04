@@ -2,7 +2,7 @@ import cytoscape, { type Core, type ElementDefinition } from "cytoscape";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type Edge, type Node, describeError, displayName, formatTime, labelColor } from "../api.ts";
-import { graphStyle, layoutFor, useThemeVersion } from "../components/MiniGraph.tsx";
+import { cssVar, graphStyle, layoutFor, useThemeVersion } from "../components/MiniGraph.tsx";
 import { NodeDetail } from "../components/NodeDetail.tsx";
 import { useStudio } from "../context.ts";
 import { Icon } from "../icons.tsx";
@@ -12,6 +12,40 @@ import { useTask } from "../ui.tsx";
 const MAX_NEW = 150;
 
 type Selection = { kind: "node"; id: string } | { kind: "edge"; edge: Edge } | null;
+
+/** Graph algorithms that color nodes by group, run on the whole namespace. */
+const COLOR_BY = {
+  label: { title: "Label" },
+  louvain: { title: "Community (Louvain)", settings: {} },
+  labelPropagation: { title: "Community (label propagation)", settings: {} },
+  wcc: { title: "Connected component", settings: {} },
+} as const;
+
+/** Graph algorithms that size nodes by a score. */
+const SIZE_BY = {
+  none: { title: "Same size" },
+  pageRank: { title: "PageRank", settings: { direction: "both" } },
+  degree: { title: "Degree", settings: {} },
+  betweenness: { title: "Betweenness", settings: { direction: "both", sample: 300 } },
+} as const;
+
+type ColorBy = keyof typeof COLOR_BY;
+type SizeBy = keyof typeof SIZE_BY;
+
+/** Group or score per node id, from one algorithm run. */
+type Analysis = { values: Map<string, number>; groups: number; max: number };
+
+async function analyze(
+  graph: ReturnType<ReturnType<typeof useStudio>["client"]["namespace"]>,
+  name: string,
+  settings: Record<string, unknown>,
+): Promise<Analysis> {
+  const result = await graph.algorithm(name, { settings });
+  const values = new Map<string, number>();
+  for (const row of result.rows as [{ id: string }, number][]) values.set(row[0].id, Number(row[1]));
+  const all = [...values.values()];
+  return { values, groups: new Set(all).size, max: Math.max(0, ...all) };
+}
 
 export function GraphView({ seed }: { seed?: string }) {
   const { client, namespace, revision, newNode, newEdge, confirm, changed, toast } = useStudio();
@@ -31,6 +65,13 @@ export function GraphView({ seed }: { seed?: string }) {
   state.current = { connectFrom, newEdge };
   const { busy, run } = useTask();
   const theme = useThemeVersion();
+  const [colorBy, setColorBy] = useState<ColorBy>("label");
+  const [sizeBy, setSizeBy] = useState<SizeBy>("none");
+  const [groups, setGroups] = useState<Analysis | null>(null);
+  const [scores, setScores] = useState<Analysis | null>(null);
+  const labels = useRef(new Map<string, string>());
+  // Counts redraws, so painting follows each one.
+  const [drawn, setDrawn] = useState(0);
 
   useEffect(() => {
     cy.current?.style(graphStyle());
@@ -97,6 +138,7 @@ export function GraphView({ seed }: { seed?: string }) {
       }
       edges.current = found;
       names.current = new Map([...nodes.values()].map((node) => [node.id, displayName(node)]));
+      labels.current = new Map([...nodes.values()].map((node) => [node.id, node.labels[0] ?? ""]));
       const now = Date.now() * 1000;
       const positions = new Map(graph.nodes().map((node) => [node.id(), { ...node.position() }]));
       const elements: ElementDefinition[] = [
@@ -126,6 +168,7 @@ export function GraphView({ seed }: { seed?: string }) {
         }
       }
       setCount({ nodes: nodes.size, edges: graph.edges().length });
+      setDrawn((value) => value + 1);
       setError(null);
     } catch (problem) {
       setError(describeError(problem));
@@ -135,6 +178,49 @@ export function GraphView({ seed }: { seed?: string }) {
   useEffect(() => {
     void redraw();
   }, [redraw, revision]);
+
+  // Run the chosen algorithms on the whole namespace (again after changes).
+  useEffect(() => {
+    let current = true;
+    const graph = client.namespace(namespace);
+    const color = COLOR_BY[colorBy];
+    const size = SIZE_BY[sizeBy];
+    Promise.all([
+      "settings" in color ? analyze(graph, colorBy, color.settings) : null,
+      "settings" in size ? analyze(graph, sizeBy, size.settings) : null,
+    ])
+      .then(([byGroup, byScore]) => {
+        if (!current) return;
+        setGroups(byGroup);
+        setScores(byScore);
+      })
+      .catch((problem) => current && setError(describeError(problem)));
+    return () => {
+      current = false;
+    };
+  }, [client, namespace, colorBy, sizeBy, revision]);
+
+  // Paint groups and scores onto the drawn nodes.
+  useEffect(() => {
+    const graph = cy.current;
+    if (!graph) return;
+    graph.batch(() => {
+      graph.nodes().forEach((node) => {
+        const group = groups?.values.get(node.id());
+        node.data(
+          "color",
+          group === undefined ? labelColor(labels.current.get(node.id()) ?? "") : cssVar(`--series-${(group % 8) + 1}`),
+        );
+        const score = scores?.values.get(node.id());
+        if (scores && score !== undefined && scores.max > 0) {
+          const side = 16 + 34 * Math.sqrt(score / scores.max);
+          node.style({ width: side, height: side });
+        } else {
+          node.removeStyle("width height");
+        }
+      });
+    });
+  }, [groups, scores, drawn, theme]);
 
   const addFromSearch = async () => {
     const query = search.trim();
@@ -233,6 +319,27 @@ export function GraphView({ seed }: { seed?: string }) {
           <Icon name="link" /> {connectFrom ? "Cancel" : "Connect"}
         </button>
         <span className="toolbar-sep" />
+        <label className="row small nowrap" title="Color nodes by a graph algorithm run on the whole namespace">
+          <Icon name="graph" /> Color
+          <select value={colorBy} onChange={(e) => setColorBy(e.target.value as ColorBy)}>
+            {Object.entries(COLOR_BY).map(([key, option]) => (
+              <option key={key} value={key}>
+                {option.title}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="row small nowrap" title="Size nodes by a centrality score over the whole namespace">
+          Size
+          <select value={sizeBy} onChange={(e) => setSizeBy(e.target.value as SizeBy)}>
+            {Object.entries(SIZE_BY).map(([key, option]) => (
+              <option key={key} value={key}>
+                {option.title}
+              </option>
+            ))}
+          </select>
+        </label>
+        <span className="toolbar-sep" />
         <label className="row small nowrap" title="Show only facts that were true on this date">
           <Icon name="clock" /> Valid at
           <input type="date" value={validAt} onChange={(e) => setValidAt(e.target.value)} />
@@ -265,6 +372,8 @@ export function GraphView({ seed }: { seed?: string }) {
         <div className="canvas-status small">
           {count.nodes} nodes · {count.edges} facts
           {validAt && ` · valid on ${validAt}`}
+          {groups && ` · ${groups.groups} ${colorBy === "wcc" ? "components" : "communities"}`}
+          {scores && ` · sized by ${SIZE_BY[sizeBy].title}`}
           {" · "}
           {connectFrom ? <strong className="accent">Click the node that “{connectFrom.name}” points to</strong> : "click to inspect · double-click to expand"}
         </div>

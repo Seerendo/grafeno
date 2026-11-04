@@ -94,6 +94,19 @@ impl Budget {
         Ok(())
     }
 
+    /// A check of the time limit and cancellation that other threads can
+    /// run (graph algorithms).
+    pub(crate) fn stopper(&self) -> impl Fn() -> bool + Sync + 'static {
+        let deadline = self.limits.timeout.map(|timeout| self.started + timeout);
+        let cancel = self.limits.cancel.clone();
+        move || {
+            deadline.is_some_and(|deadline| Instant::now() > deadline)
+                || cancel
+                    .as_ref()
+                    .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+        }
+    }
+
     /// Checks how many rows are held at once.
     pub(crate) fn rows(&self, n: usize) -> Result<(), QueryError> {
         if let Some(max) = self.limits.max_rows

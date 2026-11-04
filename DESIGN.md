@@ -351,8 +351,8 @@ without a current user. They remain possible for embedded use.
 7. **Memory** (done): entity resolution by normalized names and aliases,
    importance, accesses and decay in ranking, duplicates and merging,
    archiving, consolidation into summaries.
-8. **Performance, query language and analysis** (in progress, in five
-   steps; see below). 8.1 to 8.4 are done.
+8. **Performance, query language and analysis** (done, in five steps;
+   see below).
 9. **Desktop application**: from the browser to a desktop app (guidelines
    to come after phase 8).
 10. **Integrations**: Grafito first, Python bindings, read replicas.
@@ -456,7 +456,7 @@ in parallel. Numbers are in [docs/benchmarks.md](docs/benchmarks.md).
   justify a second, hand-kept version scheme. It stays in the remaining
   limits.
 
-**8.5 Graph algorithms.** On disk, adjacency is already index-free: a
+**8.5 Graph algorithms** (done). On disk, adjacency is already index-free: a
 node's edges by label are one contiguous key range, and each entry holds
 the neighbor's id and the edge's times. Algorithms that touch the whole
 graph work on an in-memory projection instead: a compact adjacency array
@@ -478,6 +478,21 @@ while the data does not change.
 - Each runs as `CALL algo.<name>(…) YIELD …` in GQ, through HTTP, and from
   the Studio (color by community, size by centrality). Modes: stream the
   results, return statistics, or write them to a property.
+
+As built: `grafeno::algo` holds the projection and the algorithms, which
+work on node positions and know nothing of storage. A projection is built
+with one range scan of the outgoing adjacency of the namespace (edge
+records are read only for a weight property) and keeps both directions as
+CSR arrays. The projection cache lives in the database: every commit bumps
+a counter twice (odd while committing), and a read transaction records the
+counter it saw if no commit ran while it opened, so it can reuse a
+projection built for the same snapshot; up to four are kept. Write
+transactions project their own state and never cache. In GQ, statistics
+and writing need no special modes: rows are aggregated with `RETURN` or
+stored with `SET`, and `POST /v1/{ns}/algo/{name}` with `write` builds that
+query. Betweenness, closeness and FastRP spread over the cores; the
+others run on one. Every algorithm checks the query's time limit and
+cancellation between rounds.
 
 A performance pass (layout version 3) followed phase 4: traversals 3-4×
 faster, BM25 3× faster, vector inserts 2.5× faster in batches. Numbers and

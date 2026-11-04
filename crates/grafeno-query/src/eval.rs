@@ -108,7 +108,7 @@ impl Context<'_> {
         })
     }
 
-    fn embedding(&self, id: NodeId) -> Result<Option<Vec<f32>>, QueryError> {
+    pub(crate) fn embedding(&self, id: NodeId) -> Result<Option<Vec<f32>>, QueryError> {
         Ok(match self.write {
             Some(tx) => tx.embedding(self.ns, id)?,
             None => self.read.embedding(self.ns, id)?,
@@ -1352,6 +1352,9 @@ fn function(ctx: &Context, name: &str, args: Vec<Value>) -> Result<Value, QueryE
             }
             Value::List(out)
         }
-        other => return Err(error(format!("unknown function {other}()"))),
+        other => match crate::algorithms::function(ctx, other, &args) {
+            Some(result) => result?,
+            None => return Err(error(format!("unknown function {other}()"))),
+        },
     })
 }
