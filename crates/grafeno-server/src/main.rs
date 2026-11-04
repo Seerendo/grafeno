@@ -142,6 +142,21 @@ enum Command {
         db: FileArgs,
         #[arg(long = "namespace", short = 'n')]
         namespaces: Vec<String>,
+        /// Also estimate the recall@10 of vector searches, from this many of
+        /// each namespace's vectors used as queries (reads every vector).
+        #[arg(long, value_name = "SAMPLE")]
+        recall: Option<usize>,
+    },
+    /// Build the vector graph of namespaces again from their vectors:
+    /// reconnects vectors searches cannot reach and drops dangling links.
+    Compact {
+        #[command(flatten)]
+        db: FileArgs,
+        #[arg(long = "namespace", short = 'n', required_unless_present = "all")]
+        namespaces: Vec<String>,
+        /// Compact every namespace.
+        #[arg(long, conflicts_with = "namespaces")]
+        all: bool,
     },
     /// Rebuild the indexes and counters of namespaces from their records.
     Rebuild {
@@ -536,7 +551,28 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .collect::<grafeno::Result<Vec<_>>>()?;
             println!("{}", serde_json::to_string_pretty(&stats)?);
         }
-        Command::Check { db, namespaces } => {
+        Command::Compact {
+            db,
+            namespaces,
+            all: _,
+        } => {
+            let db = db.open()?;
+            for ns in namespaces_or_all(&db, namespaces)? {
+                let report = db.write(|tx| tx.compact_vectors(&ns))?;
+                println!(
+                    "{ns}: {} vectors; {} unreachable and {} dangling links before, {} unreachable after",
+                    report.vectors,
+                    report.unreachable_before,
+                    report.dangling_before,
+                    report.unreachable_after
+                );
+            }
+        }
+        Command::Check {
+            db,
+            namespaces,
+            recall,
+        } => {
             // First every page against its checksum: reading a damaged
             // page would stop this program, not report it.
             match Grafeno::verify_file(&db.db)? {
@@ -554,6 +590,25 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     "{} nodes, {} edges, {} texts, {} vectors, {} dangling links",
                     report.nodes, report.edges, report.texts, report.vectors, report.dangling_links
                 );
+                let summary = if report.unreachable_vectors > 0 {
+                    format!(
+                        "{summary}, {} vectors searches cannot reach (`grafeno compact` reconnects them)",
+                        report.unreachable_vectors
+                    )
+                } else {
+                    summary
+                };
+                let summary = match recall {
+                    Some(sample) if report.vectors > 0 => {
+                        match read.vector_recall(&ns, sample, 64)? {
+                            Some(value) => {
+                                format!("{summary}, vector recall@10 about {value:.3} (ef 64)")
+                            }
+                            None => summary,
+                        }
+                    }
+                    _ => summary,
+                };
                 if report.is_ok() {
                     println!("{ns}: ok ({summary})");
                 } else {

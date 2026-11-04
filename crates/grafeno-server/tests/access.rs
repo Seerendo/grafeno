@@ -560,3 +560,24 @@ async fn owners_download_a_backup_others_do_not() {
     }
     std::fs::remove_file(&path).unwrap();
 }
+
+#[tokio::test]
+async fn vector_recall_and_compact_over_http() {
+    let (app, _) = world().await;
+    let (status, body) = call(&app, OWNER, "GET", "/v1/a/vectors/recall?sample=5", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["sample"], 5);
+    let writer = key(
+        &app,
+        "writer",
+        json!([{ "namespace": "a", "role": "write" }]),
+        false,
+    )
+    .await;
+    let (status, _) = call(&app, &writer, "POST", "/v1/a/compact", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "compacting needs admin");
+    let (status, report) = call(&app, OWNER, "POST", "/v1/a/compact", None).await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["vectors"], 1);
+    assert_eq!(report["unreachable_after"], 0);
+}

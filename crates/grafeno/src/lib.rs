@@ -39,7 +39,7 @@ mod writer;
 
 pub use access::{Grant, Principal, Role, check_principal_name};
 pub use backup::BackupStats;
-pub use check::{CheckReport, RebuildReport};
+pub use check::{CheckReport, CompactReport, RebuildReport};
 pub use db::{Actor, Durability, FileIntegrity, Grafeno, ReadTx, SCHEMA_VERSION, WriteTx};
 pub use dump::{DumpStats, EXPORT_FORMAT, EXPORT_VERSION, ImportOptions, Record};
 pub use grafeno_core::*;

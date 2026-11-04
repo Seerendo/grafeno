@@ -34,6 +34,10 @@ pub struct CheckReport {
     /// Vector-graph links that point to removed nodes. They are expected
     /// after deletes, and searches skip them.
     pub dangling_links: u64,
+    /// Vectors that cannot be reached from the vector graph's entry point:
+    /// searches never return them. A few appear as vectors change;
+    /// [`WriteTx::compact_vectors`] reconnects them.
+    pub unreachable_vectors: u64,
     /// Inconsistencies found, at most 100 (the last line counts the rest).
     pub problems: Vec<String>,
 }
@@ -261,7 +265,7 @@ impl ReadTx {
             &ids,
             &mut problems,
         )?;
-        let (vectors, dangling_links) = vector::check(
+        let (vectors, dangling_links, unreachable_vectors) = vector::check(
             &self.vectors,
             &self.hnsw_links,
             &self.vector_meta,
@@ -282,6 +286,7 @@ impl ReadTx {
             texts,
             vectors,
             dangling_links,
+            unreachable_vectors,
             problems,
         })
     }
@@ -516,10 +521,13 @@ mod tests {
             "text length of node",
             "namespace counters say",
             "node label counters",
-            "cannot be reached from the entry point",
         ] {
             assert!(all.contains(expected), "missing {expected:?} in:\n{all}");
         }
+        assert!(
+            report.unreachable_vectors > 0,
+            "the cut links strand vectors"
+        );
 
         db.write(|tx| tx.rebuild_indexes("ns")).unwrap();
         let read = db.begin_read().unwrap();
@@ -529,5 +537,107 @@ mod tests {
         assert_eq!(read.search_text("ns", "gamma", 5).unwrap()[0].node, b);
         assert!(read.search_text("ns", "ghost", 5).unwrap().is_empty());
         assert_eq!(read.search_vector("ns", &[1.0, 0.1], 1).unwrap()[0].node, a);
+    }
+}
+
+/// What compacting a namespace's vector graph did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct CompactReport {
+    pub vectors: u64,
+    /// Before and after: dangling links and unreachable vectors.
+    pub dangling_before: u64,
+    pub unreachable_before: u64,
+    pub unreachable_after: u64,
+}
+
+impl ReadTx {
+    /// Estimates the recall@10 of vector searches with `ef` (see
+    /// [`ReadTx::search_vector_with`]) from `sample` of the namespace's own
+    /// vectors used as queries against exact answers. Reads every vector
+    /// once. `None` when the namespace has no vectors.
+    pub fn vector_recall(&self, ns: &str, sample: usize, ef: usize) -> Result<Option<f64>> {
+        vector::estimate_recall(
+            &self.vectors,
+            &self.hnsw_links,
+            &self.vector_meta,
+            ns,
+            sample,
+            ef,
+        )
+    }
+}
+
+impl WriteTx {
+    /// Builds the namespace's vector graph again from its vectors: every
+    /// link is chosen afresh, dangling links go and every vector is
+    /// reachable. Searches see the old graph until the commit. Takes about
+    /// as long as inserting every vector.
+    pub fn compact_vectors(&mut self, ns: &str) -> Result<CompactReport> {
+        let (dangling_before, unreachable_before) = {
+            let vectors = self.tx.open_table(VECTORS).map_err(storage)?;
+            let links = self.tx.open_table(HNSW_LINKS).map_err(storage)?;
+            let meta = self.tx.open_table(VECTOR_META).map_err(storage)?;
+            let ids: HashSet<u128> = vectors
+                .range((ns, 0u128)..)
+                .map_err(storage)?
+                .map_while(|item| {
+                    item.ok()
+                        .filter(|(key, _)| key.value().0 == ns)
+                        .map(|(key, _)| key.value().1)
+                })
+                .collect();
+            let mut ignored = Vec::new();
+            let (_, dangling, unreachable) =
+                vector::check(&vectors, &links, &meta, ns, &ids, &mut ignored)?;
+            (dangling, unreachable)
+        };
+        let mut all = Vec::new();
+        {
+            let table = self.tx.open_table(VECTORS).map_err(storage)?;
+            for item in table.range((ns, 0u128)..).map_err(storage)? {
+                let (key, _) = item.map_err(storage)?;
+                if key.value().0 != ns {
+                    break;
+                }
+                let id = NodeId::from_u128(key.value().1);
+                if let Some(vector) = vector::embedding(&table, ns, id)? {
+                    all.push((id, vector));
+                }
+            }
+        }
+        let other = |key_ns: &str| key_ns != ns;
+        self.tx
+            .open_table(VECTORS)
+            .map_err(storage)?
+            .retain_in((ns, 0u128).., |key, _| other(key.0))
+            .map_err(storage)?;
+        self.tx
+            .open_table(HNSW_LINKS)
+            .map_err(storage)?
+            .retain_in((ns, 0u128, 0u8).., |key, _| other(key.0))
+            .map_err(storage)?;
+        self.tx
+            .open_table(VECTOR_META)
+            .map_err(storage)?
+            .remove(ns)
+            .map_err(storage)?;
+        self.vectors.forget(ns);
+        for (id, vector) in &all {
+            vector::insert(&self.tx, &mut self.vectors, ns, *id, vector)?;
+        }
+        let unreachable_after = {
+            let vectors = self.tx.open_table(VECTORS).map_err(storage)?;
+            let links = self.tx.open_table(HNSW_LINKS).map_err(storage)?;
+            let meta = self.tx.open_table(VECTOR_META).map_err(storage)?;
+            let ids: HashSet<u128> = all.iter().map(|(id, _)| id.as_u128()).collect();
+            let mut ignored = Vec::new();
+            vector::check(&vectors, &links, &meta, ns, &ids, &mut ignored)?.2
+        };
+        Ok(CompactReport {
+            vectors: all.len() as u64,
+            dangling_before,
+            unreachable_before,
+            unreachable_after,
+        })
     }
 }

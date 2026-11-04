@@ -98,6 +98,10 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
   version open and upgrade; damaged files are refused by a checksum
   check (`grafeno check`) instead of crashing; online backups (`grafeno
   backup`, `GET /v1/backup`, the Studio).
+- **Phase 10.3, vector search under change:** recall@10 measured after
+  deletions, reinserts and churn; four repair bugs fixed (a reinserted
+  vector could become its own only neighbor), so recall stays at 0.99 or
+  more; `grafeno compact` and a recall estimate (`grafeno check --recall`).
 
 ## Installing
 

@@ -28,6 +28,8 @@ const M: usize = 16;
 /// Links per node on layer 0.
 const M0: usize = 2 * M;
 const EF_CONSTRUCTION: usize = 100;
+/// The search that finds new neighbors for the neighbors of a removed node.
+const REPAIR_EF: usize = 16;
 const MAX_LEVEL: u8 = 16;
 /// Above this many cached vectors (or link lists) a namespace's cache starts
 /// over, which bounds the memory of very large write transactions.
@@ -439,7 +441,10 @@ pub(crate) fn insert(
                 links: &links,
                 cache: Some(&mut *cache),
             };
-            let found = space.search_layer(&query, &entries, EF_CONSTRUCTION, layer)?;
+            let mut found = space.search_layer(&query, &entries, EF_CONSTRUCTION, layer)?;
+            // Links left pointing at this id (from before it lost its vector)
+            // lead the search back to the node itself: never its own neighbor.
+            found.retain(|Scored(_, other)| *other != id);
             let own = space.select(&found, M)?;
             let mut updates = vec![(id, own.clone())];
             for &neighbor in &own {
@@ -502,20 +507,108 @@ pub(crate) fn remove(
             links: &links,
             cache: Some(&mut *cache),
         };
-        let mut updates = Vec::new();
+        // Who to repair: the removed node's neighbors, and the nodes two hops
+        // away that link to it (links are not symmetric, and a link left
+        // pointing at a removed node is a lost slot). Nodes removed earlier
+        // (dangling ids) are skipped: they have no vector, and writing a
+        // list for them would leave links without a vector.
+        let mut repair: Vec<u128> = Vec::new();
+        let mut seen: HashSet<u128> = HashSet::from([id]);
         for &neighbor in &own {
-            // The neighbor inherits the removed node's links as candidates.
+            if seen.insert(neighbor) && space.vector(neighbor)?.is_some() {
+                repair.push(neighbor);
+            }
+        }
+        let direct = repair.len();
+        for at in 0..direct {
+            let neighbor = repair[at];
+            for &other in space.links(neighbor, layer)?.iter() {
+                if seen.insert(other)
+                    && space.links(other, layer)?.contains(&id)
+                    && space.vector(other)?.is_some()
+                {
+                    repair.push(other);
+                }
+            }
+        }
+        let live_own: Vec<u128> = own
+            .iter()
+            .copied()
+            .filter(|n| repair[..direct].contains(n))
+            .collect();
+        let mut updates = Vec::new();
+        for (at, &neighbor) in repair.iter().enumerate() {
+            // Candidates: its links, the removed node's links, and, for the
+            // removed node's own neighbors, a search from where they are, so
+            // that repairs reach past the neighborhood and do not close it
+            // into an island.
             let mut candidates: Vec<u128> = space
                 .links(neighbor, layer)?
                 .iter()
                 .copied()
                 .filter(|other| *other != id)
                 .collect();
-            candidates.extend(own.iter().copied().filter(|other| *other != neighbor));
+            candidates.extend(live_own.iter().copied().filter(|other| *other != neighbor));
+            if at < direct
+                && let Some(vector) = space.vector(neighbor)?
+            {
+                let mut entries = Vec::new();
+                for &start in candidates.iter().take(M) {
+                    if let Some(distance) = space.distance(&vector, start)? {
+                        entries.push(Scored(distance, start));
+                    }
+                }
+                if !entries.is_empty() {
+                    let found = space.search_layer(&vector, &entries, REPAIR_EF, layer)?;
+                    candidates.extend(found.into_iter().map(|Scored(_, other)| other));
+                }
+            }
             updates.push((
                 neighbor,
                 space.prune(neighbor, &candidates, max_links(layer))?,
             ));
+        }
+        // A neighbor that only the removed node linked to would be lost to
+        // every search: if neither a repaired list nor its own neighbors
+        // link back to it, its closest neighbor does.
+        for &orphan in &live_own {
+            let repaired = |updates: &[(u128, Vec<u128>)]| {
+                updates.iter().any(|(_, list)| list.contains(&orphan))
+            };
+            let Some(own_list) = updates
+                .iter()
+                .find(|(node, _)| *node == orphan)
+                .map(|(_, list)| list.clone())
+            else {
+                continue;
+            };
+            if repaired(&updates) {
+                continue;
+            }
+            let mut linked = false;
+            for &other in &own_list {
+                if space.links(other, layer)?.contains(&orphan) {
+                    linked = true;
+                    break;
+                }
+            }
+            if linked {
+                continue;
+            }
+            let Some(&closest) = own_list.first() else {
+                continue;
+            };
+            let mut list: Vec<u128> = match updates.iter().find(|(node, _)| *node == closest) {
+                Some((_, list)) => list.clone(),
+                None => space.links(closest, layer)?.to_vec(),
+            };
+            if list.len() >= max_links(layer) {
+                // Make room by dropping its farthest link.
+                list = space.prune(closest, &list, max_links(layer) - 1)?;
+            }
+            list.push(orphan);
+            updates.retain(|(node, _)| *node != closest);
+            updates.push((closest, list));
         }
         for (neighbor, list) in updates {
             links
@@ -602,10 +695,11 @@ pub(crate) fn search(
         .collect())
 }
 
-/// Checks the vector index of a namespace: vectors, metadata, links, and that
-/// every vector is reachable from the entry point on layer 0 (otherwise
-/// searches could never return it). Returns the number of vectors and of
-/// dangling links.
+/// Checks the vector index of a namespace: vectors, metadata and links.
+/// Returns the number of vectors, of dangling links, and of vectors that
+/// cannot be reached from the entry point on layer 0 (searches can never
+/// return them; a few appear as the graph changes, and compacting the
+/// namespace reconnects them).
 pub(crate) fn check(
     vectors: &impl ReadableTable<RecordKey, &'static [u8]>,
     links: &impl ReadableTable<LinkKey, &'static [u8]>,
@@ -613,7 +707,7 @@ pub(crate) fn check(
     ns: &str,
     nodes: &HashSet<u128>,
     problems: &mut Vec<String>,
-) -> Result<(u64, u64)> {
+) -> Result<(u64, u64, u64)> {
     let meta = read_meta(meta, ns)?;
     let mut ids = HashSet::new();
     for item in vectors.range((ns, 0u128)..).map_err(storage)? {
@@ -691,6 +785,7 @@ pub(crate) fn check(
             .count() as u64;
     }
 
+    let mut unreachable = 0;
     if let Some(entry) = meta.as_ref().and_then(|meta| meta.entry)
         && ids.contains(&entry.as_u128())
     {
@@ -708,12 +803,70 @@ pub(crate) fn check(
                 }
             }
         }
-        if (seen.len() as u64) < count {
-            problems.push(format!(
-                "{} of {count} vectors cannot be reached from the entry point",
-                count - seen.len() as u64
-            ));
+        unreachable = count.saturating_sub(seen.len() as u64);
+    }
+    Ok((count, dangling, unreachable))
+}
+
+/// Estimates recall@10 of searches with `ef`: the vectors of `sample` nodes
+/// spread over the namespace are the queries, and exact answers come from
+/// one pass over every vector. `None` when there are no vectors.
+pub(crate) fn estimate_recall(
+    vectors: &impl ReadableTable<RecordKey, &'static [u8]>,
+    links: &impl ReadableTable<LinkKey, &'static [u8]>,
+    meta: &impl ReadableTable<&'static str, &'static [u8]>,
+    ns: &str,
+    sample: usize,
+    ef: usize,
+) -> Result<Option<f64>> {
+    let Some(info) = read_meta(meta, ns)? else {
+        return Ok(None);
+    };
+    if info.count == 0 || sample == 0 {
+        return Ok(None);
+    }
+    let step = (info.count as usize / sample).max(1);
+    let mut queries: Vec<(u128, Vec<f32>)> = Vec::new();
+    for (at, item) in vectors.range((ns, 0u128)..).map_err(storage)?.enumerate() {
+        let (key, value) = item.map_err(storage)?;
+        if key.value().0 != ns || queries.len() == sample {
+            break;
+        }
+        if at % step == 0 {
+            queries.push((key.value().1, bytes_vector(value.value())));
         }
     }
-    Ok((count, dangling))
+    // The exact 10 nearest of each query, in one pass (the query itself
+    // excluded, as searches return it first).
+    let mut best: Vec<BinaryHeap<Reverse<Scored>>> = vec![BinaryHeap::new(); queries.len()];
+    for item in vectors.range((ns, 0u128)..).map_err(storage)? {
+        let (key, value) = item.map_err(storage)?;
+        if key.value().0 != ns {
+            break;
+        }
+        let id = key.value().1;
+        for ((query_id, query), heap) in queries.iter().zip(best.iter_mut()) {
+            if *query_id == id {
+                continue;
+            }
+            let similarity = dot_bytes(query, value.value());
+            heap.push(Reverse(Scored(similarity, id)));
+            if heap.len() > 10 {
+                heap.pop();
+            }
+        }
+    }
+    let mut found = 0usize;
+    let mut total = 0usize;
+    for ((query_id, query), heap) in queries.iter().zip(best) {
+        let truth: HashSet<u128> = heap.into_iter().map(|Reverse(Scored(_, id))| id).collect();
+        let hits = search(vectors, links, meta, ns, query, 11, ef)?;
+        found += hits
+            .iter()
+            .filter(|hit| hit.node.as_u128() != *query_id && truth.contains(&hit.node.as_u128()))
+            .take(10)
+            .count();
+        total += truth.len();
+    }
+    Ok((total > 0).then(|| found as f64 / total as f64))
 }

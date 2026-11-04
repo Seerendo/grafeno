@@ -155,6 +155,8 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/{ns}/stats", get(stats))
         .route("/{ns}/check", get(check))
         .route("/{ns}/rebuild", post(rebuild))
+        .route("/{ns}/compact", post(compact))
+        .route("/{ns}/vectors/recall", get(vector_recall))
         .route("/{ns}/nodes", get(list_nodes).post(create_node))
         .route(
             "/{ns}/nodes/{id}",
@@ -1274,6 +1276,49 @@ async fn rebuild(
 ) -> ApiResult<Json<grafeno::RebuildReport>> {
     let report = blocking(&state, move |db| db.write(|tx| tx.rebuild_indexes(&ns))).await?;
     Ok(Json(report))
+}
+
+/// Builds the namespace's vector graph again (admin).
+async fn compact(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+) -> ApiResult<Json<grafeno::CompactReport>> {
+    let report = write(&state, move |tx| tx.compact_vectors(&ns)).await?;
+    Ok(Json(report))
+}
+
+#[derive(Deserialize)]
+struct RecallParams {
+    #[serde(default = "default_recall_sample")]
+    sample: usize,
+    #[serde(default = "default_recall_ef")]
+    ef: usize,
+}
+
+fn default_recall_sample() -> usize {
+    100
+}
+
+fn default_recall_ef() -> usize {
+    64
+}
+
+/// An estimate of the recall@10 of vector searches, from a sample of the
+/// namespace's own vectors (reads every vector once).
+async fn vector_recall(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Params(params): Params<RecallParams>,
+) -> ApiResult<Json<Value>> {
+    let sample = params.sample.clamp(1, 1_000);
+    let ef = params.ef.clamp(1, 1_000);
+    let recall = blocking(&state, move |db| {
+        db.begin_read()?.vector_recall(&ns, sample, ef)
+    })
+    .await?;
+    Ok(Json(
+        json!({ "sample": sample, "ef": ef, "recall": recall }),
+    ))
 }
 
 #[derive(Deserialize)]

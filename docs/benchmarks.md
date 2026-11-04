@@ -99,6 +99,50 @@ copies: 100 notes with text cost 17 ms together, 170 µs each.
 | `src/check.rs` tests         | Damage to each derived structure is detected, and `rebuild_indexes` repairs it. |
 | `src/db.rs` tests            | Layout version 1 and 2 files are upgraded on open (counters; new adjacency and postings, old tables dropped); newer layouts are refused. |
 
+## Vector index under change (`examples/hnsw_churn.rs`)
+
+20 000 vectors of dimension 128 in 64 clusters, 200 queries, recall@10
+against exact search over the vectors alive at that moment. Deleted
+vectors are removed from nodes that stay; "inserted back" sets the same
+vectors on the same nodes; churn moves a fifth of the vectors elsewhere.
+Release build, 2026-11-04.
+
+| State | ef 64 before 10.3 | ef 64 after | ef 16 / 32 after |
+| --- | --- | --- | --- |
+| built | 1.000 | 1.000 | 0.965 / 0.998 |
+| 10% deleted | 1.000 | 1.000 | 0.974 / 0.996 |
+| 10% inserted back | **0.929** | 1.000 | 0.953 / 0.993 |
+| 30% deleted | 0.999 | 0.999 | 0.985 / 0.998 |
+| 30% inserted back | 0.980 | 0.999 | 0.957 / 0.995 |
+| 50% inserted back | 0.988 | 1.000 | 0.950 / 0.990 |
+| 5 rounds of churn (worst round) | **0.956** | 0.990 | 0.950 / 0.984 |
+
+Dangling links after deleting 10% went from 8 047 to under 1 000. What
+was wrong, and is now fixed:
+
+1. **A node could become its own neighbor.** Links left pointing at a
+   removed vector led the insertion of the same id back to the node
+   itself (distance 0), and its link list was overwritten with a single
+   self-link: a dead end that searches could enter and not leave (some
+   returned fewer than 10 results).
+2. **Repairs could close islands.** The neighbors of a removed node were
+   reconnected only among the removed node's own links, which can turn a
+   neighborhood into a group with no way out. They now also search from
+   where they are (`ef` 16) for candidates.
+3. **Only one direction was repaired.** Nodes two hops away that linked
+   to the removed one kept a link to nothing; they are now repaired too.
+4. **Repairs wrote link lists for vectors already removed** in the same
+   transaction ("links without a vector" in the check).
+
+The price is in deletions: about 2.5 ms per removed vector here instead
+of 0.5 ms (searches and inserts are unchanged). A handful of vectors (up
+to 10 of 20 000 after heavy churn) can still lose every link pointing at
+them, as in any HNSW; the check reports them as `unreachable_vectors`
+and `grafeno compact` (or `WriteTx::compact_vectors`) rebuilds the graph
+of a namespace, which takes about as long as inserting every vector.
+`grafeno check --recall 100` estimates recall@10 from the namespace's own
+vectors.
+
 ## Property indexes (`crates/grafeno-query/examples/index_bench.rs`)
 
 One GQ query on 100,000 `:Person` nodes (ages 0 to 99), in memory, release

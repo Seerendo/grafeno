@@ -195,7 +195,7 @@ pub fn need(method: &str, path: &str) -> Need {
                     | ["query"]
                     | ["algo", ..]
             );
-            let role = if rest == ["rebuild"] {
+            let role = if rest == ["rebuild"] || rest == ["compact"] {
                 Role::Admin
             } else if method == "GET" || (method == "POST" && reads) {
                 Role::Read

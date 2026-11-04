@@ -772,8 +772,9 @@ As built:
   is the file), and a button in the Studio's administration (in the
   desktop app it writes the file directly). Keys are included.
 
-**10.3 HNSW quality after deletions.** Deleting a vector reconnects its
-neighbors today, but quality after many changes is not measured.
+**10.3 HNSW quality after deletions** (done). Deleting a vector
+reconnected its neighbors, but quality after many changes was not
+measured.
 
 - A benchmark of recall@10 (against exact search) after deleting and
   reinserting 10%, 30% and 50% of the vectors, and after a churn of
@@ -782,6 +783,26 @@ neighbors today, but quality after many changes is not measured.
   through the deleted node's two-hop neighborhood), and a `compact`
   command that rebuilds a namespace's graph when quality drops below a
   threshold (the check can report an estimated recall from a sample).
+
+As built: the measurement found that inserting a vector back under the
+same id (and every update, which removes and inserts) could leave a node
+linked only to itself, through links left pointing at it; and that
+repairs could close neighborhoods into islands and missed nodes that
+linked to the removed one without being its neighbors. Inserts now never
+choose the node itself; a removal repairs both its neighbors (with a
+search from each, `REPAIR_EF` 16) and the nodes two hops away that
+pointed at it, gives a neighbor that only the removed node reached a link
+from its closest neighbor, and skips ids already removed. Recall@10 with
+`ef` 64 stays at 0.99 or more through every state of the benchmark
+(numbers in `docs/benchmarks.md`); deletions cost about five times more.
+Vectors no search can reach are counted (`unreachable_vectors` in the
+check, no longer a problem: a few appear in any changing HNSW), and
+`compact_vectors` rebuilds a namespace's graph (`grafeno compact`,
+`POST /v1/{ns}/compact`). `vector_recall` estimates recall from a sample
+of the namespace's own vectors (`grafeno check --recall N`,
+`GET /v1/{ns}/vectors/recall`). `tests/vector_churn.rs` deletes a third,
+inserts it back, churns three times and compacts, checking recall and
+that every reinserted vector is found.
 
 **10.4 Costly GQ.**
 
