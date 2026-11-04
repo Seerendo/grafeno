@@ -278,6 +278,7 @@ impl WriteTx {
     /// property is an error, as are duplicate values in a unique index.
     pub fn create_index(&mut self, ns: &str, def: IndexDef) -> Result<u64> {
         check_label(&def.label)?;
+        crate::namespace::ensure(&self.tx, ns)?;
         if def.key.is_empty() || def.name.is_empty() {
             return Err(Error::Invalid(
                 "an index needs a name and a property".into(),

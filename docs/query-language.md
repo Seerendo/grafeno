@@ -478,6 +478,7 @@ CREATE INDEX FOR (p:Person) ON (p.age);                   // named Person_age
 CREATE INDEX people_by_name IF NOT EXISTS FOR (p:Person) ON (p.name);
 CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE; // Person_email_unique
 SHOW INDEXES;                                             // name, label, property, unique, entries
+SHOW NAMESPACES;                                          // name, nodes, edges, created_at, description
 SHOW CONSTRAINTS;
 DROP INDEX people_by_name;
 DROP CONSTRAINT Person_email_unique IF EXISTS;

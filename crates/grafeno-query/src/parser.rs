@@ -168,8 +168,12 @@ impl Parser<'_> {
         };
         if self.at_keyword("SHOW") {
             self.advance();
+            if self.at_keyword("NAMESPACES") {
+                self.advance();
+                return Ok(Some(Schema::ShowNamespaces));
+            }
             let constraints = what(self, 0)
-                .ok_or_else(|| self.unexpected("INDEXES or CONSTRAINTS after SHOW"))?;
+                .ok_or_else(|| self.unexpected("INDEXES, CONSTRAINTS or NAMESPACES after SHOW"))?;
             self.advance();
             return Ok(Some(Schema::Show { constraints }));
         }

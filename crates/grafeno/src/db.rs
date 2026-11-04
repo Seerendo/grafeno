@@ -12,6 +12,7 @@ use redb::{
 use crate::algo::Shared;
 use crate::index::{INDEX_ENTRIES, INDEXES, IndexKey};
 use crate::memory::names_of;
+use crate::namespace::{NAMESPACES, NamespaceMeta};
 use crate::stats::{
     NamespaceInfo, NamespaceStats, bump_edge_label, bump_namespace, bump_node_label, label_counts,
     namespaces,
@@ -36,7 +37,8 @@ use crate::{Hit, text, vector};
 ///    (importance and accesses).
 /// 5. Adds property indexes (`indexes`, `index_entries`), empty until one
 ///    is declared.
-pub const SCHEMA_VERSION: u64 = 5;
+/// 6. Adds the `namespaces` registry, so that empty namespaces exist.
+pub const SCHEMA_VERSION: u64 = 6;
 
 /// The tables replaced in version 3, by name (their types no longer matter).
 const OLD_ADJ_OUT: TableDefinition<AdjKey, u128> = TableDefinition::new("adj_out");
@@ -108,6 +110,7 @@ impl Grafeno {
         tx.open_table(MEMORY).map_err(storage)?;
         tx.open_table(INDEXES).map_err(storage)?;
         tx.open_table(INDEX_ENTRIES).map_err(storage)?;
+        tx.open_table(NAMESPACES).map_err(storage)?;
 
         let stored = tx
             .open_table(META)
@@ -144,6 +147,9 @@ impl Grafeno {
         }
         if version < 4 {
             migrate_to_4(&tx)?;
+        }
+        if version < 6 {
+            migrate_to_6(&tx)?;
         }
         tx.open_table(META)
             .map_err(storage)?
@@ -207,6 +213,7 @@ impl Grafeno {
             memory: tx.open_table(MEMORY).map_err(storage)?,
             indexes: tx.open_table(INDEXES).map_err(storage)?,
             index_entries: tx.open_table(INDEX_ENTRIES).map_err(storage)?,
+            registry: tx.open_table(NAMESPACES).map_err(storage)?,
             _tx: tx,
         })
     }
@@ -239,6 +246,41 @@ impl Grafeno {
             }
         }
     }
+}
+
+/// Version 6: registers every namespace that has data (nodes, edges or
+/// indexes), as created now.
+fn migrate_to_6(tx: &WriteTransaction) -> Result<()> {
+    let mut names = std::collections::BTreeSet::new();
+    for item in tx
+        .open_table(NS_COUNTS)
+        .map_err(storage)?
+        .iter()
+        .map_err(storage)?
+    {
+        names.insert(item.map_err(storage)?.0.value().to_owned());
+    }
+    for item in tx
+        .open_table(INDEXES)
+        .map_err(storage)?
+        .iter()
+        .map_err(storage)?
+    {
+        names.insert(item.map_err(storage)?.0.value().0.to_owned());
+    }
+    let mut registry = tx.open_table(NAMESPACES).map_err(storage)?;
+    let meta = encode(&NamespaceMeta {
+        created_at: Timestamp::now(),
+        description: None,
+    })?;
+    for name in &names {
+        if registry.get(name.as_str()).map_err(storage)?.is_none() {
+            registry
+                .insert(name.as_str(), meta.as_slice())
+                .map_err(storage)?;
+        }
+    }
+    Ok(())
 }
 
 /// Version 4: builds the names index from the node records. (The memory
@@ -391,6 +433,7 @@ pub struct ReadTx {
     pub(crate) memory: ReadOnlyTable<RecordKey, (f32, u32, i64)>,
     pub(crate) indexes: ReadOnlyTable<(&'static str, &'static str), &'static [u8]>,
     pub(crate) index_entries: ReadOnlyTable<IndexKey, ()>,
+    pub(crate) registry: ReadOnlyTable<&'static str, &'static [u8]>,
     pub(crate) shared: Arc<Shared>,
     /// The commit this snapshot sees, when known (for the projection cache).
     pub(crate) generation: Option<u64>,
@@ -459,9 +502,9 @@ impl ReadTx {
         nodes_with_label(&self.labels, ns, label)
     }
 
-    /// Every namespace that has nodes, in name order.
+    /// Every namespace, empty ones included, in name order.
     pub fn namespaces(&self) -> Result<Vec<NamespaceInfo>> {
-        namespaces(&self.ns_counts)
+        namespaces(&self.registry, &self.ns_counts)
     }
 
     pub fn stats(&self, ns: &str) -> Result<NamespaceStats> {

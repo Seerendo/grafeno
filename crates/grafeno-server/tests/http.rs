@@ -290,10 +290,14 @@ async fn administration_endpoints() {
     .await;
 
     let (_, namespaces) = call(&app, "GET", "/v1/namespaces", None).await;
-    assert_eq!(
-        namespaces,
-        json!([{ "name": "solo", "nodes": 1, "edges": 0 }, { "name": "team", "nodes": 2, "edges": 1 }])
-    );
+    let counts: Vec<Value> = namespaces
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|info| json!([info["name"], info["nodes"], info["edges"]]))
+        .collect();
+    assert_eq!(counts, [json!(["solo", 1, 0]), json!(["team", 2, 1])]);
+    assert!(namespaces[0]["created_at"].is_number());
     let (_, stats) = call(&app, "GET", "/v1/team/stats", None).await;
     assert_eq!(stats["node_labels"]["Person"], 2);
     assert_eq!(stats["vector_dimension"], 2);
@@ -315,7 +319,8 @@ async fn administration_endpoints() {
         "application/x-ndjson"
     );
     let dump = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(String::from_utf8(dump.to_vec()).unwrap().lines().count(), 4);
+    // The header, the namespace, two nodes and an edge.
+    assert_eq!(String::from_utf8(dump.to_vec()).unwrap().lines().count(), 5);
 
     let other = self::app(None);
     let request = Request::builder()
@@ -326,9 +331,14 @@ async fn administration_endpoints() {
     let response = other.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let (_, namespaces) = call(&other, "GET", "/v1/namespaces", None).await;
+    assert_eq!(namespaces.as_array().unwrap().len(), 1);
     assert_eq!(
-        namespaces,
-        json!([{ "name": "team", "nodes": 2, "edges": 1 }])
+        (
+            &namespaces[0]["name"],
+            &namespaces[0]["nodes"],
+            &namespaces[0]["edges"]
+        ),
+        (&json!("team"), &json!(2), &json!(1))
     );
     let (_, hits) = call(
         &other,
@@ -970,4 +980,94 @@ async fn graph_algorithms() {
         let (status, body) = call(&app, "POST", uri, Some(input)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
     }
+}
+
+#[tokio::test]
+async fn namespaces_are_created_and_dropped() {
+    let app = app(None);
+    let (status, created) = call(
+        &app,
+        "POST",
+        "/v1/namespaces",
+        Some(json!({ "name": "demo", "description": "First try" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["name"], "demo");
+    assert_eq!(created["nodes"], 0);
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/namespaces",
+        Some(json!({ "name": "demo2" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    // Both stay listed while empty.
+    let (_, list) = call(&app, "GET", "/v1/namespaces", None).await;
+    let names: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["demo", "demo2"]);
+    // Creating it again is a conflict, not a silent switch.
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/namespaces",
+        Some(json!({ "name": "demo" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "conflict");
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/namespaces",
+        Some(json!({ "name": "a/b" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, info) = call(
+        &app,
+        "PATCH",
+        "/v1/namespaces/demo2",
+        Some(json!({ "description": "Second" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(info["description"], "Second");
+    let (_, info) = call(&app, "GET", "/v1/namespaces/demo", None).await;
+    assert_eq!(info["description"], "First try");
+
+    call(
+        &app,
+        "POST",
+        "/v1/demo/nodes",
+        Some(json!({ "labels": ["Note"] })),
+    )
+    .await;
+    let (_, shown) = call(
+        &app,
+        "POST",
+        "/v1/demo/query",
+        Some(json!({ "query": "SHOW NAMESPACES" })),
+    )
+    .await;
+    assert_eq!(
+        shown["columns"],
+        json!(["name", "nodes", "edges", "created_at", "description"])
+    );
+    assert_eq!(shown["rows"][0][1], 1);
+
+    let (status, dropped) = call(&app, "DELETE", "/v1/namespaces/demo", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(dropped["nodes"], 1);
+    let (status, _) = call(&app, "GET", "/v1/namespaces/demo", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(&app, "DELETE", "/v1/namespaces/demo", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

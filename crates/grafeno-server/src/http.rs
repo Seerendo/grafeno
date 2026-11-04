@@ -133,7 +133,13 @@ pub fn router(state: AppState) -> Router {
 
 pub fn router_with(state: AppState, options: &Options) -> Router {
     let v1 = Router::new()
-        .route("/namespaces", get(namespaces))
+        .route("/namespaces", get(namespaces).post(create_namespace))
+        .route(
+            "/namespaces/{ns}",
+            get(get_namespace)
+                .patch(describe_namespace)
+                .delete(drop_namespace),
+        )
         .route("/export", get(export))
         .route("/import", post(import))
         .route("/{ns}/stats", get(stats))
@@ -246,6 +252,7 @@ impl From<Error> for ApiError {
             ErrorKind::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             ErrorKind::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
             ErrorKind::Busy => (StatusCode::SERVICE_UNAVAILABLE, "busy"),
+            ErrorKind::Conflict => (StatusCode::CONFLICT, "conflict"),
         };
         Self {
             status,
@@ -1068,6 +1075,70 @@ const IMPORT_LIMIT: usize = 1024 * 1024 * 1024;
 async fn namespaces(State(state): State<AppState>) -> ApiResult<Json<Vec<grafeno::NamespaceInfo>>> {
     let namespaces = blocking(&state, |db| db.begin_read()?.namespaces()).await?;
     Ok(Json(namespaces))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewNamespace {
+    name: String,
+    description: Option<String>,
+}
+
+/// Creates an empty namespace: 201, or 409 if it exists.
+async fn create_namespace(
+    State(state): State<AppState>,
+    Body(input): Body<NewNamespace>,
+) -> ApiResult<(StatusCode, Json<grafeno::NamespaceInfo>)> {
+    let info = write(&state, move |tx| {
+        tx.create_namespace(&input.name, input.description.as_deref())?;
+        tx.namespace(&input.name)?
+            .ok_or_else(|| Error::NamespaceNotFound(input.name.clone()))
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(info)))
+}
+
+async fn get_namespace(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+) -> ApiResult<Json<grafeno::NamespaceInfo>> {
+    let info = blocking(&state, move |db| {
+        db.begin_read()?
+            .namespace(&ns)?
+            .ok_or(Error::NamespaceNotFound(ns))
+    })
+    .await?;
+    Ok(Json(info))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NamespacePatch {
+    description: Option<String>,
+}
+
+/// Sets the description (`null` removes it).
+async fn describe_namespace(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Body(input): Body<NamespacePatch>,
+) -> ApiResult<Json<grafeno::NamespaceInfo>> {
+    let info = write(&state, move |tx| {
+        tx.describe_namespace(&ns, input.description.as_deref())?;
+        tx.namespace(&ns)?
+            .ok_or_else(|| Error::NamespaceNotFound(ns.clone()))
+    })
+    .await?;
+    Ok(Json(info))
+}
+
+/// Deletes a namespace and everything in it.
+async fn drop_namespace(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+) -> ApiResult<Json<grafeno::DropStats>> {
+    let dropped = write(&state, move |tx| tx.drop_namespace(&ns)).await?;
+    Ok(Json(dropped))
 }
 
 async fn stats(

@@ -1,6 +1,6 @@
 import { createContext, useContext } from "react";
 
-import type { Connection, Grafeno } from "./api.ts";
+import type { Connection, Grafeno, NamespaceInfo } from "./api.ts";
 
 export interface ConfirmOptions {
   title: string;
@@ -25,7 +25,10 @@ export interface Studio {
   connection: Connection;
   namespace: string;
   setNamespace: (name: string) => void;
-  namespaces: string[];
+  /** Every namespace, empty ones included. */
+  namespaces: NamespaceInfo[];
+  /** Creates a namespace and switches to it; throws if it exists. */
+  createNamespace: (name: string, description?: string) => Promise<void>;
   /** Node and edge labels of the namespace, with their counts. */
   schema: { labels: Record<string, number>; edgeLabels: Record<string, number> };
   /** Changes whenever data was written from the Studio. */

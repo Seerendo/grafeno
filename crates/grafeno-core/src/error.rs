@@ -6,6 +6,11 @@ pub enum Error {
     NodeNotFound(NodeId),
     #[error("edge {0} not found")]
     EdgeNotFound(EdgeId),
+    #[error("namespace {0:?} not found")]
+    NamespaceNotFound(String),
+    /// What should be created exists already.
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("invalid input: {0}")]
     Invalid(String),
     #[error("storage error: {0}")]

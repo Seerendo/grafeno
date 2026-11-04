@@ -1,11 +1,13 @@
 //! Export and import: a JSON Lines dump of nodes (with their text and
 //! embedding) and edges, for backups, migrations and test data.
 //!
-//! The first line is a header; then, per namespace, its nodes and then its
-//! edges, so every edge comes after both of its ends:
+//! The first line is a header; then, per namespace, the namespace itself,
+//! its indexes, its nodes and then its edges, so every edge comes after both
+//! of its ends:
 //!
 //! ```text
-//! {"type":"header","format":"grafeno-export","version":1,"exported_at":1793664000000000}
+//! {"type":"header","format":"grafeno-export","version":2,"exported_at":1793664000000000}
+//! {"type":"namespace","ns":"vault","created_at":1793664000000000,"description":"Notes"}
 //! {"type":"node","ns":"vault","node":{"id":"…","labels":["Note"],…},"text":"…","embedding":[…]}
 //! {"type":"edge","ns":"vault","edge":{"id":"…","label":"links_to","from":"…","to":"…",…}}
 //! {"type":"index","ns":"vault","index":{"name":"Note_title","label":"Note","key":"title","unique":false}}
@@ -25,8 +27,9 @@ use crate::memory::MemoryState;
 use crate::store::{decode, storage};
 
 pub const EXPORT_FORMAT: &str = "grafeno-export";
-/// The newest export version this build writes and reads.
-pub const EXPORT_VERSION: u32 = 1;
+/// The newest export version this build writes and reads. Version 2 adds
+/// namespace records; version 1 exports import as before.
+pub const EXPORT_VERSION: u32 = 2;
 
 /// One line of an export.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -36,6 +39,13 @@ pub enum Record {
         format: String,
         version: u32,
         exported_at: Timestamp,
+    },
+    /// A namespace, so that empty ones survive an export.
+    Namespace {
+        ns: String,
+        created_at: Timestamp,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
     },
     Node {
         ns: String,
@@ -69,6 +79,8 @@ struct RawRecord {
     format: Option<String>,
     version: Option<u32>,
     exported_at: Option<Timestamp>,
+    created_at: Option<Timestamp>,
+    description: Option<String>,
     ns: Option<String>,
     node: Option<Node>,
     text: Option<String>,
@@ -86,6 +98,11 @@ impl RawRecord {
                 format: self.format.clone().ok_or_else(|| missing("format"))?,
                 version: self.version.ok_or_else(|| missing("version"))?,
                 exported_at: self.exported_at.unwrap_or(Timestamp::from_micros(0)),
+            },
+            "namespace" => Record::Namespace {
+                ns: self.ns.clone().ok_or_else(|| missing("ns"))?,
+                created_at: self.created_at.unwrap_or_else(Timestamp::now),
+                description: self.description,
             },
             "node" => Record::Node {
                 ns: self.ns.clone().ok_or_else(|| missing("ns"))?,
@@ -146,6 +163,18 @@ impl ReadTx {
             ..DumpStats::default()
         };
         for ns in &names {
+            let (created_at, description) = match self.namespace(ns)? {
+                Some(info) => (info.created_at, info.description),
+                None => (Timestamp::now(), None),
+            };
+            write_record(
+                out,
+                &Record::Namespace {
+                    ns: ns.clone(),
+                    created_at,
+                    description,
+                },
+            )?;
             for index in self.index_defs(ns)? {
                 write_record(
                     out,
@@ -329,6 +358,15 @@ impl Import {
                 }
                 self.namespaces.insert(ns);
                 self.stats.nodes += 1;
+            }
+            Record::Namespace {
+                ns,
+                created_at,
+                description,
+            } => {
+                tx.restore_namespace(&ns, created_at, description)
+                    .map_err(|e| at(e.to_string()))?;
+                self.namespaces.insert(ns);
             }
             Record::Index { ns, index } => {
                 tx.create_index(&ns, index).map_err(|e| at(e.to_string()))?;

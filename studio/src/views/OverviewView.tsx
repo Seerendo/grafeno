@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 
-import { describeError, go, labelColor } from "../api.ts";
+import { describeError, formatTime, go, labelColor } from "../api.ts";
 import { Icon } from "../icons.tsx";
 import { useStudio } from "../context.ts";
-import type { NamespaceInfo, NamespaceStats } from "../../../clients/typescript/src/index.ts";
+import type { NamespaceStats } from "../../../clients/typescript/src/index.ts";
 
 function Bars({ counts }: { counts: Record<string, number> }) {
   const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
@@ -29,14 +29,9 @@ function Bars({ counts }: { counts: Record<string, number> }) {
 }
 
 export function OverviewView() {
-  const { client, namespace, setNamespace, revision, newNode, newEdge } = useStudio();
-  const [namespaces, setNamespaces] = useState<NamespaceInfo[]>([]);
+  const { client, namespace, namespaces, setNamespace, revision, newNode, newEdge } = useStudio();
   const [stats, setStats] = useState<NamespaceStats | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    client.namespaces().then(setNamespaces).catch((e) => setError(describeError(e)));
-  }, [client, revision]);
 
   useEffect(() => {
     client.namespace(namespace).stats().then(setStats).catch((e) => setError(describeError(e)));
@@ -94,6 +89,7 @@ export function OverviewView() {
                   <th>Name</th>
                   <th>Nodes</th>
                   <th>Edges</th>
+                  <th>Created</th>
                 </tr>
               </thead>
               <tbody>
@@ -103,9 +99,13 @@ export function OverviewView() {
                     className={info.name === namespace ? "clickable selected" : "clickable"}
                     onClick={() => setNamespace(info.name)}
                   >
-                    <td>{info.name}</td>
-                    <td className="mono">{info.nodes}</td>
+                    <td>
+                      {info.name}
+                      {info.description && <div className="muted small">{info.description}</div>}
+                    </td>
+                    <td className="mono">{info.nodes === 0 ? <span className="muted">empty</span> : info.nodes}</td>
                     <td className="mono">{info.edges}</td>
+                    <td className="muted small">{formatTime(info.created_at).slice(0, 10)}</td>
                   </tr>
                 ))}
               </tbody>

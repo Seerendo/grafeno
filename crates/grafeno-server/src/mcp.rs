@@ -1038,8 +1038,8 @@ fn tools() -> Value {
                 MATCH (p:Person)-[:works_at]->(c) VALID AT '2024-01-01' RETURN p.name, c.name. \
                 Pseudo-properties: n.@id, n.@text, n.@importance, e.@valid_from, e.@valid_to. \
                 Also OPTIONAL MATCH, WITH (… WHERE for aggregates), UNWIND, UNION, CASE, list \
-                comprehensions, pattern predicates in WHERE and CALL db.labels() / db.search(text). \
-                Returns at most 200 rows.",
+                comprehensions, pattern predicates in WHERE and CALL db.labels() / db.search(text); \
+                SHOW NAMESPACES lists the namespaces. Returns at most 200 rows.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

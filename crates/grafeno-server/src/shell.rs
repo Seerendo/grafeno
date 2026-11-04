@@ -13,7 +13,9 @@ Statements end with `;` and may span lines. Meta-commands start with `\\`:
 
   \\?                 this help
   \\q                 quit
-  \\ns                list namespaces
+  \\ns                list namespaces (empty ones too)
+  \\ns create NAME    create an empty namespace
+  \\ns drop NAME --yes  delete a namespace and everything in it
   \\use NAME          switch to another namespace
   \\stats             statistics of the namespace
   \\check             check indexes and counters
@@ -135,6 +137,36 @@ impl Backend {
             Backend::Local(db) => Self::local(db, |db| db.begin_read()?.namespaces()),
             Backend::Remote { .. } => self.call("GET", "/v1/namespaces", None),
         }
+    }
+
+    fn create_namespace(&self, ns: &str) -> Result<Value, String> {
+        match self {
+            Backend::Local(db) => Self::local(db, |db| {
+                db.write(|tx| {
+                    tx.create_namespace(ns, None)?;
+                    tx.namespace(ns)
+                })
+            }),
+            Backend::Remote { .. } => {
+                self.call("POST", "/v1/namespaces", Some(json!({ "name": ns })))
+            }
+        }
+    }
+
+    fn drop_namespace(&self, ns: &str) -> Result<Value, String> {
+        match self {
+            Backend::Local(db) => Self::local(db, |db| db.write(|tx| tx.drop_namespace(ns))),
+            Backend::Remote { .. } => {
+                self.call("DELETE", &format!("/v1/namespaces/{}", encode(ns)), None)
+            }
+        }
+    }
+
+    fn namespace_exists(&self, ns: &str) -> Result<bool, String> {
+        Ok(self
+            .namespaces()?
+            .as_array()
+            .is_some_and(|all| all.iter().any(|info| info["name"] == ns)))
     }
 
     fn stats(&self, ns: &str) -> Result<Value, String> {
@@ -400,6 +432,30 @@ impl Shell {
                 println!("{HELP}");
                 Ok(())
             }
+            "\\ns" if argument.starts_with("create ") => {
+                let name = argument["create ".len()..].trim();
+                self.backend.create_namespace(name).map(|_| {
+                    self.namespace = name.to_owned();
+                    println!("Created namespace {name:?}; now on it.");
+                })
+            }
+            "\\ns" if argument.starts_with("drop ") => {
+                let rest = argument["drop ".len()..].trim();
+                match rest.strip_suffix("--yes").map(str::trim) {
+                    None => Err(format!(
+                        "this deletes {rest:?} and everything in it; to confirm: \\ns drop {rest} --yes"
+                    )),
+                    Some(name) => self.backend.drop_namespace(name).map(|dropped| {
+                        println!(
+                            "Dropped namespace {name:?} ({} nodes, {} edges).",
+                            dropped["nodes"], dropped["edges"]
+                        );
+                    }),
+                }
+            }
+            "\\ns" if !argument.is_empty() => Err(format!(
+                "unknown \\ns command {argument:?} (\\ns, \\ns create NAME, \\ns drop NAME --yes)"
+            )),
             "\\ns" => self.backend.namespaces().map(|namespaces| {
                 let rows: Vec<Vec<Value>> = namespaces
                     .as_array()
@@ -417,7 +473,13 @@ impl Shell {
             }),
             "\\use" | "\\c" if !argument.is_empty() => {
                 self.namespace = argument.to_owned();
-                println!("Now on namespace {:?}.", self.namespace);
+                match self.backend.namespace_exists(argument) {
+                    Ok(true) => println!("Now on namespace {argument:?}."),
+                    _ => println!(
+                        "Now on namespace {argument:?}, which does not exist yet: the first write \
+                         creates it (or \\ns create {argument})."
+                    ),
+                }
                 Ok(())
             }
             "\\stats" => self.backend.stats(&ns).map(|stats| print_json(&stats)),

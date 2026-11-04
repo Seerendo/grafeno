@@ -139,13 +139,23 @@ test("administration: namespaces, stats, pages, check, export and import", async
   assert.equal((await admin.rebuild()).nodes, 5);
 
   const dump = await grafeno.export(["admin-test"]);
-  assert.equal(dump.trim().split("\n").length, 7);
+  // The header, the namespace, five nodes and an edge.
+  assert.equal(dump.trim().split("\n").length, 8);
   await admin.batch([{ op: "delete_node", id: all[0] }]);
   assert.equal((await admin.stats()).nodes, 4);
   const imported = await grafeno.import(dump);
   assert.deepEqual(imported, { namespaces: 1, nodes: 5, edges: 1 });
   assert.equal((await admin.stats()).nodes, 5);
   await assert.rejects(grafeno.import("garbage"), { status: 400 });
+
+  // Namespaces are created explicitly, stay while empty and are dropped whole.
+  const created = await grafeno.createNamespace("empty-test", "Nothing yet");
+  assert.equal(created.nodes, 0);
+  assert.ok((await grafeno.namespaces()).some((info) => info.name === "empty-test"));
+  await assert.rejects(grafeno.createNamespace("empty-test"), { status: 409, code: "conflict" });
+  assert.equal((await grafeno.describeNamespace("empty-test", null)).description, undefined);
+  assert.deepEqual(await grafeno.dropNamespace("admin-test"), { nodes: 5, edges: 1 });
+  await assert.rejects(grafeno.getNamespace("admin-test"), { status: 404 });
 });
 
 test("GQ queries", async () => {

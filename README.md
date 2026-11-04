@@ -67,6 +67,11 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
   Louvain, triangles), similarity, link prediction and FastRP embeddings,
   on a cached in-memory projection; over HTTP too, and in the Studio's
   graph (color by community, size by centrality).
+- **Phase 9.1, namespaces you create:** namespaces are records of their
+  own (layout version 6): empty ones stay listed, creating an existing one
+  is a clear conflict, and dropping one deletes everything in it; over
+  HTTP, the shell (`\ns create`, `\ns drop`), GQ (`SHOW NAMESPACES`) and
+  the Studio.
 
 ## Installing
 

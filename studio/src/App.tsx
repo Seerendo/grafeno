@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   type Connection,
+  type NamespaceInfo,
   clientFor,
   defaultUrl,
   describeError,
@@ -107,9 +108,13 @@ function ConnectScreen({ initial, error, onConnect }: {
 }
 
 function NamespaceMenu() {
-  const { namespace, namespaces, setNamespace } = useStudio();
+  const { namespace, namespaces, setNamespace, createNamespace, toast } = useStudio();
   const [open, setOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [problem, setProblem] = useState<{ message: string; existing?: string } | null>(null);
+  const [busy, setBusy] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
@@ -117,41 +122,105 @@ function NamespaceMenu() {
     window.addEventListener("mousedown", close);
     return () => window.removeEventListener("mousedown", close);
   }, [open]);
-  const choose = (value: string) => {
-    setNamespace(value);
-    setOpen(false);
+  const reset = () => {
+    setCreating(false);
     setName("");
+    setDescription("");
+    setProblem(null);
   };
+  const choose = (value: string) => {
+    setOpen(false);
+    reset();
+    if (value !== namespace) {
+      setNamespace(value);
+      toast(`Switched to namespace “${value}”.`, "info");
+    }
+  };
+  const create = async () => {
+    const value = name.trim();
+    if (!value) return;
+    if (namespaces.some((info) => info.name === value)) {
+      setProblem({ message: `“${value}” already exists.`, existing: value });
+      return;
+    }
+    setBusy(true);
+    try {
+      await createNamespace(value, description.trim() || undefined);
+      setOpen(false);
+      reset();
+      toast(`Created namespace “${value}” and switched to it.`, "ok");
+    } catch (error) {
+      const message = describeError(error);
+      setProblem(message.includes("already exists") ? { message: `“${value}” already exists.`, existing: value } : { message });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const known = namespaces.some((info) => info.name === namespace);
   return (
     <div className="ns-menu" ref={box}>
-      <button className="ns-button" onClick={() => setOpen((value) => !value)} title="Namespace">
+      <button className="ns-button" onClick={() => setOpen((value) => !value)} title="Switch or create a namespace">
         <span className="ns-dot" />
         <span className="muted small">namespace</span>
         <strong>{namespace}</strong>
+        {!known && <span className="muted small">(not created)</span>}
         <Icon name="chevronDown" size={14} />
       </button>
       {open && (
         <div className="menu">
-          {namespaces.length === 0 && <div className="muted small menu-note">No namespaces with data yet.</div>}
-          {namespaces.map((item) => (
-            <button key={item} className={item === namespace ? "menu-item active" : "menu-item"} onClick={() => choose(item)}>
-              {item}
-              {item === namespace && <Icon name="check" size={14} />}
+          <div className="muted small menu-note">Switch to</div>
+          {namespaces.length === 0 && <div className="muted small menu-note">No namespaces yet: create the first one.</div>}
+          {namespaces.map((info) => (
+            <button key={info.name} className={info.name === namespace ? "menu-item active" : "menu-item"} onClick={() => choose(info.name)} title={info.description}>
+              <span className="grow ellipsis">{info.name}</span>
+              <span className="muted small mono">{info.nodes === 0 ? "empty" : `${info.nodes} nodes`}</span>
+              {info.name === namespace && <Icon name="check" size={14} />}
             </button>
           ))}
-          <form
-            className="menu-form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (name.trim()) choose(name.trim());
-            }}
-          >
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="New or other namespace…" />
-            <button className="primary icon-button" type="submit" aria-label="Open namespace">
-              <Icon name="chevronRight" />
+          {creating ? (
+            <form
+              className="menu-form stack tight"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void create();
+              }}
+            >
+              <input
+                autoFocus
+                value={name}
+                onChange={(e) => {
+                  setName(e.target.value);
+                  setProblem(null);
+                }}
+                placeholder="Name of the new namespace"
+                maxLength={128}
+              />
+              <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description (optional)" />
+              {problem && (
+                <div className="error small">
+                  {problem.message}{" "}
+                  {problem.existing && (
+                    <button type="button" className="link-button" onClick={() => choose(problem.existing!)}>
+                      Switch to it
+                    </button>
+                  )}
+                </div>
+              )}
+              <div className="row">
+                <button type="button" className="ghost" onClick={reset}>
+                  Cancel
+                </button>
+                <div className="spacer" />
+                <button className="primary" type="submit" disabled={busy || !name.trim()}>
+                  Create
+                </button>
+              </div>
+            </form>
+          ) : (
+            <button className="menu-item" onClick={() => setCreating(true)}>
+              <Icon name="plus" size={14} /> New namespace…
             </button>
-          </form>
-          <div className="muted small menu-note">A namespace appears once it has a node.</div>
+          )}
         </div>
       )}
     </div>
@@ -210,7 +279,7 @@ function CommandPalette({ onClose }: { onClose: () => void }) {
     ...VIEWS.map((view) => ({ key: `v-${view.id}`, icon: view.icon, title: `Go to ${view.title}`, hint: view.hint, run: () => go(view.id) })),
     { key: "new-node", icon: "node" as IconName, title: "New node", hint: "Create a node", run: () => newNode({ onCreated: (id) => go("explorer", id) }) },
     { key: "new-edge", icon: "link" as IconName, title: "New fact", hint: "Connect two nodes", run: () => newEdge() },
-    ...namespaces.map((name) => ({ key: `ns-${name}`, icon: "folder" as IconName, title: `Namespace: ${name}`, hint: "Switch namespace", run: () => setNamespace(name) })),
+    ...namespaces.map(({ name }) => ({ key: `ns-${name}`, icon: "folder" as IconName, title: `Namespace: ${name}`, hint: "Switch namespace", run: () => setNamespace(name) })),
   ].filter((command) => !text || command.title.toLowerCase().includes(text) || command.hint.toLowerCase().includes(text));
   const nodes = results.map((node) => ({
     key: `n-${node.id}`,
@@ -285,7 +354,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [checking, setChecking] = useState(true);
   const [route, setRoute] = useState(parseHash);
-  const [namespaces, setNamespaces] = useState<string[]>([]);
+  const [namespaces, setNamespaces] = useState<NamespaceInfo[]>([]);
   const [namespace, setNamespaceState] = useState(() => readSetting("grafeno.studio.namespace", ""));
   const [schema, setSchema] = useState<Studio["schema"]>({ labels: {}, edgeLabels: {} });
   const [revision, setRevision] = useState(0);
@@ -358,9 +427,9 @@ export function App() {
     client
       .namespaces()
       .then((list) => {
-        const names = list.map((info) => info.name);
-        setNamespaces(names);
-        setNamespaceState((value) => value || names[0] || "default");
+        setNamespaces(list);
+        // A remembered namespace that was dropped falls back to the first one.
+        setNamespaceState((value) => (list.some((info) => info.name === value) ? value : list[0]?.name || value || "default"));
       })
       .catch((problem) => toast(describeError(problem), "error"));
   }, [client, revision, toast]);
@@ -380,6 +449,16 @@ export function App() {
   }, []);
 
   const changed = useCallback(() => setRevision((value) => value + 1), []);
+  const createNamespace = useCallback(
+    async (name: string, description?: string) => {
+      if (!client) return;
+      const info = await client.createNamespace(name, description);
+      setNamespaces((list) => [...list, info].sort((a, b) => (a.name < b.name ? -1 : 1)));
+      setNamespace(info.name);
+      changed();
+    },
+    [client, setNamespace, changed],
+  );
   const confirm = useCallback((options: ConfirmOptions) => new Promise<boolean>((resolve) => setConfirming({ ...options, resolve })), []);
 
   if (checking && !connection) {
@@ -409,6 +488,7 @@ export function App() {
     namespace: current,
     setNamespace,
     namespaces,
+    createNamespace,
     schema,
     revision,
     changed,

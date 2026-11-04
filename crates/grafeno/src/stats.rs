@@ -2,18 +2,23 @@
 
 use std::collections::BTreeMap;
 
-use grafeno_core::Result;
+use grafeno_core::{Result, Timestamp};
 use redb::{ReadableTable, TableDefinition, WriteTransaction};
 use serde::Serialize;
 
-use crate::store::{CountKey, EDGE_LABEL_COUNTS, LABEL_COUNTS, NS_COUNTS, storage};
+use crate::namespace::{self, NamespaceMeta};
+use crate::store::{CountKey, EDGE_LABEL_COUNTS, LABEL_COUNTS, NS_COUNTS, decode, storage};
 
-/// A namespace and how much it holds. Namespaces exist while they have nodes.
+/// A namespace and how much it holds. Namespaces are created explicitly or
+/// by the first write to them, and stay (empty) until they are dropped.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct NamespaceInfo {
     pub name: String,
     pub nodes: u64,
     pub edges: u64,
+    pub created_at: Timestamp,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// What a namespace holds, by label and by index.
@@ -40,6 +45,9 @@ pub(crate) fn bump_namespace(
     nodes: i64,
     edges: i64,
 ) -> Result<()> {
+    if nodes > 0 || edges > 0 {
+        namespace::ensure(tx, ns)?;
+    }
     let mut table = tx.open_table(NS_COUNTS).map_err(storage)?;
     let (current_nodes, current_edges) = table
         .get(ns)
@@ -99,16 +107,25 @@ pub(crate) fn bump_edge_label(
 }
 
 pub(crate) fn namespaces(
-    table: &impl ReadableTable<&'static str, (u64, u64)>,
+    registry: &impl ReadableTable<&'static str, &'static [u8]>,
+    counts: &impl ReadableTable<&'static str, (u64, u64)>,
 ) -> Result<Vec<NamespaceInfo>> {
     let mut out = Vec::new();
-    for item in table.iter().map_err(storage)? {
+    for item in registry.iter().map_err(storage)? {
         let (key, value) = item.map_err(storage)?;
-        let (nodes, edges) = value.value();
+        let name = key.value();
+        let meta: NamespaceMeta = decode(value.value())?;
+        let (nodes, edges) = counts
+            .get(name)
+            .map_err(storage)?
+            .map(|guard| guard.value())
+            .unwrap_or((0, 0));
         out.push(NamespaceInfo {
-            name: key.value().to_owned(),
+            name: name.to_owned(),
             nodes,
             edges,
+            created_at: meta.created_at,
+            description: meta.description,
         });
     }
     Ok(out)

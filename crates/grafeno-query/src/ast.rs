@@ -35,6 +35,8 @@ pub(crate) enum Schema {
     },
     /// `SHOW INDEXES` / `SHOW CONSTRAINTS`.
     Show { constraints: bool },
+    /// `SHOW NAMESPACES`.
+    ShowNamespaces,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -50,7 +52,7 @@ pub(crate) enum Mode {
 impl Statement {
     pub(crate) fn writes(&self) -> bool {
         match &self.schema {
-            Some(Schema::Show { .. }) => false,
+            Some(Schema::Show { .. } | Schema::ShowNamespaces) => false,
             Some(_) => true,
             None => self
                 .parts

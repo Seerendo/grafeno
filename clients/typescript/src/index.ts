@@ -215,13 +215,20 @@ export interface ListOptions {
   limit?: number;
 }
 
+/** A namespace: created explicitly or by the first write, listed even when empty. */
 export interface NamespaceInfo {
   name: string;
   nodes: number;
   edges: number;
+  /** Microseconds since the epoch. */
+  created_at: number;
+  description?: string;
 }
 
-export interface NamespaceStats extends NamespaceInfo {
+export interface NamespaceStats {
+  name: string;
+  nodes: number;
+  edges: number;
   node_labels: Record<string, number>;
   edge_labels: Record<string, number>;
   texts: number;
@@ -405,6 +412,26 @@ export class Grafeno {
   /** Every namespace that has nodes, in name order. */
   namespaces(): Promise<NamespaceInfo[]> {
     return this.request("GET", "/v1/namespaces");
+  }
+
+  /** Creates an empty namespace; fails with status 409 (`conflict`) if it exists. */
+  createNamespace(name: string, description?: string): Promise<NamespaceInfo> {
+    return this.request("POST", "/v1/namespaces", { name, description });
+  }
+
+  /** One namespace; fails with status 404 if it does not exist. */
+  getNamespace(name: string): Promise<NamespaceInfo> {
+    return this.request("GET", `/v1/namespaces/${encodeURIComponent(name)}`);
+  }
+
+  /** Sets the description of a namespace (`null` removes it). */
+  describeNamespace(name: string, description: string | null): Promise<NamespaceInfo> {
+    return this.request("PATCH", `/v1/namespaces/${encodeURIComponent(name)}`, { description });
+  }
+
+  /** Deletes a namespace and everything in it. It cannot be undone. */
+  dropNamespace(name: string): Promise<{ nodes: number; edges: number }> {
+    return this.request("DELETE", `/v1/namespaces/${encodeURIComponent(name)}`);
   }
 
   /** The graph algorithms `CALL algo.*` and `algorithm()` can run. */

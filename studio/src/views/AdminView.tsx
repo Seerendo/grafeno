@@ -15,7 +15,8 @@ function download(name: string, text: string): void {
 }
 
 export function AdminView() {
-  const { client, namespace, changed: refreshNamespaces, confirm } = useStudio();
+  const { client, namespace, namespaces, setNamespace, changed: refreshNamespaces, confirm, toast } = useStudio();
+  const info = namespaces.find((item) => item.name === namespace);
   const [check, setCheck] = useState<CheckReport | null>(null);
   const [rebuild, setRebuild] = useState<RebuildReport | null>(null);
   const [imported, setImported] = useState<DumpStats | null>(null);
@@ -119,6 +120,39 @@ export function AdminView() {
             Imported {imported.namespaces} namespaces, {imported.nodes} nodes and {imported.edges} edges.
           </div>
         )}
+      </div>
+      <div className="panel stack danger-zone">
+        <h2>Delete the namespace “{namespace}”</h2>
+        <p className="muted small" style={{ margin: 0 }}>
+          Deletes the namespace and everything in it: nodes, facts, texts, embeddings and indexes. It cannot be undone; export it
+          first to keep a copy.
+        </p>
+        <div className="row">
+          <button
+            className="danger"
+            disabled={busy !== null || !info}
+            onClick={async () => {
+              if (!info) return;
+              const ok = await confirm({
+                title: `Delete the namespace “${info.name}”?`,
+                message: `${info.nodes} nodes and ${info.edges} facts will be deleted for good.`,
+                confirm: "Delete namespace",
+                danger: true,
+              });
+              if (!ok) return;
+              void task("drop", async () => {
+                const dropped = await client.dropNamespace(info.name);
+                const next = namespaces.find((item) => item.name !== info.name);
+                if (next) setNamespace(next.name);
+                toast(`Deleted namespace “${info.name}” (${dropped.nodes} nodes, ${dropped.edges} facts).`, "ok");
+                refreshNamespaces();
+              });
+            }}
+          >
+            {busy === "drop" ? "Deleting…" : "Delete namespace"}
+          </button>
+          {!info && <span className="muted small">“{namespace}” has not been created.</span>}
+        </div>
       </div>
     </div>
   );

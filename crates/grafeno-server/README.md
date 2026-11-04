@@ -65,7 +65,8 @@ vault=> \context who works at Acme?
 ```
 
 Statements are [GQ](../../docs/query-language.md) and end with `;`; lines
-that start with `\` are meta-commands (`\?` lists them): `\ns`, `\use`,
+that start with `\` are meta-commands (`\?` lists them): `\ns` (and
+`\ns create NAME`, `\ns drop NAME --yes`), `\use`,
 `\stats`, `\check`, `\rebuild`, `\search`, `\recall`, `\context`,
 `\export`, `\import`, `\format table|json`, `\timing`, `\i FILE`, `\q`.
 History is kept in `~/.grafeno_history`.
@@ -127,7 +128,8 @@ All bodies are JSON. Everything under `/v1` needs `Authorization: Bearer
 `{"error": {"code": "not_found", "message": "…"}}`, with codes `bad_request`
 (malformed body), `invalid` (rejected input), `invalid_query` (a GQ error),
 `query_limit` (a GQ query over its time, reads or rows limit; see `[query]` in
-`grafeno.toml`), `not_found`, `unauthorized`, `busy` (503 with `Retry-After`:
+`grafeno.toml`), `not_found`, `conflict` (409: it exists already),
+`unauthorized`, `busy` (503 with `Retry-After`:
 too many requests at once, or too many writes waiting) and `internal`.
 
 Writes from concurrent requests are committed together (group commit): each
@@ -141,7 +143,11 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | Method   | Path                                  | Body / query                                            | Returns                       |
 | -------- | ------------------------------------- | ------------------------------------------------------- | ----------------------------- |
 | `GET`    | `/health`                             |                                                         | `{status, version}`           |
-| `GET`    | `/v1/namespaces`                      |                                                         | `[{name, nodes, edges}]`      |
+| `GET`    | `/v1/namespaces`                      |                                                         | `[{name, nodes, edges, created_at, description?}]`, empty ones too |
+| `POST`   | `/v1/namespaces`                      | `{name, description?}`                                  | the namespace (201); 409 if it exists |
+| `GET`    | `/v1/namespaces/{ns}`                 |                                                         | the namespace, or 404         |
+| `PATCH`  | `/v1/namespaces/{ns}`                 | `{description}` (`null` removes it)                     | the namespace                 |
+| `DELETE` | `/v1/namespaces/{ns}`                 |                                                         | `{nodes, edges}` deleted with it |
 | `GET`    | `/v1/export`                          | `?ns=a,b` (all by default)                              | JSON Lines                    |
 | `POST`   | `/v1/import`                          | JSON Lines (up to 1 GiB); `?bulk=true` loads in chunks  | `{namespaces, nodes, edges}`  |
 | `GET`    | `/v1/{ns}/stats`                      |                                                         | statistics                    |

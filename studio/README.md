@@ -4,7 +4,10 @@ The web interface of Grafeno, built into `grafeno serve` at
 <http://127.0.0.1:7810/studio/>. Everything can be done from it, without a
 terminal:
 
-- **Overview**: namespaces, counts per label, quick actions.
+- **Overview**: namespaces (empty ones too, with their creation date),
+  counts per label, quick actions. The namespace menu at the top switches
+  between namespaces or creates a new one, and says which it did; creating
+  a name that exists offers to switch to it instead.
 - **Explorer**: filter by label, name or text; create nodes; edit names,
   labels, properties (typed: text, number, yes/no, JSON), text and
   importance in place; add, end, retract or delete facts; select several
@@ -26,7 +29,8 @@ terminal:
   budget.
 - **Memory**: duplicates to merge, weak memories to archive, groups to
   consolidate.
-- **Administration**: check, rebuild, export, import.
+- **Administration**: indexes, check, rebuild, export, import, and
+  deleting the namespace with everything in it (after a confirmation).
 
 Ctrl+K opens a command palette (views, actions, namespaces and nodes). The
 theme follows the system, or can be set to light or dark.

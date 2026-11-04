@@ -233,6 +233,27 @@ fn run_schema(
         profile: None,
     };
     match schema {
+        Schema::ShowNamespaces => Ok(QueryResult {
+            columns: ["name", "nodes", "edges", "created_at", "description"]
+                .iter()
+                .map(|c| (*c).to_owned())
+                .collect(),
+            rows: read
+                .namespaces()?
+                .into_iter()
+                .map(|info| {
+                    vec![
+                        Value::Str(info.name),
+                        Value::Int(info.nodes as i64),
+                        Value::Int(info.edges as i64),
+                        Value::Time(info.created_at),
+                        info.description.map_or(Value::Null, Value::Str),
+                    ]
+                })
+                .collect(),
+            stats: WriteStats::default(),
+            profile: None,
+        }),
         Schema::Show { constraints } => Ok(table(
             read.indexes(ns)?
                 .into_iter()
@@ -1938,6 +1959,7 @@ fn explain(statement: &Statement, info: &PlanInfo) -> Result<QueryResult, QueryE
             ),
             Schema::Drop { name, .. } => format!("drop {name}"),
             Schema::Show { .. } => "list the indexes".into(),
+            Schema::ShowNamespaces => "list the namespaces".into(),
         };
         return Ok(QueryResult {
             columns: vec!["step".into(), "operation".into(), "details".into()],

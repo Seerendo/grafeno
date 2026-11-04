@@ -89,7 +89,11 @@ fn namespaces_and_stats_follow_every_write() {
         .into_iter()
         .map(|info| info.name)
         .collect();
-    assert_eq!(names, ["vault"], "empty namespaces disappear");
+    assert_eq!(
+        names,
+        ["agent", "vault"],
+        "empty namespaces stay until dropped"
+    );
 }
 
 #[test]
@@ -253,7 +257,8 @@ fn export_and_import_round_trip() {
 
     let mut one = Vec::new();
     original.export(&["agent".into()], &mut one).unwrap();
-    assert_eq!(String::from_utf8(one).unwrap().lines().count(), 2);
+    // The header, the namespace and its one node.
+    assert_eq!(String::from_utf8(one).unwrap().lines().count(), 3);
 }
 
 #[test]

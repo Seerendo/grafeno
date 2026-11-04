@@ -346,11 +346,16 @@ pub enum ErrorKind {
     Internal,
     /// Too much work waiting: the client should retry.
     Busy,
+    /// What should be created exists already.
+    Conflict,
 }
 
 pub fn error_kind(error: &Error) -> ErrorKind {
     match error {
-        Error::NodeNotFound(_) | Error::EdgeNotFound(_) => ErrorKind::NotFound,
+        Error::NodeNotFound(_) | Error::EdgeNotFound(_) | Error::NamespaceNotFound(_) => {
+            ErrorKind::NotFound
+        }
+        Error::Conflict(_) => ErrorKind::Conflict,
         Error::Invalid(_) => ErrorKind::BadRequest,
         Error::Storage(_) | Error::Serialization(_) => ErrorKind::Internal,
         Error::Busy(_) => ErrorKind::Busy,

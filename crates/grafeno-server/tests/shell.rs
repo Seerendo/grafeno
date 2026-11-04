@@ -107,3 +107,41 @@ fn failures_set_the_exit_code() {
     assert!(!output.status.success());
     assert!(text(&output.stderr).contains("unknown command \\nope"));
 }
+
+#[test]
+fn creates_and_drops_namespaces() {
+    let dir = std::env::temp_dir().join(format!("grafeno-shell-{}", NodeId::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("ns.redb");
+    let db = db.to_str().unwrap();
+    let output = shell(
+        &[
+            "--db",
+            db,
+            "-c",
+            "\\ns create demo\n\\ns create demo2\n\\ns\n\\ns drop demo\n\\ns drop demo --yes\nSHOW NAMESPACES;",
+        ],
+        None,
+    );
+    let stdout = text(&output.stdout);
+    let stderr = text(&output.stderr);
+    assert!(
+        stdout.contains("Created namespace \"demo\""),
+        "{stdout}{stderr}"
+    );
+    assert!(stdout.contains("Created namespace \"demo2\""), "{stdout}");
+    assert!(
+        stderr.contains("--yes") || stdout.contains("--yes"),
+        "asks to confirm: {stdout}{stderr}"
+    );
+    assert!(
+        stdout.contains("Dropped namespace \"demo\""),
+        "{stdout}{stderr}"
+    );
+    let listing = stdout.rsplit("Dropped namespace").next().unwrap();
+    assert!(
+        listing.contains("demo2") && !listing.contains("| demo "),
+        "{listing}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

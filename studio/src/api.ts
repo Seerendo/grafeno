@@ -2,7 +2,7 @@
 
 import { Grafeno, GrafenoError, type Node } from "../../clients/typescript/src/index.ts";
 
-export type { Edge, Node, NodeWithText, QueryResult } from "../../clients/typescript/src/index.ts";
+export type { Edge, NamespaceInfo, Node, NodeWithText, QueryResult } from "../../clients/typescript/src/index.ts";
 export { Grafeno, GrafenoError };
 
 export interface Connection {
