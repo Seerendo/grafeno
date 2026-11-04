@@ -83,12 +83,14 @@ short-lived agents.
 | `edge_label_counts` | `(ns, label)`            | edges with the label       |
 | `names`        | `(ns, normalized name, node_id)` | `()`                    |
 | `memory`       | `(ns, node_id)`               | `(importance, accesses, last_access)` |
+| `indexes`      | `(ns, index name)`            | index definition (JSON)    |
+| `index_entries` | `(ns, index, sortable value, node_id)` | `()`              |
 
-- The layout has a version (`SCHEMA_VERSION`, now 4) in `meta`. Opening an
+- The layout has a version (`SCHEMA_VERSION`, now 5) in `meta`. Opening an
   older file upgrades it in one transaction: version 1 gets its counters
   computed, version 2 gets the new adjacency and posting tables (built from
-  the records) and loses the old ones, version 3 gets the names index. A
-  newer layout is refused.
+  the records) and loses the old ones, version 3 gets the names index,
+  version 4 the (empty) property index tables. A newer layout is refused.
 - Adjacency entries hold the edge's record time and valid time
   (`recorded_at`, `expired_at`, `valid_from`, `valid_to`), so traversals
   filter without reading edge records. Postings hold the length of their
@@ -350,7 +352,7 @@ without a current user. They remain possible for embedded use.
    importance, accesses and decay in ranking, duplicates and merging,
    archiving, consolidation into summaries.
 8. **Performance, query language and analysis** (in progress, in five
-   steps; see below). 8.1 and 8.2 are done.
+   steps; see below). 8.1 to 8.3 are done.
 9. **Desktop application**: from the browser to a desktop app (guidelines
    to come after phase 8).
 10. **Integrations**: Grafito first, Python bindings, read replicas.
@@ -400,8 +402,12 @@ later clauses (and `MERGE` on later rows) see earlier writes.
 - Also: `VALID AT` / `KNOWN AT` may use row variables, `round(x, digits)`,
   `log`, `exp`, `sign`, `pi()`, `timestamp()`.
 
-**8.3 Property indexes and safe queries.** Today `MATCH (p:Person) WHERE
-p.age > 32` scans every `Person`.
+**8.3 Property indexes and safe queries** (done). Measured in
+[docs/benchmarks.md](docs/benchmarks.md): a 2% range over 100,000 nodes goes
+from 233 ms to 11 ms. Values are encoded so that byte order is value order
+(numbers as `f64` with flipped bits, strings as UTF-8), and lookups read
+inclusive ranges that the query's own conditions then narrow. Queries read
+candidates in pages, and limits are checked on every read.
 
 - Declared indexes, as in Postgres and Neo4j:
   `CREATE INDEX FOR (n:Person) ON (n.age)`, `DROP INDEX`, `SHOW INDEXES`,

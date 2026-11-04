@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { describeError } from "../api.ts";
+import { IndexesPanel } from "../components/IndexesPanel.tsx";
 import { useStudio } from "../context.ts";
 import type { CheckReport, DumpStats, RebuildReport } from "../../../clients/typescript/src/index.ts";
 
@@ -39,6 +40,8 @@ export function AdminView() {
     <div className="stack">
       <h1>Administration</h1>
       {error && <div className="error">{error}</div>}
+
+      <IndexesPanel />
 
       <div className="panel stack">
         <h2>Integrity of “{namespace}”</h2>

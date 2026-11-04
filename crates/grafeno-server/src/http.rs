@@ -28,6 +28,8 @@ const BODY_LIMIT: usize = 32 * 1024 * 1024;
 pub struct AppState {
     pub db: Arc<Grafeno>,
     pub token: Option<Arc<str>>,
+    /// Limits for each GQ query.
+    pub limits: grafeno_query::Limits,
 }
 
 /// What the HTTP server offers besides the API.
@@ -1078,6 +1080,8 @@ impl From<grafeno_query::QueryError> for ApiError {
             },
             code: if error.internal {
                 "internal"
+            } else if error.limit {
+                "query_limit"
             } else {
                 "invalid_query"
             },
@@ -1087,15 +1091,32 @@ impl From<grafeno_query::QueryError> for ApiError {
 }
 
 /// Runs one GQ statement; statements with writes run in one transaction.
+/// Sets the flag when dropped.
+struct CancelOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 async fn query(
     State(state): State<AppState>,
     Path(ns): Path<String>,
     Body(input): Body<QueryInput>,
 ) -> ApiResult<Json<Value>> {
     let db = state.db.clone();
+    // When the client goes away, this handler is dropped: the guard then
+    // tells the query to stop.
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _guard = CancelOnDrop(cancel.clone());
+    let limits = grafeno_query::Limits {
+        cancel: Some(cancel),
+        ..state.limits.clone()
+    };
     let result = tokio::task::spawn_blocking(move || {
         let params = grafeno_query::params_from_json(&input.params);
-        grafeno_query::execute(&db, &ns, &input.query, &params)
+        grafeno_query::execute_with(&db, &ns, &input.query, &params, &limits)
     })
     .await
     .map_err(|error| ApiError::internal(error.to_string()))??;

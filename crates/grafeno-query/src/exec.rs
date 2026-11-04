@@ -5,18 +5,20 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use grafeno::{
-    Direction, EdgeFilter, EdgeId, Grafeno, NewEdge, NewNode, Node, NodeId, Props, ReadTx,
-    Timestamp, WriteTx,
+    Direction, EdgeFilter, EdgeId, Grafeno, IndexDef, NewEdge, NewNode, Node, NodeId, Props,
+    ReadTx, Timestamp, WriteTx,
 };
 use serde::Serialize;
 
 use crate::QueryError;
 use crate::ast::{
     Clause, Expr, Key, Mode, NodePattern, Pattern, ProcedureCall, Projection, Query, RelPattern,
-    RemoveItem, SetItem, Statement,
+    RemoveItem, Schema, SetItem, Statement,
 };
 use crate::eval::{Context, Params, Row, Scope, eval, property, to_time, truth};
+use crate::limits::{Budget, Limits};
 use crate::parser::parse;
+use crate::plan::{PlanInfo, Source, conjuncts, free_vars, plan_anchor, seek_ranges};
 use crate::procedures;
 use crate::value::{Value, equals, sort_order};
 
@@ -55,6 +57,10 @@ pub struct PlanStep {
     /// Milliseconds the step took (`PROFILE` only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_ms: Option<f64>,
+    /// Records the step read: nodes, edges, adjacency and index entries
+    /// (`PROFILE` only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reads: Option<u64>,
 }
 
 /// The result of a query: named columns, rows of values, and what changed.
@@ -87,24 +93,40 @@ impl QueryResult {
     }
 }
 
-/// Runs one statement on namespace `ns`. A statement with writes runs in
-/// one write transaction: all of its changes or none.
+/// Runs one statement on namespace `ns`, without limits. A statement with
+/// writes runs in one write transaction: all of its changes or none.
 pub fn execute(
     db: &Grafeno,
     ns: &str,
     query: &str,
     params: &Params,
 ) -> Result<QueryResult, QueryError> {
+    execute_with(db, ns, query, params, &Limits::none())
+}
+
+/// [`execute`] within `limits`: a query over them stops with an error, and
+/// a writing one leaves nothing behind.
+pub fn execute_with(
+    db: &Grafeno,
+    ns: &str,
+    query: &str,
+    params: &Params,
+    limits: &Limits,
+) -> Result<QueryResult, QueryError> {
     let statement = parse(query)?;
     validate(&statement)?;
     if statement.mode == Mode::Explain {
-        return Ok(explain(&statement));
+        return explain(&statement, &plan_info(&db.begin_read()?, ns)?);
     }
     if statement.writes() {
         // Holding the write lock first makes the snapshot the latest state.
         let mut tx = db.begin_write()?;
         let read = db.begin_read()?;
-        let outcome = Runner::new(&read, Some(&mut tx), ns, params, statement.mode).run(&statement);
+        let outcome = match &statement.schema {
+            Some(schema) => run_schema(&read, Some(&mut tx), ns, schema),
+            None => Runner::new(&read, Some(&mut tx), ns, params, statement.mode, limits)?
+                .run(&statement),
+        };
         match outcome {
             Ok(result) => {
                 tx.commit()?;
@@ -117,28 +139,136 @@ pub fn execute(
         }
     } else {
         let read = db.begin_read()?;
-        Runner::new(&read, None, ns, params, statement.mode).run(&statement)
+        execute_read_with(&read, ns, query, params, limits)
     }
 }
 
-/// Runs a read-only statement on an existing snapshot.
+/// Runs a read-only statement on an existing snapshot, without limits.
 pub fn execute_read(
     read: &ReadTx,
     ns: &str,
     query: &str,
     params: &Params,
 ) -> Result<QueryResult, QueryError> {
+    execute_read_with(read, ns, query, params, &Limits::none())
+}
+
+/// [`execute_read`] within `limits`.
+pub fn execute_read_with(
+    read: &ReadTx,
+    ns: &str,
+    query: &str,
+    params: &Params,
+    limits: &Limits,
+) -> Result<QueryResult, QueryError> {
     let statement = parse(query)?;
     validate(&statement)?;
     if statement.mode == Mode::Explain {
-        return Ok(explain(&statement));
+        return explain(&statement, &plan_info(read, ns)?);
     }
     if statement.writes() {
         return Err(QueryError::runtime(
             "this query writes; it needs a writable database",
         ));
     }
-    Runner::new(read, None, ns, params, statement.mode).run(&statement)
+    if let Some(schema) = &statement.schema {
+        return run_schema(read, None, ns, schema);
+    }
+    Runner::new(read, None, ns, params, statement.mode, limits)?.run(&statement)
+}
+
+fn plan_info(read: &ReadTx, ns: &str) -> Result<PlanInfo, QueryError> {
+    Ok(PlanInfo {
+        indexes: read.index_defs(ns)?,
+        label_counts: read.stats(ns)?.node_labels.into_iter().collect(),
+    })
+}
+
+const INDEX_COLUMNS: [&str; 5] = ["name", "label", "property", "unique", "entries"];
+
+fn index_row(def: &IndexDef, entries: u64) -> Vec<Value> {
+    vec![
+        Value::Str(def.name.clone()),
+        Value::Str(def.label.clone()),
+        Value::Str(def.key.clone()),
+        Value::Bool(def.unique),
+        Value::Int(entries as i64),
+    ]
+}
+
+/// `CREATE INDEX`, `DROP INDEX`, `SHOW INDEXES` and the constraint forms.
+fn run_schema(
+    read: &ReadTx,
+    tx: Option<&mut WriteTx>,
+    ns: &str,
+    schema: &Schema,
+) -> Result<QueryResult, QueryError> {
+    let table = |rows: Vec<Vec<Value>>| QueryResult {
+        columns: INDEX_COLUMNS.iter().map(|c| (*c).to_owned()).collect(),
+        rows,
+        stats: WriteStats::default(),
+        profile: None,
+    };
+    match schema {
+        Schema::Show { constraints } => Ok(table(
+            read.indexes(ns)?
+                .into_iter()
+                .filter(|info| !constraints || info.def.unique)
+                .map(|info| index_row(&info.def, info.entries))
+                .collect(),
+        )),
+        Schema::Create {
+            name,
+            label,
+            key,
+            unique,
+            if_not_exists,
+        } => {
+            let tx = tx.expect("schema writes run with a write transaction");
+            let def = IndexDef {
+                name: name
+                    .clone()
+                    .unwrap_or_else(|| IndexDef::default_name(label, key, *unique)),
+                label: label.clone(),
+                key: key.clone(),
+                unique: *unique,
+            };
+            if *if_not_exists
+                && let Some(existing) = tx.index_defs(ns)?.into_iter().find(|other| {
+                    other.name == def.name
+                        || (other.label == def.label
+                            && other.key == def.key
+                            && other.unique == def.unique)
+                })
+            {
+                return Ok(table(vec![index_row(&existing, 0)]));
+            }
+            let entries = tx.create_index(ns, def.clone())?;
+            Ok(table(vec![index_row(&def, entries)]))
+        }
+        Schema::Drop {
+            name,
+            constraint,
+            if_exists,
+        } => {
+            let tx = tx.expect("schema writes run with a write transaction");
+            let existing = tx.index_defs(ns)?.into_iter().find(|def| def.name == *name);
+            match existing {
+                None if *if_exists => Ok(table(Vec::new())),
+                None => Err(QueryError::runtime(format!(
+                    "there is no {} named {name:?} (SHOW INDEXES lists them)",
+                    if *constraint { "constraint" } else { "index" }
+                ))),
+                Some(def) if *constraint && !def.unique => Err(QueryError::runtime(format!(
+                    "{name:?} is an index, not a constraint: use DROP INDEX"
+                ))),
+                Some(def) => {
+                    tx.drop_index(ns, name)?;
+                    Ok(table(vec![index_row(&def, 0)]))
+                }
+            }
+        }
+    }
 }
 
 /// Whether the statement writes when run (`EXPLAIN` never does).
@@ -148,6 +278,14 @@ pub fn is_write(query: &str) -> Result<bool, QueryError> {
 }
 
 fn validate(statement: &Statement) -> Result<(), QueryError> {
+    if statement.schema.is_some() {
+        if statement.mode == Mode::Profile {
+            return Err(QueryError::runtime(
+                "PROFILE runs queries, not index commands",
+            ));
+        }
+        return Ok(());
+    }
     if statement
         .union_all
         .windows(2)
@@ -210,6 +348,10 @@ struct Runner<'a> {
     deleted_nodes: HashSet<NodeId>,
     deleted_edges: HashSet<EdgeId>,
     profile: Option<Vec<PlanStep>>,
+    info: PlanInfo,
+    budget: Budget,
+    /// Records read when the last PROFILE step ended.
+    reads_seen: u64,
 }
 
 /// The rows flowing between clauses and the variables they bind, in order.
@@ -236,8 +378,9 @@ impl<'a> Runner<'a> {
         ns: &'a str,
         params: &'a Params,
         mode: Mode,
-    ) -> Self {
-        Self {
+        limits: &Limits,
+    ) -> Result<Self, QueryError> {
+        Ok(Self {
             read,
             tx,
             ns,
@@ -246,7 +389,10 @@ impl<'a> Runner<'a> {
             deleted_nodes: HashSet::new(),
             deleted_edges: HashSet::new(),
             profile: (mode == Mode::Profile).then(Vec::new),
-        }
+            info: plan_info(read, ns)?,
+            budget: Budget::new(limits),
+            reads_seen: 0,
+        })
     }
 
     fn ctx<'b>(&'b self, edges: &'b EdgeFilter) -> Context<'b> {
@@ -256,6 +402,8 @@ impl<'a> Runner<'a> {
             ns: self.ns,
             params: self.params,
             edges,
+            info: &self.info,
+            budget: &self.budget,
         }
     }
 
@@ -297,6 +445,7 @@ impl<'a> Runner<'a> {
         rows: usize,
         started: Instant,
     ) {
+        let reads = self.budget.reads();
         if let Some(profile) = &mut self.profile {
             profile.push(PlanStep {
                 step: profile.len() + 1,
@@ -304,8 +453,10 @@ impl<'a> Runner<'a> {
                 details: details.into(),
                 rows: Some(rows as u64),
                 time_ms: Some(started.elapsed().as_secs_f64() * 1000.0),
+                reads: Some(reads - self.reads_seen),
             });
         }
+        self.reads_seen = reads;
     }
 
     fn run_query(&mut self, query: &Query) -> Result<(Vec<String>, Vec<Vec<Value>>), QueryError> {
@@ -314,9 +465,12 @@ impl<'a> Runner<'a> {
             vars: Vec::new(),
         };
         let mut bound: HashSet<String> = HashSet::new();
-        for clause in &query.clauses {
+        for (index, clause) in query.clauses.iter().enumerate() {
             let started = Instant::now();
-            let details = self.profile.is_some().then(|| describe(clause, &bound));
+            let details = self
+                .profile
+                .is_some()
+                .then(|| describe(clause, &bound, &self.info));
             if let Clause::Return(projection) = clause {
                 let edges = EdgeFilter::any();
                 let ctx = self.ctx(&edges);
@@ -324,7 +478,16 @@ impl<'a> Runner<'a> {
                 self.record("RETURN", details.unwrap_or_default(), rows.len(), started);
                 return Ok((columns, rows));
             }
-            flow = self.apply(clause, flow)?;
+            // A MATCH right before a plain RETURN … LIMIT n stops after
+            // the rows it needs.
+            let cap = match (clause, query.clauses.get(index + 1)) {
+                (Clause::Match { .. }, Some(Clause::Return(projection))) => {
+                    self.row_cap(projection)?
+                }
+                _ => None,
+            };
+            flow = self.apply(clause, flow, cap)?;
+            self.budget.rows(flow.rows.len())?;
             bound.extend(flow.vars.iter().cloned());
             self.record(
                 clause.name(),
@@ -354,8 +517,44 @@ impl<'a> Runner<'a> {
         Ok((Vec::new(), Vec::new()))
     }
 
-    /// Runs one clause (not RETURN) on the rows.
-    fn apply(&mut self, clause: &Clause, mut flow: Flow) -> Result<Flow, QueryError> {
+    /// How many rows a RETURN needs from the clause before it: `SKIP + LIMIT`
+    /// when it neither sorts, groups nor drops duplicates.
+    fn row_cap(&self, projection: &Projection) -> Result<Option<usize>, QueryError> {
+        let Some(limit) = &projection.limit else {
+            return Ok(None);
+        };
+        if projection.distinct
+            || !projection.order.is_empty()
+            || projection
+                .items
+                .iter()
+                .any(|item| item.expr.has_aggregate())
+        {
+            return Ok(None);
+        }
+        let count = |expr: &Expr| -> Result<Option<usize>, QueryError> {
+            Ok(match self.eval(&Row::new(), expr)? {
+                Value::Int(n) if n >= 0 => Some(n as usize),
+                _ => None,
+            })
+        };
+        let skip = match &projection.skip {
+            Some(skip) => count(skip)?,
+            None => Some(0),
+        };
+        Ok(skip
+            .zip(count(limit)?)
+            .map(|(skip, limit)| skip.saturating_add(limit)))
+    }
+
+    /// Runs one clause (not RETURN) on the rows; `cap` is how many rows the
+    /// rest of the query needs, when that is known.
+    fn apply(
+        &mut self,
+        clause: &Clause,
+        mut flow: Flow,
+        cap: Option<usize>,
+    ) -> Result<Flow, QueryError> {
         match clause {
             Clause::Match {
                 optional,
@@ -380,47 +579,44 @@ impl<'a> Runner<'a> {
                 } else {
                     self.time_filter(valid_at.as_ref(), known_at.as_ref(), &Row::new())?
                 };
-                let matched = |rows: Vec<Row>| -> Result<Vec<Row>, QueryError> {
-                    let run =
-                        |edges: &EdgeFilter, rows: Vec<Row>| -> Result<Vec<Row>, QueryError> {
-                            let ctx = self.ctx(edges);
-                            let mut rows = rows;
-                            for pattern in patterns {
-                                rows = match_pattern(&ctx, rows, pattern)?;
-                            }
-                            if let Some(filter) = filter {
-                                rows = keep(&ctx, rows, filter)?;
-                            }
-                            Ok(rows)
+                let conditions: Vec<&Expr> = filter.as_ref().map(conjuncts).unwrap_or_default();
+                let mut out = Vec::new();
+                for row in flow.rows {
+                    if cap.is_some_and(|cap| out.len() >= cap) {
+                        break;
+                    }
+                    let edges = if per_row {
+                        self.time_filter(valid_at.as_ref(), known_at.as_ref(), &row)?
+                    } else {
+                        shared.clone()
+                    };
+                    let ctx = self.ctx(&edges);
+                    let mut rows = vec![row.clone()];
+                    for (index, pattern) in patterns.iter().enumerate() {
+                        let last = index + 1 == patterns.len();
+                        let matcher = Matcher {
+                            conditions: &conditions,
+                            filter: if last { filter.as_ref() } else { None },
+                            cap: if last {
+                                cap.map(|cap| cap - out.len())
+                            } else {
+                                None
+                            },
                         };
-                    if !per_row {
-                        return run(&shared, rows);
+                        rows = match_pattern(&ctx, rows, pattern, &matcher)?;
                     }
-                    let mut out = Vec::new();
-                    for row in rows {
-                        let edges = self.time_filter(valid_at.as_ref(), known_at.as_ref(), &row)?;
-                        out.extend(run(&edges, vec![row])?);
-                    }
-                    Ok(out)
-                };
-                flow.rows = if *optional {
-                    let mut out = Vec::new();
-                    for row in flow.rows {
-                        let found = matched(vec![row.clone()])?;
-                        if found.is_empty() {
-                            let mut row = row;
-                            for var in &new_vars {
-                                row.entry(var.clone()).or_insert(Value::Null);
-                            }
-                            out.push(row);
-                        } else {
-                            out.extend(found);
+                    if rows.is_empty() && *optional {
+                        let mut row = row;
+                        for var in &new_vars {
+                            row.entry(var.clone()).or_insert(Value::Null);
                         }
+                        out.push(row);
+                    } else {
+                        out.extend(rows);
                     }
-                    out
-                } else {
-                    matched(flow.rows)?
-                };
+                    self.budget.rows(out.len())?;
+                }
+                flow.rows = out;
                 flow.bind(&new_vars);
             }
             Clause::Unwind { list, var } => {
@@ -513,7 +709,7 @@ impl<'a> Runner<'a> {
                             vars: flow.vars.iter().cloned().chain([var.clone()]).collect(),
                         };
                         for clause in body {
-                            inner = self.apply(clause, inner)?;
+                            inner = self.apply(clause, inner, None)?;
                         }
                     }
                 }
@@ -529,7 +725,7 @@ impl<'a> Runner<'a> {
                     let edges = EdgeFilter::any().valid_at(Timestamp::now());
                     let found = {
                         let ctx = self.ctx(&edges);
-                        match_pattern(&ctx, vec![row.clone()], pattern)?
+                        match_pattern(&ctx, vec![row.clone()], pattern, &Matcher::default())?
                     };
                     if found.is_empty() {
                         let mut row = row;
@@ -675,7 +871,7 @@ pub(crate) fn exists(
 ) -> Result<bool, QueryError> {
     let mut rows = vec![row.clone()];
     for pattern in patterns {
-        rows = match_pattern(ctx, rows, pattern)?;
+        rows = match_pattern(ctx, rows, pattern, &Matcher::default())?;
         if rows.is_empty() {
             return Ok(false);
         }
@@ -704,62 +900,131 @@ struct Partial {
     nodes: Vec<Option<NodeId>>,
 }
 
-fn match_pattern(ctx: &Context, rows: Vec<Row>, pattern: &Pattern) -> Result<Vec<Row>, QueryError> {
+/// What a match may use besides the pattern: the `WHERE` conditions (to
+/// pick an index and to drop anchors early), the filter for complete rows,
+/// and how many rows are needed.
+#[derive(Default)]
+struct Matcher<'q> {
+    conditions: &'q [&'q Expr],
+    filter: Option<&'q Expr>,
+    cap: Option<usize>,
+}
+
+/// Candidates are read in pages, so a scan with a LIMIT stops early.
+const PAGE: usize = 512;
+
+fn match_pattern(
+    ctx: &Context,
+    rows: Vec<Row>,
+    pattern: &Pattern,
+    matcher: &Matcher,
+) -> Result<Vec<Row>, QueryError> {
     let nodes = pattern.nodes();
     let mut out = Vec::new();
     for row in rows {
-        let anchor = choose_anchor(&nodes, |var| row.contains_key(var));
-        for node in candidates(ctx, nodes[anchor], &row)? {
-            let mut start = Partial {
-                row: row.clone(),
-                used: Vec::new(),
-                nodes: vec![None; nodes.len()],
-            };
-            start.nodes[anchor] = Some(node.id);
-            if let Some(var) = &nodes[anchor].var {
-                start.row.insert(var.clone(), Value::Node(node));
-            }
-            let mut states = vec![start];
-            // Right of the anchor, in the written direction…
-            for step in anchor..pattern.steps.len() {
-                let (rel, target) = &pattern.steps[step];
-                let mut next = Vec::new();
-                for state in states {
-                    let from = state.nodes[step].expect("bound while extending");
-                    next.extend(expand(
-                        ctx,
-                        state,
-                        from,
-                        rel,
-                        rel.direction,
-                        target,
-                        step + 1,
-                    )?);
+        let (anchor, source) = plan_anchor(
+            &nodes,
+            &|var| row.contains_key(var),
+            matcher.conditions,
+            ctx.info,
+        );
+        let anchor_var = nodes[anchor].var.as_deref();
+        // Conditions on the anchor alone run before expanding from it.
+        let early: Vec<&Expr> = matcher
+            .conditions
+            .iter()
+            .copied()
+            .filter(|condition| {
+                free_vars(condition).is_some_and(|vars| {
+                    vars.iter()
+                        .all(|var| row.contains_key(var) || Some(var.as_str()) == anchor_var)
+                })
+            })
+            .collect();
+        let mut cursor = None;
+        loop {
+            let (page, next) = candidates(ctx, nodes[anchor], &source, &row, cursor)?;
+            for node in page {
+                let mut start = Partial {
+                    row: row.clone(),
+                    used: Vec::new(),
+                    nodes: vec![None; nodes.len()],
+                };
+                start.nodes[anchor] = Some(node.id);
+                if let Some(var) = anchor_var {
+                    start.row.insert(var.to_owned(), Value::Node(node));
                 }
-                states = next;
-            }
-            // …and left of it, against the written direction.
-            for step in (0..anchor).rev() {
-                let (rel, _) = &pattern.steps[step];
-                let mut next = Vec::new();
-                for state in states {
-                    let from = state.nodes[step + 1].expect("bound while extending");
-                    next.extend(expand(
-                        ctx,
-                        state,
-                        from,
-                        rel,
-                        reverse(rel.direction),
-                        nodes[step],
-                        step,
-                    )?);
+                if !early.is_empty() && !all_true(ctx, &early, &start.row)? {
+                    continue;
                 }
-                states = next;
+                let mut states = vec![start];
+                // Right of the anchor, in the written direction…
+                for step in anchor..pattern.steps.len() {
+                    let (rel, target) = &pattern.steps[step];
+                    let mut next = Vec::new();
+                    for state in states {
+                        let from = state.nodes[step].expect("bound while extending");
+                        next.extend(expand(
+                            ctx,
+                            state,
+                            from,
+                            rel,
+                            rel.direction,
+                            target,
+                            step + 1,
+                        )?);
+                    }
+                    ctx.budget.rows(next.len())?;
+                    states = next;
+                }
+                // …and left of it, against the written direction.
+                for step in (0..anchor).rev() {
+                    let (rel, _) = &pattern.steps[step];
+                    let mut next = Vec::new();
+                    for state in states {
+                        let from = state.nodes[step + 1].expect("bound while extending");
+                        next.extend(expand(
+                            ctx,
+                            state,
+                            from,
+                            rel,
+                            reverse(rel.direction),
+                            nodes[step],
+                            step,
+                        )?);
+                    }
+                    ctx.budget.rows(next.len())?;
+                    states = next;
+                }
+                for state in states {
+                    if let Some(filter) = matcher.filter
+                        && truth(&eval(ctx, filter, Scope::Row(&state.row))?)? != Some(true)
+                    {
+                        continue;
+                    }
+                    out.push(state.row);
+                    if matcher.cap.is_some_and(|cap| out.len() >= cap) {
+                        return Ok(out);
+                    }
+                }
+                ctx.budget.rows(out.len())?;
             }
-            out.extend(states.into_iter().map(|state| state.row));
+            match next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
         }
     }
     Ok(out)
+}
+
+fn all_true(ctx: &Context, conditions: &[&Expr], row: &Row) -> Result<bool, QueryError> {
+    for condition in conditions {
+        if truth(&eval(ctx, condition, Scope::Row(row))?)? != Some(true) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn reverse(direction: Direction) -> Direction {
@@ -770,86 +1035,111 @@ fn reverse(direction: Direction) -> Direction {
     }
 }
 
-/// How the start of a pattern is found, best first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Anchor {
-    Scan,
-    Label,
-    LabelAndProperties,
-    Id,
-    Bound,
+/// Where the next page of candidates starts.
+enum Cursor {
+    /// A scan: the last node of the previous page.
+    After(NodeId),
+    /// An index lookup: the ids it found, and how many were loaded.
+    Ids(Vec<NodeId>, usize),
 }
 
-fn anchor_kind(node: &NodePattern, is_bound: &impl Fn(&str) -> bool) -> Anchor {
-    if node.var.as_deref().is_some_and(is_bound) {
-        Anchor::Bound
-    } else if node
-        .props
-        .iter()
-        .any(|(key, _)| *key == Key::Meta("id".into()))
-    {
-        Anchor::Id
-    } else if !node.labels.is_empty() && !node.props.is_empty() {
-        Anchor::LabelAndProperties
-    } else if !node.labels.is_empty() {
-        Anchor::Label
-    } else {
-        Anchor::Scan
-    }
-}
+/// Nodes found through an index are loaded this many at a time.
+const INDEX_PAGE: usize = 64;
 
-/// The node to start from: a bound variable, then an `@id`, then labels
-/// with properties, then labels.
-fn choose_anchor(nodes: &[&NodePattern], is_bound: impl Fn(&str) -> bool) -> usize {
-    let mut best = 0;
-    for (index, node) in nodes.iter().enumerate() {
-        if anchor_kind(node, &is_bound) > anchor_kind(nodes[best], &is_bound) {
-            best = index;
-        }
-    }
-    best
-}
-
+/// One page of the nodes a pattern can start from, and where the next page
+/// starts.
 fn candidates(
     ctx: &Context,
     pattern: &NodePattern,
+    source: &Source,
     row: &Row,
-) -> Result<Vec<Arc<Node>>, QueryError> {
-    if let Some(var) = &pattern.var
-        && let Some(bound) = row.get(var)
-    {
-        return match bound {
-            Value::Node(node) if node_fits(ctx, node, pattern, row)? => Ok(vec![node.clone()]),
-            Value::Node(_) | Value::Null => Ok(Vec::new()),
-            other => Err(QueryError::runtime(format!(
-                "`{var}` is a {}, not a node",
-                other.type_name()
-            ))),
-        };
-    }
-    let found: Vec<Node> = if let Some((_, expr)) = pattern
-        .props
-        .iter()
-        .find(|(key, _)| *key == Key::Meta("id".into()))
-    {
-        match eval(ctx, expr, Scope::Row(row))? {
-            Value::Str(text) => match uuid_from_text(&text) {
-                Some(id) => ctx.node(id)?.into_iter().collect(),
-                None => Vec::new(),
-            },
-            _ => Vec::new(),
+    cursor: Option<Cursor>,
+) -> Result<(Vec<Arc<Node>>, Option<Cursor>), QueryError> {
+    let fitting = |found: Vec<Node>| -> Result<Vec<Arc<Node>>, QueryError> {
+        let mut out = Vec::new();
+        for node in found {
+            let node = Arc::new(node);
+            if node_fits(ctx, &node, pattern, row)? {
+                out.push(node);
+            }
         }
-    } else {
-        ctx.nodes(pattern.labels.first().map(String::as_str))?
+        Ok(out)
     };
-    let mut out = Vec::new();
-    for node in found {
-        let node = Arc::new(node);
-        if node_fits(ctx, &node, pattern, row)? {
-            out.push(node);
+    let load =
+        |ids: Vec<NodeId>, from: usize| -> Result<(Vec<Arc<Node>>, Option<Cursor>), QueryError> {
+            let to = (from + INDEX_PAGE).min(ids.len());
+            let mut found = Vec::with_capacity(to - from);
+            for id in &ids[from..to] {
+                if let Some(node) = ctx.node(*id)? {
+                    found.push(node);
+                }
+            }
+            let more = to < ids.len();
+            let next = more.then_some(Cursor::Ids(ids, to));
+            Ok((fitting(found)?, next))
+        };
+    let after = match cursor {
+        Some(Cursor::Ids(ids, from)) => return load(ids, from),
+        Some(Cursor::After(id)) => Some(id),
+        None => None,
+    };
+    let scan = |label: Option<&str>| -> Result<(Vec<Arc<Node>>, Option<Cursor>), QueryError> {
+        let page = ctx.nodes_page(label, after, PAGE)?;
+        let next = (page.len() == PAGE).then(|| Cursor::After(page[PAGE - 1].id));
+        Ok((fitting(page)?, next))
+    };
+    match source {
+        Source::Bound => {
+            let var = pattern
+                .var
+                .as_deref()
+                .expect("a bound pattern has a variable");
+            match row.get(var) {
+                Some(Value::Node(node)) if node_fits(ctx, node, pattern, row)? => {
+                    Ok((vec![node.clone()], None))
+                }
+                Some(Value::Node(_) | Value::Null) | None => Ok((Vec::new(), None)),
+                Some(other) => Err(QueryError::runtime(format!(
+                    "`{var}` is a {}, not a node",
+                    other.type_name()
+                ))),
+            }
         }
+        Source::Id(expr) => {
+            let found = match eval(ctx, expr, Scope::Row(row))? {
+                Value::Str(text) => match uuid_from_text(&text) {
+                    Some(id) => ctx.node(id)?.into_iter().collect(),
+                    None => Vec::new(),
+                },
+                _ => Vec::new(),
+            };
+            Ok((fitting(found)?, None))
+        }
+        Source::Index { name, seek, .. } => match seek_ranges(ctx, *seek, row)? {
+            Some(ranges) => {
+                let mut ids = Vec::new();
+                let mut seen = HashSet::new();
+                for range in &ranges {
+                    for id in ctx.index_lookup(name, range)? {
+                        if seen.insert(id) {
+                            ids.push(id);
+                        }
+                    }
+                }
+                load(ids, 0)
+            }
+            // Values the index cannot look up: scan the index's label.
+            None => scan(
+                ctx.info
+                    .indexes
+                    .iter()
+                    .find(|def| def.name == *name)
+                    .map(|def| def.label.as_str()),
+            ),
+        },
+        Source::Label { label, .. } => scan(Some(label)),
+        Source::Scan => scan(None),
     }
-    Ok(out)
 }
 
 fn uuid_from_text(text: &str) -> Option<NodeId> {
@@ -1610,7 +1900,33 @@ fn project(
 // ---------------------------------------------------------------- EXPLAIN
 
 /// The plan as a table: one row per step.
-fn explain(statement: &Statement) -> QueryResult {
+fn explain(statement: &Statement, info: &PlanInfo) -> Result<QueryResult, QueryError> {
+    if let Some(schema) = &statement.schema {
+        let details = match schema {
+            Schema::Create {
+                label, key, unique, ..
+            } => format!(
+                "{} on :{label}({key}), filled from the nodes with the label",
+                if *unique {
+                    "unique constraint"
+                } else {
+                    "index"
+                }
+            ),
+            Schema::Drop { name, .. } => format!("drop {name}"),
+            Schema::Show { .. } => "list the indexes".into(),
+        };
+        return Ok(QueryResult {
+            columns: vec!["step".into(), "operation".into(), "details".into()],
+            rows: vec![vec![
+                Value::Int(1),
+                Value::Str("SCHEMA".into()),
+                Value::Str(details),
+            ]],
+            stats: WriteStats::default(),
+            profile: None,
+        });
+    }
     let mut steps: Vec<(String, String)> = Vec::new();
     for (index, part) in statement.parts.iter().enumerate() {
         if index > 0 {
@@ -1626,11 +1942,11 @@ fn explain(statement: &Statement) -> QueryResult {
         }
         let mut bound = HashSet::new();
         for clause in &part.clauses {
-            steps.push((clause.name().into(), describe(clause, &bound)));
+            steps.push((clause.name().into(), describe(clause, &bound, info)));
             bound.extend(clause_variables(clause));
         }
     }
-    QueryResult {
+    Ok(QueryResult {
         columns: vec!["step".into(), "operation".into(), "details".into()],
         rows: steps
             .into_iter()
@@ -1645,7 +1961,7 @@ fn explain(statement: &Statement) -> QueryResult {
             .collect(),
         stats: WriteStats::default(),
         profile: None,
-    }
+    })
 }
 
 /// Variables a clause binds, for planning the clauses after it.
@@ -1719,19 +2035,16 @@ fn rel_text(rel: &RelPattern, direction: Direction) -> String {
 }
 
 /// How a pattern is matched: where it starts, then each expansion.
-fn describe_pattern(pattern: &Pattern, bound: &HashSet<String>) -> String {
+fn describe_pattern(
+    pattern: &Pattern,
+    bound: &HashSet<String>,
+    conditions: &[&Expr],
+    info: &PlanInfo,
+) -> String {
     let nodes = pattern.nodes();
     let is_bound = |var: &str| bound.contains(var);
-    let anchor = choose_anchor(&nodes, is_bound);
-    let start = nodes[anchor];
-    let how = match anchor_kind(start, &is_bound) {
-        Anchor::Bound => "the bound node",
-        Anchor::Id => "lookup by @id",
-        Anchor::LabelAndProperties => "label scan, then property filter",
-        Anchor::Label => "label scan",
-        Anchor::Scan => "scan of every node",
-    };
-    let mut parts = vec![format!("start at {} ({how})", node_text(start))];
+    let (anchor, source) = plan_anchor(&nodes, &is_bound, conditions, info);
+    let mut parts = vec![source.describe(&node_text(nodes[anchor]))];
     for step in anchor..pattern.steps.len() {
         let (rel, target) = &pattern.steps[step];
         parts.push(format!(
@@ -1751,7 +2064,7 @@ fn describe_pattern(pattern: &Pattern, bound: &HashSet<String>) -> String {
     parts.join(", ")
 }
 
-fn describe(clause: &Clause, bound: &HashSet<String>) -> String {
+fn describe(clause: &Clause, bound: &HashSet<String>, info: &PlanInfo) -> String {
     let projection_text = |projection: &Projection| {
         let mut parts = Vec::new();
         if projection.star {
@@ -1790,8 +2103,9 @@ fn describe(clause: &Clause, bound: &HashSet<String>) -> String {
         } => {
             let mut bound = bound.clone();
             let mut parts = Vec::new();
+            let conditions: Vec<&Expr> = filter.as_ref().map(conjuncts).unwrap_or_default();
             for pattern in patterns {
-                parts.push(describe_pattern(pattern, &bound));
+                parts.push(describe_pattern(pattern, &bound, &conditions, info));
                 bound.extend(pattern.variables().into_iter().map(str::to_owned));
             }
             let mut text = parts.join("; ");
@@ -1831,7 +2145,7 @@ fn describe(clause: &Clause, bound: &HashSet<String>) -> String {
             on_match,
         } => format!(
             "match or create: {}; {} ON CREATE, {} ON MATCH item(s)",
-            describe_pattern(pattern, bound),
+            describe_pattern(pattern, bound, &[], info),
             on_create.len(),
             on_match.len()
         ),

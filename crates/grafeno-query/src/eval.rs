@@ -4,10 +4,14 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use grafeno::{Direction, Edge, EdgeFilter, EdgeId, Node, NodeId, ReadTx, Timestamp, WriteTx};
+use grafeno::{
+    Direction, Edge, EdgeFilter, EdgeId, IndexRange, Node, NodeId, ReadTx, Timestamp, WriteTx,
+};
 
 use crate::QueryError;
 use crate::ast::{AGGREGATES, BinOp, Expr, Key, Quantifier, UnOp};
+use crate::limits::Budget;
+use crate::plan::PlanInfo;
 use crate::temporal::{self, DURATION_COMPONENTS, Duration, TIME_PARTS};
 use crate::value::{Value, compare, equals, sort_order};
 
@@ -19,7 +23,7 @@ pub type Params = HashMap<String, Value>;
 
 /// What expressions can read: the snapshot the query started on and, in a
 /// writing query, the write transaction, which sees the query's own writes
-/// and is read instead.
+/// and is read instead. Every read counts against the query's budget.
 pub(crate) struct Context<'a> {
     pub(crate) read: &'a ReadTx,
     pub(crate) write: Option<&'a WriteTx>,
@@ -28,10 +32,13 @@ pub(crate) struct Context<'a> {
     /// The edges patterns may follow: the enclosing `MATCH`'s `VALID AT`
     /// and `KNOWN AT`, for pattern predicates too.
     pub(crate) edges: &'a EdgeFilter,
+    pub(crate) info: &'a PlanInfo,
+    pub(crate) budget: &'a Budget,
 }
 
 impl Context<'_> {
     pub(crate) fn node(&self, id: NodeId) -> Result<Option<Node>, QueryError> {
+        self.budget.read(1)?;
         Ok(match self.write {
             Some(tx) => tx.node(self.ns, id)?,
             None => self.read.node(self.ns, id)?,
@@ -39,18 +46,26 @@ impl Context<'_> {
     }
 
     pub(crate) fn edge(&self, id: EdgeId) -> Result<Option<Edge>, QueryError> {
+        self.budget.read(1)?;
         Ok(match self.write {
             Some(tx) => tx.edge(self.ns, id)?,
             None => self.read.edge(self.ns, id)?,
         })
     }
 
-    /// Every node, or every node with `label`.
-    pub(crate) fn nodes(&self, label: Option<&str>) -> Result<Vec<Node>, QueryError> {
-        Ok(match self.write {
-            Some(tx) => tx.nodes_page(self.ns, label, None, usize::MAX)?,
-            None => self.read.nodes_page(self.ns, label, None, usize::MAX)?,
-        })
+    /// Up to `limit` nodes after `after`, of `label` or of every label.
+    pub(crate) fn nodes_page(
+        &self,
+        label: Option<&str>,
+        after: Option<NodeId>,
+        limit: usize,
+    ) -> Result<Vec<Node>, QueryError> {
+        let page = match self.write {
+            Some(tx) => tx.nodes_page(self.ns, label, after, limit)?,
+            None => self.read.nodes_page(self.ns, label, after, limit)?,
+        };
+        self.budget.read(page.len())?;
+        Ok(page)
     }
 
     pub(crate) fn neighbor_ids(
@@ -59,12 +74,26 @@ impl Context<'_> {
         direction: Direction,
         filter: &EdgeFilter,
     ) -> Result<Vec<(EdgeId, NodeId)>, QueryError> {
-        Ok(match self.write {
+        let found = match self.write {
             Some(tx) => tx.neighbor_ids(self.ns, from, direction, filter)?,
             None => self.read.neighbor_ids(self.ns, from, direction, filter)?,
-        })
+        };
+        self.budget.read(found.len().max(1))?;
+        Ok(found)
     }
 
+    pub(crate) fn index_lookup(
+        &self,
+        name: &str,
+        range: &IndexRange,
+    ) -> Result<Vec<NodeId>, QueryError> {
+        let found = match self.write {
+            Some(tx) => tx.index_lookup(self.ns, name, range, usize::MAX)?,
+            None => self.read.index_lookup(self.ns, name, range, usize::MAX)?,
+        };
+        self.budget.read(found.len().max(1))?;
+        Ok(found)
+    }
     fn text(&self, id: NodeId) -> Result<Option<String>, QueryError> {
         Ok(match self.write {
             Some(tx) => tx.text(self.ns, id)?,

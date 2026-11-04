@@ -50,6 +50,11 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
   `duration.between`, date parts and `date.truncate` for grouping by period;
   `temporal.series` with per-row `VALID AT` to count what was true at each
   point; bar and line charts in the Studio's script results.
+- **Phase 8.3, indexes and safe queries:** `CREATE INDEX`, unique
+  constraints, a planner that starts from indexes or the smallest label and
+  stops early for `LIMIT`; per-query limits (time, records read, rows held)
+  and cancellation, so one query cannot take the service down; an indexes
+  panel in the Studio.
 
 ## Installing
 

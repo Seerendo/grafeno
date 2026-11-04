@@ -39,6 +39,12 @@ pub(crate) const PROCEDURES: &[Procedure] = &[
         description: "Property names used by nodes and edges (reads every record).",
     },
     Procedure {
+        name: "db.indexes",
+        args: "",
+        columns: &["name", "label", "property", "unique", "entries"],
+        description: "Property indexes and unique constraints (also SHOW INDEXES).",
+    },
+    Procedure {
         name: "db.stats",
         args: "",
         columns: &["nodes", "edges", "texts", "vectors", "dimension"],
@@ -121,7 +127,7 @@ pub(crate) fn call(
         "db.edgeLabels" => counted(read.stats(ns)?.edge_labels),
         "db.propertyKeys" => {
             let mut keys = BTreeSet::new();
-            for node in ctx.nodes(None)? {
+            for node in read.nodes(ns)? {
                 keys.extend(node.props.keys().cloned());
             }
             for edge in read.edges(ns)? {
@@ -129,6 +135,19 @@ pub(crate) fn call(
             }
             keys.into_iter().map(|key| vec![Value::Str(key)]).collect()
         }
+        "db.indexes" => read
+            .indexes(ns)?
+            .into_iter()
+            .map(|info| {
+                vec![
+                    Value::Str(info.def.name),
+                    Value::Str(info.def.label),
+                    Value::Str(info.def.key),
+                    Value::Bool(info.def.unique),
+                    Value::Int(info.entries as i64),
+                ]
+            })
+            .collect(),
         "db.stats" => {
             let stats = read.stats(ns)?;
             vec![vec![

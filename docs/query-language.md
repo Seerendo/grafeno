@@ -171,6 +171,7 @@ CALL db.search('borrow checker', 5) YIELD node, score RETURN node.title, score;
 | `db.edgeLabels()` (`db.relationshipTypes()`) | `label`, `count` | edge labels and their counts |
 | `db.propertyKeys()` | `key` | property names of nodes and edges (reads every record) |
 | `db.stats()` | `nodes`, `edges`, `texts`, `vectors`, `dimension` | counts of the namespace |
+| `db.indexes()` | `name`, `label`, `property`, `unique`, `entries` | property indexes (also `SHOW INDEXES`) |
 | `db.search(text, limit = 10)` | `node`, `score` | full-text search (BM25), best first |
 | `db.searchVector(embedding, limit = 10)` | `node`, `score` | nearest nodes by embedding |
 | `temporal.series(start, end, step)` | `at` | times from start to end every step (see *Time and durations*) |
@@ -387,11 +388,52 @@ ones decide it.
 | `duration(x)`, `duration.between`, `duration.inMonths` / `inDays` / `inSeconds`, `date.truncate(unit, t)` | see *Time and durations* |
 | `exists(pattern)`, `exists(n.key)` | pattern predicate; whether a property is set |
 
+## Indexes and performance
+
+Without an index, a `MATCH` by property reads every node of its label:
+`MATCH (p:Person) WHERE p.age > 32` reads all `Person` nodes. An index on
+the label and property reads only the matching ones.
+
+```text
+CREATE INDEX FOR (p:Person) ON (p.age);                   // named Person_age
+CREATE INDEX people_by_name IF NOT EXISTS FOR (p:Person) ON (p.name);
+CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE; // Person_email_unique
+SHOW INDEXES;                                             // name, label, property, unique, entries
+SHOW CONSTRAINTS;
+DROP INDEX people_by_name;
+DROP CONSTRAINT Person_email_unique IF EXISTS;
+```
+
+- An index holds the nodes with the label whose property is a number, a
+  string or a boolean (lists, maps and `null` are not indexed). It is
+  filled when created and kept in the same transaction as every write.
+- A unique constraint is an index that refuses a second node with the
+  same value; creating one fails if duplicates already exist.
+- The planner uses an index for `n.key = v`, `{key: v}` in the pattern,
+  `n.key IN [...]`, `n.key STARTS WITH 'x'` and ranges (`>`, `>=`, `<`,
+  `<=`, and both ends together), when the value can be computed before the
+  match (literals, parameters, variables of earlier clauses). It compares
+  numbers as numbers (`= 7` finds `7.0`). A comparison with a time value,
+  or a property stored as another type, falls back to scanning the label.
+- Without a usable index, a pattern starts from its label with the fewest
+  nodes, or from a node bound by an earlier clause.
+- `MATCH … RETURN … LIMIT n` without `ORDER BY`, `DISTINCT` or aggregates
+  stops after the rows it needs.
+- `EXPLAIN` shows where each pattern starts (`index Person_age: … < age`,
+  `scan of :Person, 2000 nodes`); `PROFILE` adds the records each step read.
+- Indexes travel with exports and survive `rebuild`; `check` verifies them.
+
+**Limits.** Over HTTP and MCP, each query runs within limits, so one query
+cannot take the service down: 30 seconds, 50 million records read and a
+million rows held at once by default (`[query]` in `grafeno.toml`). A query
+over a limit fails with the code `query_limit` and changes nothing; a query
+whose client disconnects is cancelled. The library and the local shell run
+without limits (`grafeno_query::execute_with` takes them).
+
 ## Not supported (yet)
 
 - `CALL { … }` subqueries, pattern comprehensions (`[(a)-->(b) | b.name]`),
   map projections (`n {.name}`) and `=~` regular expressions.
-- Indexes on property values: a `MATCH` by property scans the nodes of its
-  label, or of the namespace without a label (phase 8.3).
+- Indexes on several properties at once, or on edge properties.
 - Graph algorithms as procedures (phase 8.5). Hybrid recall is in the shell's `\recall` and
   `\context`, and in the HTTP API.

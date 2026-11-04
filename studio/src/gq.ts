@@ -9,7 +9,8 @@ export const KEYWORDS = [
   "SKIP", "LIMIT", "CREATE", "SET", "REMOVE", "DELETE", "DETACH", "RETRACT", "VALID", "KNOWN", "AT", "AND",
   "OR", "XOR", "NOT", "IN", "IS", "NULL", "TRUE", "FALSE", "STARTS", "ENDS", "CONTAINS",
   "MERGE", "ON", "UNWIND", "UNION", "ALL", "CALL", "YIELD", "FOREACH", "CASE", "WHEN", "THEN",
-  "ELSE", "END", "EXISTS", "EXPLAIN", "PROFILE",
+  "ELSE", "END", "EXISTS", "EXPLAIN", "PROFILE", "INDEX", "INDEXES", "CONSTRAINT", "CONSTRAINTS",
+  "DROP", "SHOW", "FOR", "REQUIRE", "UNIQUE", "IF",
 ];
 
 export const FUNCTIONS = [

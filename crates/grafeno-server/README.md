@@ -125,8 +125,9 @@ whenever the port is reachable by anything but the application.
 All bodies are JSON. Everything under `/v1` needs `Authorization: Bearer
 <token>` when the server has a token. Errors look like
 `{"error": {"code": "not_found", "message": "…"}}`, with codes `bad_request`
-(malformed body), `invalid` (rejected input), `not_found`, `unauthorized` and
-`internal`.
+(malformed body), `invalid` (rejected input), `invalid_query` (a GQ error),
+`query_limit` (a GQ query over its time, reads or rows limit; see `[query]` in
+`grafeno.toml`), `not_found`, `unauthorized` and `internal`.
 
 Ids are UUIDs. Times in responses are microseconds since the Unix epoch;
 requests accept either that or an ISO 8601 string (`2024-05-01`,

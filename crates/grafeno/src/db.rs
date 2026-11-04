@@ -7,6 +7,7 @@ use redb::{
     ReadableTableMetadata, TableDefinition, WriteTransaction,
 };
 
+use crate::index::{INDEX_ENTRIES, INDEXES, IndexKey};
 use crate::memory::names_of;
 use crate::stats::{
     NamespaceInfo, NamespaceStats, bump_edge_label, bump_namespace, bump_node_label, label_counts,
@@ -30,7 +31,9 @@ use crate::{Hit, text, vector};
 ///    (`text_postings` replaces `postings`).
 /// 4. Adds the `names` index (entity resolution) and the `memory` table
 ///    (importance and accesses).
-pub const SCHEMA_VERSION: u64 = 4;
+/// 5. Adds property indexes (`indexes`, `index_entries`), empty until one
+///    is declared.
+pub const SCHEMA_VERSION: u64 = 5;
 
 /// The tables replaced in version 3, by name (their types no longer matter).
 const OLD_ADJ_OUT: TableDefinition<AdjKey, u128> = TableDefinition::new("adj_out");
@@ -82,6 +85,8 @@ impl Grafeno {
         tx.open_table(EDGE_LABEL_COUNTS).map_err(storage)?;
         tx.open_table(NAMES).map_err(storage)?;
         tx.open_table(MEMORY).map_err(storage)?;
+        tx.open_table(INDEXES).map_err(storage)?;
+        tx.open_table(INDEX_ENTRIES).map_err(storage)?;
 
         let stored = tx
             .open_table(META)
@@ -147,6 +152,8 @@ impl Grafeno {
             edge_label_counts: tx.open_table(EDGE_LABEL_COUNTS).map_err(storage)?,
             names: tx.open_table(NAMES).map_err(storage)?,
             memory: tx.open_table(MEMORY).map_err(storage)?,
+            indexes: tx.open_table(INDEXES).map_err(storage)?,
+            index_entries: tx.open_table(INDEX_ENTRIES).map_err(storage)?,
             _tx: tx,
         })
     }
@@ -317,6 +324,8 @@ pub struct ReadTx {
     pub(crate) edge_label_counts: ReadOnlyTable<CountKey, u64>,
     pub(crate) names: ReadOnlyTable<LabelKey, ()>,
     pub(crate) memory: ReadOnlyTable<RecordKey, (f32, u32, i64)>,
+    pub(crate) indexes: ReadOnlyTable<(&'static str, &'static str), &'static [u8]>,
+    pub(crate) index_entries: ReadOnlyTable<IndexKey, ()>,
     _tx: ReadTransaction,
 }
 
@@ -669,6 +678,7 @@ impl WriteTx {
         }
         text::remove(&self.tx, ns, id)?;
         vector::remove(&self.tx, &mut self.vectors, ns, id)?;
+        self.index_node(ns, None, Some(&node))?;
         let mut names = self.tx.open_table(NAMES).map_err(storage)?;
         for name in names_of(&node) {
             names
@@ -819,6 +829,8 @@ impl WriteTx {
             .map_err(storage)?
             .insert((ns, id), bytes.as_slice())
             .map_err(storage)?;
+
+        self.index_node(ns, Some(node), previous)?;
 
         let old_names = previous.map(names_of).unwrap_or_default();
         let new_names = names_of(node);

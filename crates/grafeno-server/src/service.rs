@@ -22,6 +22,8 @@ pub struct ServerSettings {
     pub addr: SocketAddr,
     pub token: Option<String>,
     pub options: Options,
+    /// Limits for each GQ query.
+    pub limits: grafeno_query::Limits,
 }
 
 /// Values given on the command line (or in the environment), if any.
@@ -64,6 +66,7 @@ impl ServerSettings {
                 studio: !overrides.no_studio && config.studio.unwrap_or(true),
                 cors_origins,
             },
+            limits: config.query.limits(),
         }
     }
 
@@ -83,6 +86,7 @@ pub fn run(
     let state = AppState {
         db: Arc::new(settings.open()?),
         token: settings.token.as_deref().map(Arc::from),
+        limits: settings.limits.clone(),
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

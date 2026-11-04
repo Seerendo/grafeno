@@ -7,6 +7,11 @@
 //! token = "…"            # every /v1 request needs `Authorization: Bearer <token>`
 //! studio = true          # serve Grafeno Studio at /studio/
 //! cors_origins = []      # origins allowed to call the API from a browser
+//!
+//! [query]                # limits for each GQ query; 0 turns one off
+//! timeout_secs = 30
+//! max_reads = 50000000   # nodes, edges and index entries read
+//! max_rows = 1000000     # rows held at once
 //! ```
 
 use std::net::SocketAddr;
@@ -29,6 +34,49 @@ pub struct Config {
     pub studio: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cors_origins: Vec<String>,
+    #[serde(default, skip_serializing_if = "QueryConfig::is_empty")]
+    pub query: QueryConfig,
+}
+
+/// Limits for each GQ query over HTTP and MCP. Missing values take the
+/// defaults of [`grafeno_query::Limits::standard`]; 0 turns a limit off.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_reads: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rows: Option<usize>,
+}
+
+impl QueryConfig {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn limits(&self) -> grafeno_query::Limits {
+        let standard = grafeno_query::Limits::standard();
+        grafeno_query::Limits {
+            timeout: match self.timeout_secs {
+                Some(secs) if secs > 0.0 => Some(std::time::Duration::from_secs_f64(secs)),
+                Some(_) => None,
+                None => standard.timeout,
+            },
+            max_reads: match self.max_reads {
+                Some(0) => None,
+                Some(max) => Some(max),
+                None => standard.max_reads,
+            },
+            max_rows: match self.max_rows {
+                Some(0) => None,
+                Some(max) => Some(max),
+                None => standard.max_rows,
+            },
+            cancel: None,
+        }
+    }
 }
 
 impl Config {
@@ -98,6 +146,7 @@ pub fn init(path: &Path, db: &Path, addr: SocketAddr, force: bool) -> Result<Con
         token: Some(new_token()?),
         studio: Some(true),
         cors_origins: Vec::new(),
+        query: QueryConfig::default(),
     };
     let text = format!(
         "# Grafeno server settings. Restart the service after changing them.\n\

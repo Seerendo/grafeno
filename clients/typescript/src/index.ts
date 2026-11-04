@@ -277,6 +277,8 @@ export interface PlanStep {
   details: string;
   /** Rows after the step. */
   rows?: number;
+  /** Records read: nodes, edges, adjacency and index entries. */
+  reads?: number;
   time_ms?: number;
 }
 

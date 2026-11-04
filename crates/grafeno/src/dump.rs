@@ -8,6 +8,7 @@
 //! {"type":"header","format":"grafeno-export","version":1,"exported_at":1793664000000000}
 //! {"type":"node","ns":"vault","node":{"id":"…","labels":["Note"],…},"text":"…","embedding":[…]}
 //! {"type":"edge","ns":"vault","edge":{"id":"…","label":"links_to","from":"…","to":"…",…}}
+//! {"type":"index","ns":"vault","index":{"name":"Note_title","label":"Note","key":"title","unique":false}}
 //! ```
 //!
 //! Records keep their ids and timestamps. Embeddings are exported normalized.
@@ -19,6 +20,7 @@ use grafeno_core::{Edge, Error, Node, NodeId, Result, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::db::{Grafeno, ReadTx};
+use crate::index::IndexDef;
 use crate::memory::MemoryState;
 use crate::store::{decode, storage};
 
@@ -50,6 +52,11 @@ pub enum Record {
         ns: String,
         edge: Edge,
     },
+    /// A declared property index, written before the namespace's nodes.
+    Index {
+        ns: String,
+        index: IndexDef,
+    },
 }
 
 /// A line as read. Deserializing it directly (instead of through serde's
@@ -68,6 +75,7 @@ struct RawRecord {
     embedding: Option<Vec<f32>>,
     memory: Option<MemoryState>,
     edge: Option<Edge>,
+    index: Option<IndexDef>,
 }
 
 impl RawRecord {
@@ -89,6 +97,10 @@ impl RawRecord {
             "edge" => Record::Edge {
                 ns: self.ns.clone().ok_or_else(|| missing("ns"))?,
                 edge: self.edge.clone().ok_or_else(|| missing("edge"))?,
+            },
+            "index" => Record::Index {
+                ns: self.ns.clone().ok_or_else(|| missing("ns"))?,
+                index: self.index.clone().ok_or_else(|| missing("index"))?,
             },
             other => return Err(format!("unknown record type {other:?}")),
         })
@@ -134,6 +146,15 @@ impl ReadTx {
             ..DumpStats::default()
         };
         for ns in &names {
+            for index in self.index_defs(ns)? {
+                write_record(
+                    out,
+                    &Record::Index {
+                        ns: ns.clone(),
+                        index,
+                    },
+                )?;
+            }
             for item in self.nodes.range((ns.as_str(), 0u128)..).map_err(storage)? {
                 let (key, value) = item.map_err(storage)?;
                 if key.value().0 != ns {
@@ -225,6 +246,9 @@ impl Grafeno {
                         }
                         namespaces.insert(ns);
                         stats.nodes += 1;
+                    }
+                    Record::Index { ns, index } => {
+                        tx.create_index(&ns, index).map_err(|e| at(e.to_string()))?;
                     }
                     Record::Edge { ns, edge } => {
                         tx.restore_edge(&ns, edge).map_err(|e| at(e.to_string()))?;

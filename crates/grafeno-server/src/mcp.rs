@@ -561,8 +561,14 @@ impl McpServer {
         let ns = self.ns(&args.namespace);
         let params = grafeno_query::params_from_json(&args.params);
         let read = self.db.begin_read().map_err(describe)?;
-        let result = grafeno_query::execute_read(&read, ns, &args.query, &params)
-            .map_err(|error| error.to_string())?;
+        let result = grafeno_query::execute_read_with(
+            &read,
+            ns,
+            &args.query,
+            &params,
+            &grafeno_query::Limits::standard(),
+        )
+        .map_err(|error| error.to_string())?;
         let total = result.rows.len();
         let mut json = result.to_json();
         if let Some(rows) = json["rows"].as_array_mut() {

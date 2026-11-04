@@ -13,6 +13,7 @@ fn app(token: Option<&str>) -> Router {
     router(AppState {
         db: Arc::new(Grafeno::in_memory().unwrap()),
         token: token.map(Arc::from),
+        limits: grafeno_query::Limits::standard(),
     })
 }
 
@@ -521,6 +522,7 @@ async fn studio_and_cors_options() {
     let state = || AppState {
         db: Arc::new(Grafeno::in_memory().unwrap()),
         token: Some(Arc::from("secret")),
+        limits: grafeno_query::Limits::standard(),
     };
     let request = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
 
@@ -761,4 +763,50 @@ async fn memory_endpoints() {
     assert_eq!(archived["archived"], 1);
     let (_, check) = call(&app, "GET", "/v1/agent/check", None).await;
     assert_eq!(check["problems"], json!([]), "{check}");
+}
+
+#[tokio::test]
+async fn queries_over_their_limits_fail_cleanly() {
+    let app = router(AppState {
+        db: Arc::new(Grafeno::in_memory().unwrap()),
+        token: None,
+        limits: grafeno_query::Limits {
+            max_reads: Some(50),
+            ..grafeno_query::Limits::none()
+        },
+    });
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/q/query",
+        Some(json!({ "query": "UNWIND range(1, 200) AS i CREATE (:N {i: i})" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/q/query",
+        Some(json!({ "query": "MATCH (n:N) RETURN count(n)" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "query_limit");
+    // An index makes the same question cheap enough.
+    call(
+        &app,
+        "POST",
+        "/v1/q/query",
+        Some(json!({ "query": "CREATE INDEX FOR (n:N) ON (n.i)" })),
+    )
+    .await;
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/q/query",
+        Some(json!({ "query": "MATCH (n:N) WHERE n.i > 195 RETURN count(n)" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["rows"], json!([[5]]));
 }

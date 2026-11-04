@@ -71,6 +71,8 @@ const SNIPPETS: { name: string; text: string }[] = [
   { name: "Group by month", text: "MATCH (n:Note)\nWITH date.truncate('month', n.@created_at) AS month, count(*) AS notes\nRETURN date(month) AS month, notes ORDER BY month;" },
   { name: "How long facts held", text: "MATCH (p)-[r:works_at]->(c)\nRETURN p.name, c.name,\n  duration.between(r.@valid_from, coalesce(r.@valid_to, datetime())) AS held;" },
   { name: "Valid at each month", text: "CALL temporal.series('2024-01-01', '2024-12-01', 'P1M') YIELD at\nOPTIONAL MATCH (p)-[r:works_at]->(c) VALID AT at\nRETURN date(at) AS month, count(r) AS facts ORDER BY month;" },
+  { name: "Create an index", text: "CREATE INDEX FOR (p:Person) ON (p.age);\n\nSHOW INDEXES;" },
+  { name: "Unique constraint", text: "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE;" },
   { name: "Query plan (EXPLAIN)", text: "EXPLAIN MATCH (p:Person)-[:works_at]->(c)\nRETURN p.name, c.name;" },
   { name: "Cost per step (PROFILE)", text: "PROFILE MATCH (p:Person)-[:works_at]->(c)\nRETURN c.name, count(p);" },
 ];
@@ -510,8 +512,8 @@ export function ScriptsView() {
                 <Chart key={`${tab}-${current.columns.join(",")}`} columns={current.columns} rows={current.rows} />
               ) : mode === "profile" && current.profile ? (
                 <ResultTable
-                  columns={["step", "operation", "rows", "ms", "details"]}
-                  rows={current.profile.map((step) => [step.step, step.operation, step.rows ?? null, (step.time_ms ?? 0).toFixed(2), step.details])}
+                  columns={["step", "operation", "rows", "reads", "ms", "details"]}
+                  rows={current.profile.map((step) => [step.step, step.operation, step.rows ?? null, step.reads ?? null, (step.time_ms ?? 0).toFixed(2), step.details])}
                 />
               ) : mode === "json" ? (
                 <pre className="json-view">{JSON.stringify(current.rows, null, 2)}</pre>

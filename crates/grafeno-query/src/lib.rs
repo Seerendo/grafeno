@@ -37,7 +37,9 @@ mod ast;
 mod eval;
 mod exec;
 mod lexer;
+mod limits;
 mod parser;
+mod plan;
 mod procedures;
 mod temporal;
 mod value;
@@ -46,8 +48,10 @@ use std::fmt;
 
 pub use eval::Params;
 pub use exec::{
-    MAX_PATH_LENGTH, PlanStep, QueryResult, WriteStats, execute, execute_read, is_write,
+    MAX_PATH_LENGTH, PlanStep, QueryResult, WriteStats, execute, execute_read, execute_read_with,
+    execute_with, is_write,
 };
+pub use limits::Limits;
 pub use temporal::Duration;
 pub use value::Value;
 
@@ -60,6 +64,9 @@ pub struct QueryError {
     pub column: Option<usize>,
     /// The engine failed (storage or serialization), not the query.
     pub internal: bool,
+    /// The query went over one of its [`Limits`] (time, reads, rows) or
+    /// was cancelled.
+    pub limit: bool,
 }
 
 impl QueryError {
@@ -72,6 +79,7 @@ impl QueryError {
             line: Some(line),
             column: Some(column),
             internal: false,
+            limit: false,
         }
     }
 
@@ -81,6 +89,14 @@ impl QueryError {
             line: None,
             column: None,
             internal: false,
+            limit: false,
+        }
+    }
+
+    pub(crate) fn limit(message: impl Into<String>) -> Self {
+        Self {
+            limit: true,
+            ..Self::runtime(message)
         }
     }
 }

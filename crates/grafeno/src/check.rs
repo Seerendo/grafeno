@@ -11,6 +11,7 @@ use redb::ReadableTable;
 use serde::Serialize;
 
 use crate::db::{ReadTx, WriteTx};
+use crate::index::{INDEX_ENTRIES, expected_entries, stored_entries};
 use crate::memory::names_of;
 use crate::stats::{bump_edge_label, bump_namespace, label_counts};
 use crate::store::{
@@ -217,6 +218,40 @@ impl ReadTx {
             }
         }
 
+        // Property indexes: the entries the nodes call for, and uniqueness.
+        let defs = self.index_defs(ns)?;
+        let expected = expected_entries(&defs, &nodes);
+        let stored = stored_entries(&self.index_entries, ns)?;
+        if expected != stored {
+            let expected_set: HashSet<_> = expected.iter().collect();
+            let stored_set: HashSet<_> = stored.iter().collect();
+            for (name, _, node) in expected_set.difference(&stored_set) {
+                problems.push(format!(
+                    "index {name:?} misses node {}",
+                    NodeId::from_u128(*node)
+                ));
+            }
+            for (name, _, node) in stored_set.difference(&expected_set) {
+                problems.push(format!(
+                    "index {name:?} has a stale entry for node {}",
+                    NodeId::from_u128(*node)
+                ));
+            }
+        }
+        for def in defs.iter().filter(|def| def.unique) {
+            let mut seen = HashMap::new();
+            for node in nodes.iter().filter(|node| node.has_label(&def.label)) {
+                if let Some(value) = node.props.get(&def.key)
+                    && let Some(other) = seen.insert(value.to_string(), node.id)
+                {
+                    problems.push(format!(
+                        "nodes {other} and {} share {} = {value} in unique index {:?}",
+                        node.id, def.key, def.name
+                    ));
+                }
+            }
+        }
+
         let texts = text::check(
             &self.texts,
             &self.text_lengths,
@@ -300,6 +335,12 @@ impl WriteTx {
                 .retain_in((ns, "", 0u128).., |key, _| other(key.0))
                 .map_err(storage)?;
         }
+        // Index definitions stay; their entries are rebuilt with the nodes.
+        let empty: &[u8] = &[];
+        tx.open_table(INDEX_ENTRIES)
+            .map_err(storage)?
+            .retain_in((ns, "", empty, 0u128).., |key, _| other(key.0))
+            .map_err(storage)?;
         // Memory states are records too: only those of missing nodes go.
         let ids: HashSet<u128> = nodes.iter().map(|node| node.id.as_u128()).collect();
         tx.open_table(MEMORY)

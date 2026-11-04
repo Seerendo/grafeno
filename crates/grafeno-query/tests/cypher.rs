@@ -386,7 +386,7 @@ fn explain_and_profile() {
     assert!(
         steps[0]
             .1
-            .contains("start at (a:Person {name}) (label scan, then property filter)"),
+            .contains("start at (a:Person {name}) (scan of :Person, 4 nodes)"),
         "{}",
         steps[0].1
     );

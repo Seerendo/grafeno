@@ -671,12 +671,16 @@ fn print_result(output: &Value) {
                     step["step"].clone(),
                     step["operation"].clone(),
                     step["rows"].clone(),
+                    step["reads"].clone(),
                     Value::String(format!("{:.2}", step["time_ms"].as_f64().unwrap_or(0.0))),
                     step["details"].clone(),
                 ]
             })
             .collect();
-        print_table(&["step", "operation", "rows", "ms", "details"], &rows);
+        print_table(
+            &["step", "operation", "rows", "reads", "ms", "details"],
+            &rows,
+        );
     }
 }
 

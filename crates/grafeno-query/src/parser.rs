@@ -5,7 +5,7 @@ use grafeno::Direction;
 use crate::QueryError;
 use crate::ast::{
     BinOp, Clause, Expr, Key, Mode, NodePattern, Pattern, ProcedureCall, Projection, Quantifier,
-    Query, RelPattern, RemoveItem, ReturnItem, SetItem, Statement, UnOp,
+    Query, RelPattern, RemoveItem, ReturnItem, Schema, SetItem, Statement, UnOp,
 };
 use crate::lexer::{Spanned, Token, lex};
 use crate::value::Value;
@@ -132,6 +132,14 @@ impl Parser<'_> {
         } else {
             Mode::Run
         };
+        if let Some(schema) = self.schema()? {
+            return Ok(Statement {
+                mode,
+                parts: Vec::new(),
+                union_all: Vec::new(),
+                schema: Some(schema),
+            });
+        }
         let mut parts = vec![self.query()?];
         let mut union_all = Vec::new();
         while self.eat_keyword("UNION") {
@@ -142,7 +150,119 @@ impl Parser<'_> {
             mode,
             parts,
             union_all,
+            schema: None,
         })
+    }
+
+    /// `CREATE INDEX`, `CREATE CONSTRAINT`, `DROP INDEX`, `DROP CONSTRAINT`,
+    /// `SHOW INDEXES` or `SHOW CONSTRAINTS`, if the statement is one.
+    fn schema(&mut self) -> Result<Option<Schema>, QueryError> {
+        let what = |parser: &Self, at: usize| {
+            if parser.keyword_at(at, "INDEX") || parser.keyword_at(at, "INDEXES") {
+                Some(false)
+            } else if parser.keyword_at(at, "CONSTRAINT") || parser.keyword_at(at, "CONSTRAINTS") {
+                Some(true)
+            } else {
+                None
+            }
+        };
+        if self.at_keyword("SHOW") {
+            self.advance();
+            let constraints = what(self, 0)
+                .ok_or_else(|| self.unexpected("INDEXES or CONSTRAINTS after SHOW"))?;
+            self.advance();
+            return Ok(Some(Schema::Show { constraints }));
+        }
+        if self.at_keyword("DROP") {
+            self.advance();
+            let constraint =
+                what(self, 0).ok_or_else(|| self.unexpected("INDEX or CONSTRAINT after DROP"))?;
+            self.advance();
+            let name = self.ident("the name to drop")?;
+            let if_exists = self.at_keyword("IF") && self.keyword_at(1, "EXISTS");
+            if if_exists {
+                self.position += 2;
+            }
+            return Ok(Some(Schema::Drop {
+                name,
+                constraint,
+                if_exists,
+            }));
+        }
+        let Some(unique) = self.at_keyword("CREATE").then(|| what(self, 1)).flatten() else {
+            return Ok(None);
+        };
+        self.position += 2;
+        let mut name = None;
+        if matches!(self.peek(), Token::Ident(_))
+            && !self.at_keyword("IF")
+            && !self.at_keyword("FOR")
+            && !self.at_keyword("ON")
+        {
+            name = Some(self.ident("a name")?);
+        }
+        let if_not_exists =
+            self.at_keyword("IF") && self.keyword_at(1, "NOT") && self.keyword_at(2, "EXISTS");
+        if if_not_exists {
+            self.position += 3;
+        }
+        // The older form: CREATE INDEX ON :Label(key)
+        if !unique && self.eat_keyword("ON") {
+            self.expect(Token::Colon, "`:Label`")?;
+            let label = self.ident("a label")?;
+            self.expect(Token::LParen, "`(`")?;
+            let key = self.ident("a property")?;
+            self.expect(Token::RParen, "`)`")?;
+            return Ok(Some(Schema::Create {
+                name,
+                label,
+                key,
+                unique,
+                if_not_exists,
+            }));
+        }
+        self.expect_keyword("FOR")?;
+        self.expect(Token::LParen, "`(`")?;
+        let var = self.ident("a variable")?;
+        self.expect(Token::Colon, "`:Label`")?;
+        let label = self.ident("a label")?;
+        self.expect(Token::RParen, "`)`")?;
+        let property = |parser: &mut Self| -> Result<String, QueryError> {
+            let start = parser.start();
+            let owner = parser.ident("a variable")?;
+            if owner != var {
+                return Err(QueryError::at(
+                    parser.source,
+                    start,
+                    format!("expected `{var}`, the variable of the pattern"),
+                ));
+            }
+            parser.expect(Token::Dot, "`.`")?;
+            parser.ident("a property")
+        };
+        let key = if unique {
+            self.expect_keyword("REQUIRE")?;
+            let key = property(self)?;
+            self.expect_keyword("IS")?;
+            self.expect_keyword("UNIQUE")?;
+            key
+        } else {
+            self.expect_keyword("ON")?;
+            self.expect(Token::LParen, "`(`")?;
+            let key = property(self)?;
+            if self.peek() == &Token::Comma {
+                return Err(self.error("an index covers one property"));
+            }
+            self.expect(Token::RParen, "`)`")?;
+            key
+        };
+        Ok(Some(Schema::Create {
+            name,
+            label,
+            key,
+            unique,
+            if_not_exists,
+        }))
     }
 
     fn query(&mut self) -> Result<Query, QueryError> {

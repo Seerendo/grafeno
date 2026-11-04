@@ -99,6 +99,22 @@ copies: 100 notes with text cost 17 ms together, 170 µs each.
 | `src/check.rs` tests         | Damage to each derived structure is detected, and `rebuild_indexes` repairs it. |
 | `src/db.rs` tests            | Layout version 1 and 2 files are upgraded on open (counters; new adjacency and postings, old tables dropped); newer layouts are refused. |
 
+## Property indexes (`crates/grafeno-query/examples/index_bench.rs`)
+
+One GQ query on 100,000 `:Person` nodes (ages 0 to 99), in memory, release
+build, before and after `CREATE INDEX FOR (p:Person) ON (p.age)`. Reads are
+the records counted by `PROFILE`.
+
+| Query | Without index | With index |
+| --- | --- | --- |
+| `WHERE p.age > 97` (2% of the nodes), `count(p)` | 233 ms, 100,000 reads | 10.7 ms, 6,000 reads |
+| `{age: 42}` (1%), `count(p)` | 200 ms, 100,000 reads | 3.6 ms, 2,000 reads |
+| `WHERE p.age = 42 … LIMIT 10` | 2.4 ms, 1,024 reads | 0.38 ms, 1,064 reads |
+
+Without an index, a `LIMIT` already stops the scan after the first page of
+candidates. A full label scan costs about 2 µs per node, most of it
+decoding the node record.
+
 ## Remaining limits
 
 - **Vector search reads each visited vector from redb** (about 0.4 µs per

@@ -12,6 +12,29 @@ pub(crate) struct Statement {
     pub(crate) parts: Vec<Query>,
     /// `UNION ALL` (keep duplicates) or `UNION`; one entry per join.
     pub(crate) union_all: Vec<bool>,
+    /// A schema command instead of a query (`parts` is then empty).
+    pub(crate) schema: Option<Schema>,
+}
+
+/// Index and constraint commands.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Schema {
+    /// `CREATE INDEX` or, with `unique`, `CREATE CONSTRAINT … IS UNIQUE`.
+    Create {
+        name: Option<String>,
+        label: String,
+        key: String,
+        unique: bool,
+        if_not_exists: bool,
+    },
+    /// `DROP INDEX` / `DROP CONSTRAINT`.
+    Drop {
+        name: String,
+        constraint: bool,
+        if_exists: bool,
+    },
+    /// `SHOW INDEXES` / `SHOW CONSTRAINTS`.
+    Show { constraints: bool },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -26,9 +49,14 @@ pub(crate) enum Mode {
 
 impl Statement {
     pub(crate) fn writes(&self) -> bool {
-        self.parts
-            .iter()
-            .any(|part| part.clauses.iter().any(Clause::writes))
+        match &self.schema {
+            Some(Schema::Show { .. }) => false,
+            Some(_) => true,
+            None => self
+                .parts
+                .iter()
+                .any(|part| part.clauses.iter().any(Clause::writes)),
+        }
     }
 }
 

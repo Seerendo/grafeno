@@ -138,6 +138,11 @@ addr = "127.0.0.1:7810"     # "0.0.0.0:7810" listens on every network interface
 token = "…"                 # every /v1 request needs `Authorization: Bearer <token>`
 studio = true               # serve Grafeno Studio at /studio/
 cors_origins = []           # origins allowed to call the API from a browser ("*": any)
+
+[query]                     # limits for each GQ query over HTTP and MCP; 0 turns one off
+timeout_secs = 30
+max_reads = 50000000        # nodes, edges and index entries read
+max_rows = 1000000          # rows held at once
 ```
 
 Flags and environment variables (`GRAFENO_DB`, `GRAFENO_ADDR`,
