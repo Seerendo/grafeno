@@ -394,8 +394,13 @@ export class Grafeno {
   }
 
   /** Imports a JSON Lines export in one transaction: all of it or nothing. */
-  async import(dump: string): Promise<DumpStats> {
-    const response = await this.#send("POST", "/v1/import", dump, "application/x-ndjson");
+  /**
+   * Imports an export. `bulk` loads it in chunks: faster for large exports,
+   * but an error keeps the chunks before it.
+   */
+  async import(dump: string, options: { bulk?: boolean } = {}): Promise<DumpStats> {
+    const path = options.bulk ? "/v1/import?bulk=true" : "/v1/import";
+    const response = await this.#send("POST", path, dump, "application/x-ndjson");
     return (await response.json()) as DumpStats;
   }
 

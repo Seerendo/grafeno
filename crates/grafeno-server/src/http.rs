@@ -27,9 +27,44 @@ const BODY_LIMIT: usize = 32 * 1024 * 1024;
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<Grafeno>,
+    /// Commits concurrent writes in groups.
+    pub writer: Arc<grafeno::Writer>,
     pub token: Option<Arc<str>>,
     /// Limits for each GQ query.
     pub limits: grafeno_query::Limits,
+    /// Requests being served under `/v1`; beyond its permits the server
+    /// answers 503 instead of piling up work.
+    pub in_flight: Arc<tokio::sync::Semaphore>,
+}
+
+/// Requests served at once under `/v1` by default.
+pub const MAX_REQUESTS: usize = 512;
+
+impl AppState {
+    /// The state for `db`, with its group-commit writer, the standard query
+    /// limits and room for [`MAX_REQUESTS`] requests at once.
+    pub fn new(db: Arc<Grafeno>, token: Option<&str>) -> Self {
+        Self {
+            writer: Arc::new(grafeno::Writer::new(
+                db.clone(),
+                grafeno::WriterOptions::default(),
+            )),
+            db,
+            token: token.map(Arc::from),
+            limits: grafeno_query::Limits::standard(),
+            in_flight: Arc::new(tokio::sync::Semaphore::new(MAX_REQUESTS)),
+        }
+    }
+
+    pub fn with_limits(mut self, limits: grafeno_query::Limits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    pub fn with_max_requests(mut self, max: usize) -> Self {
+        self.in_flight = Arc::new(tokio::sync::Semaphore::new(max.max(1)));
+        self
+    }
 }
 
 /// What the HTTP server offers besides the API.
@@ -134,7 +169,8 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/{ns}/archive", post(archive_nodes))
         .route("/{ns}/consolidation", get(consolidation))
         .route("/{ns}/summaries", post(summaries))
-        .route_layer(middleware::from_fn_with_state(state.clone(), auth));
+        .route_layer(middleware::from_fn_with_state(state.clone(), auth))
+        .route_layer(middleware::from_fn_with_state(state.clone(), admit));
     let mut app = Router::new().route("/health", get(health)).nest("/v1", v1);
     if options.studio {
         app = app
@@ -207,6 +243,7 @@ impl From<Error> for ApiError {
             ErrorKind::BadRequest => (StatusCode::BAD_REQUEST, "invalid"),
             ErrorKind::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             ErrorKind::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+            ErrorKind::Busy => (StatusCode::SERVICE_UNAVAILABLE, "busy"),
         };
         Self {
             status,
@@ -219,11 +256,31 @@ impl From<Error> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let body = json!({ "error": { "code": self.code, "message": self.message } });
-        (self.status, Json(body)).into_response()
+        let mut response = (self.status, Json(body)).into_response();
+        if self.status == StatusCode::SERVICE_UNAVAILABLE {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
+        }
+        response
     }
 }
 
 type ApiResult<T> = Result<T, ApiError>;
+
+/// Runs a write through the group-commit writer. `work` may run more than
+/// once (when another write of its group fails), so it takes its inputs by
+/// reference or clones them.
+async fn write<T: Send + 'static>(
+    state: &AppState,
+    work: impl Fn(&mut WriteTx) -> grafeno::Result<T> + Send + 'static,
+) -> ApiResult<T> {
+    let writer = state.writer.clone();
+    tokio::task::spawn_blocking(move || writer.write(work))
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .map_err(ApiError::from)
+}
 
 /// Runs engine work on the blocking pool: redb calls are synchronous.
 async fn blocking<T: Send + 'static>(
@@ -315,6 +372,20 @@ fn parse_edge_id(text: &str) -> grafeno::Result<EdgeId> {
 
 // ---------------------------------------------------------------- handlers
 
+/// Turns requests away with 503 (and `Retry-After`) when too many are in
+/// flight, instead of queueing without bound.
+async fn admit(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    match state.in_flight.clone().try_acquire_owned() {
+        Ok(_permit) => next.run(request).await,
+        Err(_) => ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "busy",
+            message: "the server is busy: retry in a moment".into(),
+        }
+        .into_response(),
+    }
+}
+
 async fn health() -> Json<Value> {
     Json(json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") }))
 }
@@ -330,17 +401,15 @@ async fn create_node(
     Path(ns): Path<String>,
     Body(input): Body<NodeInput>,
 ) -> ApiResult<(StatusCode, Json<Upserted>)> {
-    let result = blocking(&state, move |db| {
-        db.write(|tx| match input.id {
-            Some(id) => {
-                let created = tx.upsert_node(&ns, id, input.into_new())?;
-                Ok(Upserted { id, created })
-            }
-            None => Ok(Upserted {
-                id: tx.create_node(&ns, input.into_new())?,
-                created: true,
-            }),
-        })
+    let result = write(&state, move |tx| match input.id {
+        Some(id) => {
+            let created = tx.upsert_node(&ns, id, input.clone().into_new())?;
+            Ok(Upserted { id, created })
+        }
+        None => Ok(Upserted {
+            id: tx.create_node(&ns, input.clone().into_new())?,
+            created: true,
+        }),
     })
     .await?;
     let status = if result.created {
@@ -362,8 +431,8 @@ async fn put_node(
             "the id in the body does not match the path",
         ));
     }
-    let created = blocking(&state, move |db| {
-        db.write(|tx| tx.upsert_node(&ns, id, input.into_new()))
+    let created = write(&state, move |tx| {
+        tx.upsert_node(&ns, id, input.clone().into_new())
     })
     .await?;
     let status = if created {
@@ -509,8 +578,12 @@ async fn patch_node(
     Body(patch): Body<PatchNode>,
 ) -> ApiResult<Json<NodeOutput>> {
     let id = parse_id(&id)?;
+    let patched = ns.clone();
+    write(&state, move |tx| {
+        apply_patch(tx, &patched, id, patch.clone())
+    })
+    .await?;
     let node = blocking(&state, move |db| {
-        db.write(|tx| apply_patch(tx, &ns, id, patch))?;
         let read = db.begin_read()?;
         let node = read.node(&ns, id)?.ok_or(Error::NodeNotFound(id))?;
         NodeOutput::load(&read, &ns, node)
@@ -524,7 +597,7 @@ async fn delete_node(
     Path((ns, id)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
     let id = parse_id(&id)?;
-    blocking(&state, move |db| db.write(|tx| tx.delete_node(&ns, id))).await?;
+    write(&state, move |tx| tx.delete_node(&ns, id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -569,7 +642,7 @@ async fn create_edge(
     Body(input): Body<EdgeInput>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let new = input.into_new(&HashMap::new())?;
-    let id = blocking(&state, move |db| db.write(|tx| tx.create_edge(&ns, new))).await?;
+    let id = write(&state, move |tx| tx.create_edge(&ns, new.clone())).await?;
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
 }
 
@@ -592,7 +665,7 @@ async fn delete_edge(
     Path((ns, id)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
     let id = parse_edge_id(&id)?;
-    blocking(&state, move |db| db.write(|tx| tx.delete_edge(&ns, id))).await?;
+    write(&state, move |tx| tx.delete_edge(&ns, id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -609,11 +682,9 @@ async fn invalidate_edge(
 ) -> ApiResult<Json<grafeno::Edge>> {
     let id = parse_edge_id(&id)?;
     let at = input.at.resolve()?;
-    let edge = blocking(&state, move |db| {
-        db.write(|tx| {
-            tx.invalidate_edge(&ns, id, at)?;
-            tx.edge(&ns, id)?.ok_or(Error::EdgeNotFound(id))
-        })
+    let edge = write(&state, move |tx| {
+        tx.invalidate_edge(&ns, id, at)?;
+        tx.edge(&ns, id)?.ok_or(Error::EdgeNotFound(id))
     })
     .await?;
     Ok(Json(edge))
@@ -624,11 +695,9 @@ async fn retract_edge(
     Path((ns, id)): Path<(String, String)>,
 ) -> ApiResult<Json<grafeno::Edge>> {
     let id = parse_edge_id(&id)?;
-    let edge = blocking(&state, move |db| {
-        db.write(|tx| {
-            tx.retract_edge(&ns, id)?;
-            tx.edge(&ns, id)?.ok_or(Error::EdgeNotFound(id))
-        })
+    let edge = write(&state, move |tx| {
+        tx.retract_edge(&ns, id)?;
+        tx.edge(&ns, id)?.ok_or(Error::EdgeNotFound(id))
     })
     .await?;
     Ok(Json(edge))
@@ -789,15 +858,15 @@ async fn recall_handler(
 ) -> ApiResult<Json<Vec<grafeno_memory::Recalled>>> {
     let query = input.resolve()?;
     let touch = input.touch;
+    let read_ns = ns.clone();
     let results = blocking(&state, move |db| {
-        let results = recall(&db.begin_read()?, &ns, &query)?;
-        if touch {
-            let ids: Vec<NodeId> = results.iter().map(|r| r.node.id).collect();
-            db.write(|tx| tx.touch(&ns, &ids, Timestamp::now()))?;
-        }
-        Ok(results)
+        recall(&db.begin_read()?, &read_ns, &query)
     })
     .await?;
+    if touch {
+        let ids: Vec<NodeId> = results.iter().map(|r| r.node.id).collect();
+        write(&state, move |tx| tx.touch(&ns, &ids, Timestamp::now())).await?;
+    }
     Ok(Json(results))
 }
 
@@ -808,15 +877,15 @@ async fn context_handler(
 ) -> ApiResult<Json<grafeno_memory::Context>> {
     let (query, options) = input.resolve()?;
     let touch = input.query.touch;
+    let read_ns = ns.clone();
     let context = blocking(&state, move |db| {
-        let context = context_for(&db.begin_read()?, &ns, &query, &options)?;
-        if touch {
-            let ids: Vec<NodeId> = context.items.iter().map(|item| item.node).collect();
-            db.write(|tx| tx.touch(&ns, &ids, Timestamp::now()))?;
-        }
-        Ok(context)
+        context_for(&db.begin_read()?, &read_ns, &query, &options)
     })
     .await?;
+    if touch {
+        let ids: Vec<NodeId> = context.items.iter().map(|item| item.node).collect();
+        write(&state, move |tx| tx.touch(&ns, &ids, Timestamp::now())).await?;
+    }
     Ok(Json(context))
 }
 
@@ -954,23 +1023,25 @@ async fn batch(
     Path(ns): Path<String>,
     Body(input): Body<BatchInput>,
 ) -> ApiResult<Json<BatchOutput>> {
-    let db = state.db.clone();
+    let writer = state.writer.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        let mut failed_at = None;
-        let result = db.write(|tx| {
+        let failed_at = Arc::new(std::sync::Mutex::new(None));
+        let failed = failed_at.clone();
+        let result = writer.write(move |tx| {
             let mut refs = HashMap::new();
             let mut results = Vec::with_capacity(input.ops.len());
-            for (index, op) in input.ops.into_iter().enumerate() {
+            for (index, op) in input.ops.iter().cloned().enumerate() {
                 match apply_op(tx, &ns, op, &mut refs) {
                     Ok(value) => results.push(value),
                     Err(error) => {
-                        failed_at = Some(index);
+                        *failed.lock().expect("not poisoned") = Some(index);
                         return Err(error);
                     }
                 }
             }
             Ok(BatchOutput { results, refs })
         });
+        let failed_at = *failed_at.lock().expect("not poisoned");
         result.map_err(|error| (failed_at, error))
     })
     .await
@@ -1049,14 +1120,27 @@ async fn export(
 }
 
 /// Imports a JSON Lines export (up to 1 GiB) in one transaction.
+#[derive(Deserialize)]
+struct ImportParams {
+    /// Load in chunks (faster; an error keeps the chunks before it).
+    #[serde(default)]
+    bulk: bool,
+}
+
 async fn import(
     State(state): State<AppState>,
+    Params(params): Params<ImportParams>,
     request: Request,
 ) -> ApiResult<Json<grafeno::DumpStats>> {
     let body = axum::body::to_bytes(request.into_body(), IMPORT_LIMIT)
         .await
         .map_err(|error| ApiError::bad_request(format!("cannot read the export: {error}")))?;
-    let stats = blocking(&state, move |db| db.import(body.as_ref())).await?;
+    let options = if params.bulk {
+        grafeno::ImportOptions::bulk()
+    } else {
+        grafeno::ImportOptions::default()
+    };
+    let stats = blocking(&state, move |db| db.import_with(body.as_ref(), &options)).await?;
     Ok(Json(stats))
 }
 
@@ -1114,13 +1198,36 @@ async fn query(
         cancel: Some(cancel),
         ..state.limits.clone()
     };
-    let result = tokio::task::spawn_blocking(move || {
-        let params = grafeno_query::params_from_json(&input.params);
-        grafeno_query::execute_with(&db, &ns, &input.query, &params, &limits)
+    let params = grafeno_query::params_from_json(&input.params);
+    if !grafeno_query::is_write(&input.query)? {
+        let result = tokio::task::spawn_blocking(move || {
+            grafeno_query::execute_read_with(&db.begin_read()?, &ns, &input.query, &params, &limits)
+        })
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))??;
+        return Ok(Json(result.to_json()));
+    }
+    // Writes join the next group commit. A failing query must make the
+    // writer discard the group's transaction, so its error travels as an
+    // engine error and the query error itself is kept aside.
+    let failure: Arc<std::sync::Mutex<Option<grafeno_query::QueryError>>> = Arc::default();
+    let kept = failure.clone();
+    let outcome = write(&state, move |tx| {
+        let read = db.begin_read()?;
+        grafeno_query::execute_in(tx, &read, &ns, &input.query, &params, &limits).map_err(|error| {
+            let message = error.to_string();
+            *kept.lock().expect("not poisoned") = Some(error);
+            Error::Invalid(message)
+        })
     })
-    .await
-    .map_err(|error| ApiError::internal(error.to_string()))??;
-    Ok(Json(result.to_json()))
+    .await;
+    match outcome {
+        Ok(result) => Ok(Json(result.to_json())),
+        Err(error) => match failure.lock().expect("not poisoned").take() {
+            Some(query_error) => Err(query_error.into()),
+            None => Err(error),
+        },
+    }
 }
 
 // ---------------------------------------------------------------- memory
@@ -1202,8 +1309,8 @@ async fn merge(
     Path(ns): Path<String>,
     Body(input): Body<MergeInput>,
 ) -> ApiResult<Json<grafeno::MergeReport>> {
-    let report = blocking(&state, move |db| {
-        db.write(|tx| tx.merge_nodes(&ns, input.keep, input.merge))
+    let report = write(&state, move |tx| {
+        tx.merge_nodes(&ns, input.keep, input.merge)
     })
     .await?;
     Ok(Json(report))
@@ -1221,8 +1328,8 @@ async fn touch(
     Path(ns): Path<String>,
     Body(input): Body<IdsInput>,
 ) -> ApiResult<StatusCode> {
-    blocking(&state, move |db| {
-        db.write(|tx| tx.touch(&ns, &input.ids, Timestamp::now()))
+    write(&state, move |tx| {
+        tx.touch(&ns, &input.ids, Timestamp::now())
     })
     .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -1264,8 +1371,8 @@ async fn archive_nodes(
     Path(ns): Path<String>,
     Body(input): Body<IdsInput>,
 ) -> ApiResult<Json<Value>> {
-    let archived = blocking(&state, move |db| {
-        db.write(|tx| grafeno_memory::archive(tx, &ns, &input.ids))
+    let archived = write(&state, move |tx| {
+        grafeno_memory::archive(tx, &ns, &input.ids)
     })
     .await?;
     Ok(Json(json!({ "archived": archived })))
@@ -1345,8 +1452,8 @@ async fn summaries(
         embedding: input.embedding,
         archive_sources: input.archive_sources.unwrap_or(true),
     };
-    let id = blocking(&state, move |db| {
-        db.write(|tx| grafeno_memory::write_summary(tx, &ns, summary))
+    let id = write(&state, move |tx| {
+        grafeno_memory::write_summary(tx, &ns, summary.clone())
     })
     .await?;
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))

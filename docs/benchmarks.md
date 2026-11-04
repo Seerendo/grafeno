@@ -115,6 +115,36 @@ Without an index, a `LIMIT` already stops the scan after the first page of
 candidates. A full label scan costs about 2 µs per node, most of it
 decoding the node record.
 
+## Concurrent writes (`crates/grafeno/examples/concurrency.rs`)
+
+16 threads, 200 writes each of one node, on a database file (Windows,
+NVMe), while 4 threads read pages of nodes:
+
+| Writes | Durability | Writes/s | Reads/s meanwhile |
+| --- | --- | --- | --- |
+| one transaction each | immediate | 737 | 79,900 |
+| group commit (`Writer`) | immediate | 8,106 | 63,356 |
+| one transaction each | eventual | 16,865 | 61,093 |
+| group commit (`Writer`) | eventual | 32,210 | 64,903 |
+
+A commit with immediate durability waits for the disk; group commit shares
+that wait among every write in the queue. Readers are not blocked by the
+writer (MVCC).
+
+## Loading (`crates/grafeno/examples/bulk_load.rs`)
+
+Imports of nodes with 30-word texts, chained by edges, into a file:
+
+| Nodes | One transaction | Bulk (`--bulk`) |
+| --- | --- | --- |
+| 200,000 (no texts) | 8.4 s (23,900 nodes/s) | 7.7 s (25,800 nodes/s) |
+| 200,000 | 32.4 s (6,200 nodes/s) | 25 s (8,000 nodes/s) |
+| 1,000,000 | — | 134 s (7,450 nodes/s) |
+
+The rate holds as the database grows. Most of the time goes to the text
+postings (about 25 per text): bulk mode sorts them per chunk, which helps
+by a third; a different postings layout would be the next step.
+
 ## Remaining limits
 
 - **Vector search reads each visited vector from redb** (about 0.4 µs per

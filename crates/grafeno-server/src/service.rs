@@ -24,6 +24,9 @@ pub struct ServerSettings {
     pub options: Options,
     /// Limits for each GQ query.
     pub limits: grafeno_query::Limits,
+    pub durability: grafeno::Durability,
+    /// Requests served at once.
+    pub max_requests: usize,
 }
 
 /// Values given on the command line (or in the environment), if any.
@@ -67,6 +70,8 @@ impl ServerSettings {
                 cors_origins,
             },
             limits: config.query.limits(),
+            durability: config.durability.map(Into::into).unwrap_or_default(),
+            max_requests: config.max_requests.unwrap_or(http::MAX_REQUESTS),
         }
     }
 
@@ -83,11 +88,11 @@ pub fn run(
     settings: ServerSettings,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let state = AppState {
-        db: Arc::new(settings.open()?),
-        token: settings.token.as_deref().map(Arc::from),
-        limits: settings.limits.clone(),
-    };
+    let db = Arc::new(settings.open()?);
+    db.set_durability(settings.durability);
+    let state = AppState::new(db, settings.token.as_deref())
+        .with_limits(settings.limits.clone())
+        .with_max_requests(settings.max_requests);
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?

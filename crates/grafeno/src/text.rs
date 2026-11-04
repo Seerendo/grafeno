@@ -95,6 +95,66 @@ pub(crate) fn index(tx: &WriteTransaction, ns: &str, node: NodeId, text: &str) -
     update_stats(tx, ns, 1, i64::from(length))
 }
 
+/// Indexes many texts at once (replacing any they had): the postings are
+/// sorted and written in key order, each table is opened once and the
+/// statistics are updated once. Much faster than one [`index`] per text.
+pub(crate) fn index_many(
+    tx: &WriteTransaction,
+    ns: &str,
+    texts: &[(NodeId, String)],
+) -> Result<()> {
+    // Only nodes that already have a text need the slow removal.
+    let existing: Vec<NodeId> = {
+        let table = tx.open_table(TEXTS).map_err(storage)?;
+        let mut existing = Vec::new();
+        for (node, _) in texts {
+            if table.get((ns, node.as_u128())).map_err(storage)?.is_some() {
+                existing.push(*node);
+            }
+        }
+        existing
+    };
+    for node in existing {
+        remove(tx, ns, node)?;
+    }
+    let mut postings: Vec<(String, u128, u32, u32)> = Vec::new();
+    let mut lengths = Vec::with_capacity(texts.len());
+    let mut total_terms = 0i64;
+    for (node, text) in texts {
+        let terms = tokenize(text);
+        let length = terms.len() as u32;
+        total_terms += i64::from(length);
+        lengths.push((node.as_u128(), length));
+        for (term, frequency) in term_frequencies(&terms) {
+            postings.push((term.to_owned(), node.as_u128(), frequency, length));
+        }
+    }
+    postings.sort_unstable_by(|a, b| (a.0.as_str(), a.1).cmp(&(b.0.as_str(), b.1)));
+    let mut table = tx.open_table(POSTINGS).map_err(storage)?;
+    for (term, id, frequency, length) in &postings {
+        table
+            .insert((ns, term.as_str(), *id), (*frequency, *length))
+            .map_err(storage)?;
+    }
+    drop(table);
+    let mut sorted: Vec<&(NodeId, String)> = texts.iter().collect();
+    sorted.sort_unstable_by_key(|(node, _)| *node);
+    let mut table = tx.open_table(TEXTS).map_err(storage)?;
+    for (node, text) in &sorted {
+        table
+            .insert((ns, node.as_u128()), text.as_str())
+            .map_err(storage)?;
+    }
+    drop(table);
+    lengths.sort_unstable();
+    let mut table = tx.open_table(TEXT_LENGTHS).map_err(storage)?;
+    for (id, length) in lengths {
+        table.insert((ns, id), length).map_err(storage)?;
+    }
+    drop(table);
+    update_stats(tx, ns, texts.len() as i64, total_terms)
+}
+
 /// Removes the indexed text of `node`. Returns whether there was any.
 pub(crate) fn remove(tx: &WriteTransaction, ns: &str, node: NodeId) -> Result<bool> {
     let id = node.as_u128();

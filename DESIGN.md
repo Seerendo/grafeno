@@ -352,7 +352,7 @@ without a current user. They remain possible for embedded use.
    importance, accesses and decay in ranking, duplicates and merging,
    archiving, consolidation into summaries.
 8. **Performance, query language and analysis** (in progress, in five
-   steps; see below). 8.1 to 8.3 are done.
+   steps; see below). 8.1 to 8.4 are done.
 9. **Desktop application**: from the browser to a desktop app (guidelines
    to come after phase 8).
 10. **Integrations**: Grafito first, Python bindings, read replicas.
@@ -424,25 +424,37 @@ candidates in pages, and limits are checked on every read.
   `grafeno.toml`; a query over its limits fails with a clear error and
   leaves the server serving others.
 
-**8.4 Concurrent and bulk work.** redb has one writer and any number of
-readers (MVCC); readers already run in parallel.
+**8.4 Concurrent and bulk work** (done, except the shared read caches).
+redb has one writer and any number of readers (MVCC); readers already run
+in parallel. Numbers are in [docs/benchmarks.md](docs/benchmarks.md).
 
-- A writer queue with group commit: concurrent small writes share one
-  commit (each request keeps its own all-or-nothing result), which removes
-  most of the per-write cost measured in
-  [docs/benchmarks.md](docs/benchmarks.md).
-- Selectable durability (`immediate` by default, `eventual` for loads that
-  can be repeated).
-- Bulk loading (`grafeno import --bulk`, `POST /v1/import?bulk=true`):
-  large transactions, text statistics and the vector graph built at the
-  end instead of per node.
-- Shared read caches across transactions (vectors and adjacency of hot
-  namespaces), invalidated by commits, for the "one lookup per visited
-  vector" limit.
-- Backpressure: a cap on concurrent queries and writes; beyond it the
-  server answers 503 with `Retry-After` instead of piling up work.
-- Benchmarks with many concurrent readers and writers, and loads of
-  millions of nodes.
+- **Group commit** (`grafeno::Writer`): a thread takes the writes waiting
+  in its queue (up to 128), runs them in arrival order in one transaction
+  and commits once. redb allows a savepoint only before a transaction
+  touches a table, so a write cannot be undone alone: when one fails, the
+  transaction is discarded, that write gets its error, and the others run
+  again. Writes are therefore `Fn` (safe to run twice; only the last run
+  counts). The server sends every HTTP write through it, GQ writes
+  included (`grafeno_query::execute_in`). 16 threads of single-node
+  writes on a file: 740 writes/s alone, 8,100 grouped.
+- **Durability** (`durability = "eventual"` in `grafeno.toml`,
+  `Grafeno::set_durability`): commits skip the disk sync; the writer
+  flushes twice a second and on shutdown. A crash loses at most the last
+  half second, never part of a commit.
+- **Bulk loading** (`grafeno import --bulk`, `POST /v1/import?bulk=true`,
+  `Grafeno::import_with`): chunks of 20,000 records with eventual
+  durability and one flush, texts indexed per chunk with sorted postings
+  (`WriteTx::set_texts`). About 1.3 times faster than one transaction; an
+  error keeps the chunks before it. The text postings stay the main cost.
+- **Backpressure**: at most `max_requests` (512) requests under `/v1` at
+  once, and 4,096 writes waiting; beyond them the server answers 503
+  `busy` with `Retry-After: 1`.
+- **Not done: shared read caches.** Keeping decoded vectors across
+  transactions needs to know, for each snapshot, whether a cached vector
+  was written after it; redb does not expose snapshot versions, and the
+  measured cost (about 1 ms per vector search at 10k vectors) did not
+  justify a second, hand-kept version scheme. It stays in the remaining
+  limits.
 
 **8.5 Graph algorithms.** On disk, adjacency is already index-free: a
 node's edges by label are one contiguous key range, and each entry holds

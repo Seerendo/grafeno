@@ -19,7 +19,7 @@ use std::io::{BufRead, Write};
 use grafeno_core::{Edge, Error, Node, NodeId, Result, Timestamp};
 use serde::{Deserialize, Serialize};
 
-use crate::db::{Grafeno, ReadTx};
+use crate::db::{Durability, Grafeno, ReadTx, WriteTx};
 use crate::index::IndexDef;
 use crate::memory::MemoryState;
 use crate::store::{decode, storage};
@@ -195,73 +195,168 @@ impl ReadTx {
     }
 }
 
+/// How an import writes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ImportOptions {
+    /// Records per transaction. `None` (the default): one transaction, all
+    /// of the import or nothing. With chunks, an error leaves the chunks
+    /// before it in place, and each chunk commits with eventual durability
+    /// (one flush at the end): much faster and lighter on memory for large
+    /// loads.
+    pub chunk: Option<usize>,
+}
+
+impl ImportOptions {
+    /// Large loads: 20,000 records per transaction.
+    pub fn bulk() -> Self {
+        Self {
+            chunk: Some(20_000),
+        }
+    }
+}
+
 impl Grafeno {
     /// Reads an export and writes it in one transaction: all of it or nothing.
     /// Records whose ids already exist replace them.
     pub fn import(&self, input: impl BufRead) -> Result<DumpStats> {
-        self.write(|tx| {
-            let mut stats = DumpStats::default();
-            let mut namespaces = BTreeSet::new();
-            let mut header = false;
+        self.import_with(input, &ImportOptions::default())
+    }
+
+    /// [`Grafeno::import`] with options, such as bulk loading in chunks.
+    pub fn import_with(&self, input: impl BufRead, options: &ImportOptions) -> Result<DumpStats> {
+        let Some(chunk) = options.chunk else {
+            return self.write(|tx| {
+                let mut import = Import::default();
+                for (index, line) in input.lines().enumerate() {
+                    import.line(tx, index + 1, line)?;
+                }
+                import.finish()
+            });
+        };
+        let durability = self.durability();
+        self.set_durability(Durability::Eventual);
+        let outcome = (|| {
+            let mut import = Import {
+                defer_texts: true,
+                ..Import::default()
+            };
+            let mut tx = self.begin_write()?;
+            let mut pending = 0;
             for (index, line) in input.lines().enumerate() {
-                let number = index + 1;
-                let at = |message: String| Error::Invalid(format!("line {number}: {message}"));
-                let line = line.map_err(|e| at(e.to_string()))?;
-                if line.trim().is_empty() {
-                    continue;
+                if let Err(error) = import.line(&mut tx, index + 1, line) {
+                    tx.abort()?;
+                    return Err(error);
                 }
-                let raw: RawRecord = serde_json::from_str(&line).map_err(|e| at(e.to_string()))?;
-                match raw.into_record().map_err(at)? {
-                    Record::Header {
-                        format, version, ..
-                    } => {
-                        if header {
-                            return Err(at("a second header".into()));
-                        }
-                        if format != EXPORT_FORMAT {
-                            return Err(at(format!("not a Grafeno export (format {format:?})")));
-                        }
-                        if version > EXPORT_VERSION {
-                            return Err(at(format!(
-                                "export version {version} is newer than this Grafeno reads \
-                                 ({EXPORT_VERSION})"
-                            )));
-                        }
-                        header = true;
-                    }
-                    _ if !header => return Err(at("the export must start with a header".into())),
-                    Record::Node {
-                        ns,
-                        node,
-                        text,
-                        embedding,
-                        memory,
-                    } => {
-                        let id = node.id;
-                        tx.restore_node(&ns, node, text.as_deref(), embedding.as_deref())
-                            .map_err(|e| at(e.to_string()))?;
-                        if let Some(memory) = memory {
-                            tx.restore_memory(&ns, id, memory)
-                                .map_err(|e| at(e.to_string()))?;
-                        }
-                        namespaces.insert(ns);
-                        stats.nodes += 1;
-                    }
-                    Record::Index { ns, index } => {
-                        tx.create_index(&ns, index).map_err(|e| at(e.to_string()))?;
-                    }
-                    Record::Edge { ns, edge } => {
-                        tx.restore_edge(&ns, edge).map_err(|e| at(e.to_string()))?;
-                        namespaces.insert(ns);
-                        stats.edges += 1;
-                    }
+                pending += 1;
+                if pending >= chunk.max(1) {
+                    import.index_texts(&mut tx)?;
+                    tx.commit()?;
+                    tx = self.begin_write()?;
+                    pending = 0;
                 }
             }
-            if !header {
-                return Err(Error::Invalid("the export is empty".into()));
+            import.index_texts(&mut tx)?;
+            tx.commit()?;
+            import.finish()
+        })();
+        self.set_durability(durability);
+        self.flush()?;
+        outcome
+    }
+}
+
+/// The state of an import across its lines.
+#[derive(Default)]
+struct Import {
+    stats: DumpStats,
+    namespaces: BTreeSet<String>,
+    header: bool,
+    /// Index texts in batches (bulk loading) instead of one by one.
+    defer_texts: bool,
+    texts: std::collections::BTreeMap<String, Vec<(NodeId, String)>>,
+}
+
+impl Import {
+    fn line(
+        &mut self,
+        tx: &mut WriteTx,
+        number: usize,
+        line: std::io::Result<String>,
+    ) -> Result<()> {
+        let at = |message: String| Error::Invalid(format!("line {number}: {message}"));
+        let line = line.map_err(|e| at(e.to_string()))?;
+        if line.trim().is_empty() {
+            return Ok(());
+        }
+        let raw: RawRecord = serde_json::from_str(&line).map_err(|e| at(e.to_string()))?;
+        match raw.into_record().map_err(at)? {
+            Record::Header {
+                format, version, ..
+            } => {
+                if self.header {
+                    return Err(at("a second header".into()));
+                }
+                if format != EXPORT_FORMAT {
+                    return Err(at(format!("not a Grafeno export (format {format:?})")));
+                }
+                if version > EXPORT_VERSION {
+                    return Err(at(format!(
+                        "export version {version} is newer than this Grafeno reads \
+                         ({EXPORT_VERSION})"
+                    )));
+                }
+                self.header = true;
             }
-            stats.namespaces = namespaces.len();
-            Ok(stats)
+            _ if !self.header => return Err(at("the export must start with a header".into())),
+            Record::Node {
+                ns,
+                node,
+                text,
+                embedding,
+                memory,
+            } => {
+                let id = node.id;
+                let deferred = self.defer_texts && text.is_some();
+                let now = if deferred { None } else { text.as_deref() };
+                tx.restore_node(&ns, node, now, embedding.as_deref())
+                    .map_err(|e| at(e.to_string()))?;
+                if deferred && let Some(text) = text {
+                    self.texts.entry(ns.clone()).or_default().push((id, text));
+                }
+                if let Some(memory) = memory {
+                    tx.restore_memory(&ns, id, memory)
+                        .map_err(|e| at(e.to_string()))?;
+                }
+                self.namespaces.insert(ns);
+                self.stats.nodes += 1;
+            }
+            Record::Index { ns, index } => {
+                tx.create_index(&ns, index).map_err(|e| at(e.to_string()))?;
+            }
+            Record::Edge { ns, edge } => {
+                tx.restore_edge(&ns, edge).map_err(|e| at(e.to_string()))?;
+                self.namespaces.insert(ns);
+                self.stats.edges += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Indexes the texts gathered so far.
+    fn index_texts(&mut self, tx: &mut WriteTx) -> Result<()> {
+        for (ns, texts) in std::mem::take(&mut self.texts) {
+            tx.set_texts(&ns, &texts)?;
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<DumpStats> {
+        if !self.header {
+            return Err(Error::Invalid("the export is empty".into()));
+        }
+        Ok(DumpStats {
+            namespaces: self.namespaces.len(),
+            ..self.stats
         })
     }
 }

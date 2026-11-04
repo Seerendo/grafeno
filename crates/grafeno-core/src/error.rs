@@ -1,6 +1,6 @@
 use crate::{EdgeId, NodeId};
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum Error {
     #[error("node {0} not found")]
     NodeNotFound(NodeId),
@@ -12,6 +12,9 @@ pub enum Error {
     Storage(String),
     #[error("serialization error: {0}")]
     Serialization(String),
+    /// Too much work is waiting: try again later.
+    #[error("busy: {0}")]
+    Busy(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

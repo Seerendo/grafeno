@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path as FsPath;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use grafeno_core::{Edge, EdgeId, Error, NewEdge, NewNode, Node, NodeId, Props, Result, Timestamp};
 use redb::{
@@ -42,12 +43,28 @@ const OLD_POSTINGS: TableDefinition<PostingKey, u32> = TableDefinition::new("pos
 
 const SCHEMA_KEY: &str = "schema_version";
 
+/// When a commit reaches the disk.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Durability {
+    /// When `commit` returns (the default).
+    #[default]
+    Immediate,
+    /// At the next [`Grafeno::flush`] (which a [`crate::Writer`] calls
+    /// twice a second) or immediate commit. Much faster for many small
+    /// writes; a crash loses the commits since the last flush, never part
+    /// of one.
+    Eventual,
+}
+
 /// A Grafeno database: one file (or memory) holding many namespaces.
 ///
 /// It allows one writer and many readers at once; each reader sees a fixed
 /// snapshot.
 pub struct Grafeno {
     db: Database,
+    eventual: AtomicBool,
+    /// Commits with eventual durability since the last flush.
+    unflushed: AtomicBool,
 }
 
 impl Grafeno {
@@ -129,7 +146,35 @@ impl Grafeno {
             .insert(SCHEMA_KEY, SCHEMA_VERSION)
             .map_err(storage)?;
         tx.commit().map_err(storage)?;
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            eventual: AtomicBool::new(false),
+            unflushed: AtomicBool::new(false),
+        })
+    }
+
+    pub fn durability(&self) -> Durability {
+        if self.eventual.load(Ordering::Relaxed) {
+            Durability::Eventual
+        } else {
+            Durability::Immediate
+        }
+    }
+
+    /// Sets the durability of later commits.
+    pub fn set_durability(&self, durability: Durability) {
+        self.eventual
+            .store(durability == Durability::Eventual, Ordering::Relaxed);
+    }
+
+    /// Makes every commit so far durable. Cheap when there is nothing to do.
+    pub fn flush(&self) -> Result<()> {
+        if !self.unflushed.swap(false, Ordering::AcqRel) {
+            return Ok(());
+        }
+        // An empty commit with immediate durability persists the ones before it.
+        let tx = self.db.begin_write().map_err(storage)?;
+        tx.commit().map_err(storage)
     }
 
     pub fn begin_read(&self) -> Result<ReadTx> {
@@ -159,8 +204,13 @@ impl Grafeno {
     }
 
     pub fn begin_write(&self) -> Result<WriteTx> {
+        let mut tx = self.db.begin_write().map_err(storage)?;
+        if self.eventual.load(Ordering::Relaxed) {
+            tx.set_durability(redb::Durability::None).map_err(storage)?;
+            self.unflushed.store(true, Ordering::Release);
+        }
         Ok(WriteTx {
-            tx: self.db.begin_write().map_err(storage)?,
+            tx,
             vectors: vector::Cache::default(),
         })
     }
@@ -303,6 +353,12 @@ fn recount(tx: &WriteTransaction) -> Result<()> {
         }
     }
     Ok(())
+}
+
+impl Drop for Grafeno {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
 }
 
 /// A read transaction: a fixed snapshot of the database.
@@ -639,6 +695,15 @@ impl WriteTx {
     pub fn set_text(&mut self, ns: &str, id: NodeId, text: &str) -> Result<()> {
         self.node(ns, id)?.ok_or(Error::NodeNotFound(id))?;
         text::index(&self.tx, ns, id, text)
+    }
+
+    /// Indexes the texts of many nodes at once, replacing any they had: for
+    /// loading, several times faster than one [`WriteTx::set_text`] each.
+    pub fn set_texts(&mut self, ns: &str, texts: &[(NodeId, String)]) -> Result<()> {
+        for (node, _) in texts {
+            self.node(ns, *node)?.ok_or(Error::NodeNotFound(*node))?;
+        }
+        text::index_many(&self.tx, ns, texts)
     }
 
     /// Removes the node's text from the index. Returns whether it had any.

@@ -10,11 +10,10 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 fn app(token: Option<&str>) -> Router {
-    router(AppState {
-        db: Arc::new(Grafeno::in_memory().unwrap()),
-        token: token.map(Arc::from),
-        limits: grafeno_query::Limits::standard(),
-    })
+    router(AppState::new(
+        Arc::new(Grafeno::in_memory().unwrap()),
+        token,
+    ))
 }
 
 async fn call(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -519,11 +518,7 @@ async fn queries_read_and_write() {
 #[tokio::test]
 async fn studio_and_cors_options() {
     use grafeno_server::http::{Options, router_with};
-    let state = || AppState {
-        db: Arc::new(Grafeno::in_memory().unwrap()),
-        token: Some(Arc::from("secret")),
-        limits: grafeno_query::Limits::standard(),
-    };
+    let state = || AppState::new(Arc::new(Grafeno::in_memory().unwrap()), Some("secret"));
     let request = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
 
     // The Studio is public (the API it calls needs the token).
@@ -767,14 +762,14 @@ async fn memory_endpoints() {
 
 #[tokio::test]
 async fn queries_over_their_limits_fail_cleanly() {
-    let app = router(AppState {
-        db: Arc::new(Grafeno::in_memory().unwrap()),
-        token: None,
-        limits: grafeno_query::Limits {
-            max_reads: Some(50),
-            ..grafeno_query::Limits::none()
-        },
-    });
+    let app = router(
+        AppState::new(Arc::new(Grafeno::in_memory().unwrap()), None).with_limits(
+            grafeno_query::Limits {
+                max_reads: Some(50),
+                ..grafeno_query::Limits::none()
+            },
+        ),
+    );
     let (status, _) = call(
         &app,
         "POST",
@@ -809,4 +804,86 @@ async fn queries_over_their_limits_fail_cleanly() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["rows"], json!([[5]]));
+}
+
+#[tokio::test]
+async fn concurrent_writes_share_commits() {
+    let app = app(None);
+    let requests = (0..64).map(|i| {
+        let app = app.clone();
+        async move {
+            call(
+                &app,
+                "POST",
+                "/v1/c/nodes",
+                Some(json!({ "labels": ["Note"], "props": { "i": i } })),
+            )
+            .await
+        }
+    });
+    let responses = futures_join_all(requests).await;
+    assert!(
+        responses
+            .iter()
+            .all(|(status, _)| *status == StatusCode::CREATED)
+    );
+    // A failing write among them does not affect the others.
+    let (status, _) = call(&app, "POST", "/v1/c/nodes", Some(json!({ "labels": [] }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (_, stats) = call(&app, "GET", "/v1/c/stats", None).await;
+    assert_eq!(stats["nodes"], 64);
+    // A GQ write goes through the same writer, and its errors keep their code.
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/c/query",
+        Some(json!({ "query": "MATCH (n:Note) SET n.seen = true" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/c/query",
+        Some(json!({ "query": "CREATE (n:X) RETURN 1 / 0" })),
+    )
+    .await;
+    assert_eq!(
+        (status, body["error"]["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_query"))
+    );
+    let (_, stats) = call(&app, "GET", "/v1/c/stats", None).await;
+    assert_eq!(stats["nodes"], 64, "the failed query left nothing");
+}
+
+/// Awaits every future (in order), without another dependency.
+async fn futures_join_all<F>(futures: impl IntoIterator<Item = F>) -> Vec<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let handles: Vec<_> = futures.into_iter().map(tokio::spawn).collect();
+    let mut out = Vec::new();
+    for handle in handles {
+        out.push(handle.await.unwrap());
+    }
+    out
+}
+
+#[tokio::test]
+async fn a_full_server_answers_503() {
+    let state = AppState::new(Arc::new(Grafeno::in_memory().unwrap()), None).with_max_requests(1);
+    // Hold the only slot, as a slow request would.
+    let _busy = state.in_flight.clone().try_acquire_owned().unwrap();
+    let app = router(state);
+    let request = Request::builder()
+        .uri("/v1/namespaces")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+    // Health checks stay outside the limit.
+    let (status, _) = call(&app, "GET", "/health", None).await;
+    assert_eq!(status, StatusCode::OK);
 }

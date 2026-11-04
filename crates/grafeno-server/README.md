@@ -89,7 +89,7 @@ They open the file directly (stop the server first):
 | `grafeno check --db F [-n NS]...`         | Integrity check; exits with an error if anything is wrong.     |
 | `grafeno rebuild --db F (-n NS... \| --all)` | Rebuilds indexes and counters from the records.             |
 | `grafeno export --db F [-n NS]... [-o FILE]` | JSON Lines export (standard output by default).             |
-| `grafeno import --db F FILE`              | Imports an export (`-` reads standard input), all or nothing.  |
+| `grafeno import --db F FILE`              | Imports an export (`-` reads standard input), all or nothing; `--bulk` loads large exports in chunks. |
 
 ```bash
 grafeno export --db memory.redb -o backup.jsonl
@@ -127,7 +127,12 @@ All bodies are JSON. Everything under `/v1` needs `Authorization: Bearer
 `{"error": {"code": "not_found", "message": "…"}}`, with codes `bad_request`
 (malformed body), `invalid` (rejected input), `invalid_query` (a GQ error),
 `query_limit` (a GQ query over its time, reads or rows limit; see `[query]` in
-`grafeno.toml`), `not_found`, `unauthorized` and `internal`.
+`grafeno.toml`), `not_found`, `unauthorized`, `busy` (503 with `Retry-After`:
+too many requests at once, or too many writes waiting) and `internal`.
+
+Writes from concurrent requests are committed together (group commit): each
+request still gets its own all-or-nothing result, and a failing write does
+not affect the others.
 
 Ids are UUIDs. Times in responses are microseconds since the Unix epoch;
 requests accept either that or an ISO 8601 string (`2024-05-01`,
@@ -138,7 +143,7 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `GET`    | `/health`                             |                                                         | `{status, version}`           |
 | `GET`    | `/v1/namespaces`                      |                                                         | `[{name, nodes, edges}]`      |
 | `GET`    | `/v1/export`                          | `?ns=a,b` (all by default)                              | JSON Lines                    |
-| `POST`   | `/v1/import`                          | JSON Lines (up to 1 GiB)                                | `{namespaces, nodes, edges}`  |
+| `POST`   | `/v1/import`                          | JSON Lines (up to 1 GiB); `?bulk=true` loads in chunks  | `{namespaces, nodes, edges}`  |
 | `GET`    | `/v1/{ns}/stats`                      |                                                         | statistics                    |
 | `GET`    | `/v1/{ns}/check`                      |                                                         | `{…, problems}`               |
 | `POST`   | `/v1/{ns}/rebuild`                    |                                                         | rebuild report                |

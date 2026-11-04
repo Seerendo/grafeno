@@ -48,8 +48,8 @@ use std::fmt;
 
 pub use eval::Params;
 pub use exec::{
-    MAX_PATH_LENGTH, PlanStep, QueryResult, WriteStats, execute, execute_read, execute_read_with,
-    execute_with, is_write,
+    MAX_PATH_LENGTH, PlanStep, QueryResult, WriteStats, execute, execute_in, execute_read,
+    execute_read_with, execute_with, is_write,
 };
 pub use limits::Limits;
 pub use temporal::Duration;

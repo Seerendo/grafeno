@@ -55,6 +55,10 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
   stops early for `LIMIT`; per-query limits (time, records read, rows held)
   and cancellation, so one query cannot take the service down; an indexes
   panel in the Studio.
+- **Phase 8.4, concurrent and bulk work:** group commit for concurrent
+  writes (11 times the writes per second on disk), eventual durability,
+  bulk imports in chunks, and 503 with `Retry-After` when the server is
+  full.
 
 ## Installing
 

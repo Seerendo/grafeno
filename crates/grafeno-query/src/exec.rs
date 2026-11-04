@@ -143,6 +143,29 @@ pub fn execute_with(
     }
 }
 
+/// Runs a statement inside a write transaction someone else commits (a
+/// group commit): its writes join that transaction. `read` is a recent
+/// snapshot, used for planning and procedures; the statement's own matching
+/// reads `tx`. On an error the caller must discard the transaction.
+pub fn execute_in(
+    tx: &mut WriteTx,
+    read: &ReadTx,
+    ns: &str,
+    query: &str,
+    params: &Params,
+    limits: &Limits,
+) -> Result<QueryResult, QueryError> {
+    let statement = parse(query)?;
+    validate(&statement)?;
+    if statement.mode == Mode::Explain {
+        return explain(&statement, &plan_info(read, ns)?);
+    }
+    match &statement.schema {
+        Some(schema) => run_schema(read, Some(tx), ns, schema),
+        None => Runner::new(read, Some(tx), ns, params, statement.mode, limits)?.run(&statement),
+    }
+}
+
 /// Runs a read-only statement on an existing snapshot, without limits.
 pub fn execute_read(
     read: &ReadTx,

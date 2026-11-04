@@ -106,7 +106,8 @@ export function AdminView() {
                 event.target.value = "";
                 if (!file) return;
                 void task("import", async () => {
-                  setImported(await client.import(await file.text()));
+                  // Large files load in chunks: much faster, though not all or nothing.
+                  setImported(await client.import(await file.text(), { bulk: file.size > 50_000_000 }));
                   refreshNamespaces();
                 });
               }}

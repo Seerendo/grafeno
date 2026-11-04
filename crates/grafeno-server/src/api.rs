@@ -344,6 +344,8 @@ pub enum ErrorKind {
     BadRequest,
     NotFound,
     Internal,
+    /// Too much work waiting: the client should retry.
+    Busy,
 }
 
 pub fn error_kind(error: &Error) -> ErrorKind {
@@ -351,5 +353,6 @@ pub fn error_kind(error: &Error) -> ErrorKind {
         Error::NodeNotFound(_) | Error::EdgeNotFound(_) => ErrorKind::NotFound,
         Error::Invalid(_) => ErrorKind::BadRequest,
         Error::Storage(_) | Error::Serialization(_) => ErrorKind::Internal,
+        Error::Busy(_) => ErrorKind::Busy,
     }
 }

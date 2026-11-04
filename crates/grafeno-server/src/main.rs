@@ -144,6 +144,11 @@ enum Command {
         db: FileArgs,
         /// Export file, or `-` for standard input.
         input: PathBuf,
+        /// Load in chunks of 20,000 records with a single flush at the end:
+        /// faster for large exports, but an error leaves the chunks before
+        /// it in place.
+        #[arg(long)]
+        bulk: bool,
     },
 }
 
@@ -421,12 +426,20 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 stats.namespaces, stats.nodes, stats.edges
             );
         }
-        Command::Import { db, input } => {
+        Command::Import { db, input, bulk } => {
             let db = db.open()?;
-            let stats = if input.as_os_str() == "-" {
-                db.import(std::io::stdin().lock())?
+            let options = if bulk {
+                grafeno::ImportOptions::bulk()
             } else {
-                db.import(std::io::BufReader::new(std::fs::File::open(input)?))?
+                grafeno::ImportOptions::default()
+            };
+            let stats = if input.as_os_str() == "-" {
+                db.import_with(std::io::stdin().lock(), &options)?
+            } else {
+                db.import_with(
+                    std::io::BufReader::new(std::fs::File::open(input)?),
+                    &options,
+                )?
             };
             eprintln!(
                 "imported {} namespaces, {} nodes, {} edges",
