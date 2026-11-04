@@ -539,7 +539,7 @@ created or only switched to. Namespaces become records of their own.
   one marked) from *creating* (an explicit "New namespace" with a name,
   which fails visibly if it exists), and says which happened.
 
-**9.2 Graph lab design system.** A full redesign of the Studio, which the
+**9.2 Graph lab design system** (done). A full redesign of the Studio, which the
 desktop app shares.
 
 - Dark first (with a light theme), the graph canvas filling the window
@@ -553,6 +553,17 @@ desktop app shares.
   the dataviz palette re-validated for both themes.
 - Every view redone on it: overview, explorer, graph, scripts, search,
   memory, administration.
+
+As built: one stylesheet of tokens (`studio/src/styles.css`); dark is the
+default theme (`data-theme` is `dark`, `light` or `system`). The rail and
+the command bar float as glass over a floor of two soft glows and a dot
+grid; the graph view runs under both, its toolbar, inspector and status
+floating over the canvas. Interface text in Space Grotesk, data, ids,
+code, table heads and section labels in JetBrains Mono, both from
+`@fontsource-variable` packages bundled in the build. Nodes get a halo in
+their own color. The chart palette kept its slots: the validator passes
+both themes on the new surfaces (in light, three slots stay under 3:1
+against the surface, relieved by the legend and the table view).
 
 **9.3 A graph you can handle.** Cytoscape's static layouts give way to a
 live physics simulation (d3-force) drawn on a canvas of its own.

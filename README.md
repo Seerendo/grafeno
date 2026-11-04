@@ -72,6 +72,9 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
   is a clear conflict, and dropping one deletes everything in it; over
   HTTP, the shell (`\ns create`, `\ns drop`), GQ (`SHOW NAMESPACES`) and
   the Studio.
+- **Phase 9.2, graph lab design:** a new design for the Studio, dark first,
+  with a floating rail and command bar over the canvas, Space Grotesk and
+  JetBrains Mono bundled for offline use, and glowing nodes.
 
 ## Installing
 

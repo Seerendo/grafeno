@@ -364,11 +364,11 @@ export function App() {
   const [edgeForm, setEdgeForm] = useState<NewEdgeOptions | null>(null);
   const [palette, setPalette] = useState(false);
   const [collapsed, setCollapsed] = useState(() => readSetting("grafeno.studio.collapsed", "") === "1");
-  const [theme, setTheme] = useState<Theme>(() => readSetting("grafeno.studio.theme", "system") as Theme);
+  const [theme, setTheme] = useState<Theme>(() => readSetting("grafeno.studio.theme", "dark") as Theme);
 
   useEffect(() => {
-    if (theme === "system") delete document.documentElement.dataset.theme;
-    else document.documentElement.dataset.theme = theme;
+    // Dark is the default look; "system" follows the system's choice.
+    document.documentElement.dataset.theme = theme;
     writeSetting("grafeno.studio.theme", theme);
   }, [theme]);
 
@@ -498,7 +498,7 @@ export function App() {
     newEdge: (options = {}) => setEdgeForm(options),
   };
   const view = route.view;
-  const full = view === "graph" || view === "scripts";
+  const layout = view === "graph" ? "main canvas-view" : view === "scripts" || view === "explorer" ? "main full" : "main";
   const closeConfirm = (ok: boolean) => {
     confirming?.resolve(ok);
     setConfirming(null);
@@ -524,7 +524,7 @@ export function App() {
           </div>
           <div className="sidebar-foot">
             <div className="theme-switch" role="group" aria-label="Theme">
-              {(["light", "system", "dark"] as Theme[]).map((option) => (
+              {(["dark", "light", "system"] as Theme[]).map((option) => (
                 <button key={option} className={theme === option ? "active" : ""} onClick={() => setTheme(option)} title={`${option} theme`}>
                   <Icon name={option === "light" ? "sun" : option === "dark" ? "moon" : "monitor"} size={14} />
                 </button>
@@ -567,7 +567,7 @@ export function App() {
             <Icon name="logout" />
           </button>
         </header>
-        <main className={full ? "main full" : "main"} key={current}>
+        <main className={layout} key={`${current}-${view}`}>
           {view === "overview" && <OverviewView />}
           {view === "explorer" && <ExplorerView selected={route.param} />}
           {view === "graph" && <GraphView seed={route.param} />}

@@ -30,7 +30,7 @@ export function graphStyle(): cytoscape.StylesheetJson {
   const text = cssVar("--text");
   const muted = cssVar("--muted");
   const accent = cssVar("--accent");
-  const panel = cssVar("--panel");
+  const panel = cssVar("--panel-solid");
   return [
     {
       selector: "node",
@@ -49,16 +49,22 @@ export function graphStyle(): cytoscape.StylesheetJson {
         width: 24,
         height: 24,
         shape: "hexagon",
+        // A soft halo in the node's own color: the graph lab glow.
+        "underlay-color": "data(color)",
+        "underlay-opacity": 0.22,
+        "underlay-padding": 7,
+        "underlay-shape": "ellipse",
       },
     },
-    { selector: "node.expanded", style: { width: 30, height: 30, "border-color": text } },
+    { selector: "node.expanded", style: { width: 30, height: 30, "border-color": muted } },
     { selector: "node:selected", style: { "border-width": 4, "border-color": accent, "overlay-opacity": 0 } },
     { selector: "node.source", style: { "border-width": 4, "border-color": cssVar("--warning"), "border-style": "dashed" } },
     {
       selector: "edge",
       style: {
-        width: 1.6,
+        width: 1.4,
         "line-color": muted,
+        "line-opacity": 0.7,
         "target-arrow-color": muted,
         "target-arrow-shape": "triangle",
         "arrow-scale": 0.9,

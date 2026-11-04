@@ -32,8 +32,13 @@ terminal:
 - **Administration**: indexes, check, rebuild, export, import, and
   deleting the namespace with everything in it (after a confirmation).
 
-Ctrl+K opens a command palette (views, actions, namespaces and nodes). The
-theme follows the system, or can be set to light or dark.
+Ctrl+K opens a command palette (views, actions, namespaces and nodes).
+
+The look is "graph lab": dark first (light, or the system's choice, from
+the switch at the bottom of the rail), a floating rail and command bar in
+glass over the canvas, Space Grotesk for the interface and JetBrains Mono
+for data and code. Both typefaces are bundled (SIL Open Font License), so
+the Studio needs no network beyond its server.
 
 ## Development
 
