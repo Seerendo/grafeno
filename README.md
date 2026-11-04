@@ -93,6 +93,11 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
   every route checked by one policy and tested against leaks; `grafeno
   keys`, MCP fences (`--allow`, `--read-only`, `--as`) and a keys panel in
   the Studio.
+- **Phase 10.2, integrity under failure:** crash tests during imports,
+  rebuilds, drops and upgrades; databases written by every past layout
+  version open and upgrade; damaged files are refused by a checksum
+  check (`grafeno check`) instead of crashing; online backups (`grafeno
+  backup`, `GET /v1/backup`, the Studio).
 
 ## Installing
 

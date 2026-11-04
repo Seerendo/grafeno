@@ -165,6 +165,29 @@ docker build -t grafeno .
 docker run -d -p 7810:7810 -v grafeno-data:/data -e GRAFENO_TOKEN=change-me grafeno
 ```
 
+## Backups
+
+A backup is a consistent copy of the whole database file (every
+namespace, and the API keys), taken while the service keeps running:
+
+```bash
+grafeno backup grafeno-backup.redb --config /etc/grafeno/grafeno.toml
+```
+
+(On Windows, the settings are in `C:\ProgramData\Grafeno\grafeno.toml`;
+`grafeno config path` prints where.) To restore, stop the service, put the
+copy where `db` in `grafeno.toml` points, and start it again. Before using
+a file that may be damaged (a failing disk, a bad copy), check it with the
+service stopped:
+
+```bash
+grafeno check --db grafeno-backup.redb
+```
+
+It verifies every page against its checksum, then the indexes. Exports
+(`grafeno export`) are the other kind of copy: JSON Lines, readable and
+portable between versions, but without the keys.
+
 ## Settings
 
 `grafeno.toml` is read by the service, and by `grafeno serve --config` and

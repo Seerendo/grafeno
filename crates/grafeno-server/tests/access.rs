@@ -519,3 +519,44 @@ async fn an_open_server_stays_open_until_a_key_exists() {
     let (status, _) = call(&app, &admin, "GET", "/v1/keys", None).await;
     assert_eq!(status, StatusCode::OK, "owner keys manage keys");
 }
+
+#[tokio::test]
+async fn owners_download_a_backup_others_do_not() {
+    let (app, _) = world().await;
+    let alice = key(
+        &app,
+        "alice",
+        json!([{ "namespace": "a", "role": "admin" }]),
+        false,
+    )
+    .await;
+    let (status, _) = call(&app, &alice, "GET", "/v1/backup", None).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a backup holds every namespace"
+    );
+    let request = Request::builder()
+        .uri("/v1/backup")
+        .header(header::AUTHORIZATION, format!("Bearer {OWNER}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let path = std::env::temp_dir().join(format!(
+        "grafeno-http-backup-{}.redb",
+        grafeno::NodeId::new()
+    ));
+    std::fs::write(&path, &bytes).unwrap();
+    {
+        let copy = Grafeno::open(&path).unwrap();
+        let read = copy.begin_read().unwrap();
+        for ns in ["a", "b"] {
+            assert_eq!(read.stats(ns).unwrap().nodes, 2);
+            assert!(read.check(ns).unwrap().is_ok());
+        }
+        assert_eq!(read.principals().unwrap().len(), 1, "with its keys");
+    }
+    std::fs::remove_file(&path).unwrap();
+}

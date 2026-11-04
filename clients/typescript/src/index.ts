@@ -488,6 +488,11 @@ export class Grafeno {
   }
 
   /** A JSON Lines export of `namespaces` (all of them by default). */
+  /** A consistent copy of the whole database file, taken while the server keeps serving (owners only). */
+  async backup(): Promise<ArrayBuffer> {
+    return this.#send("GET", "/v1/backup").then((response) => response.arrayBuffer());
+  }
+
   async export(namespaces: string[] = []): Promise<string> {
     const query = namespaces.length ? `?ns=${encodeURIComponent(namespaces.join(","))}` : "";
     return this.#send("GET", `/v1/export${query}`).then((response) => response.text());

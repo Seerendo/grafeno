@@ -16,6 +16,10 @@ The `grafeno` binary serves and manages a Grafeno database (installers:
   administration commands on a file (like `pg_dump`).
 - `grafeno keys list | create | revoke`: API keys, on a file or through a
   running server (see *Access* below).
+- `grafeno backup OUT`: a consistent copy of the whole database, from a
+  file or (with `--config`) from a running server, which keeps serving.
+  `grafeno check` verifies every page of the file against its checksum
+  before checking the indexes: run it on a file that may be damaged.
 
 ```bash
 cargo install --path crates/grafeno-server
@@ -192,6 +196,7 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `GET`    | `/v1/namespaces/{ns}`                 |                                                         | the namespace, or 404         |
 | `PATCH`  | `/v1/namespaces/{ns}`                 | `{description}` (`null` removes it)                     | the namespace                 |
 | `DELETE` | `/v1/namespaces/{ns}`                 |                                                         | `{nodes, edges}` deleted with it |
+| `GET`    | `/v1/backup`                          |                                                         | the whole database file, consistent (owners) |
 | `GET`    | `/v1/export`                          | `?ns=a,b` (all by default)                              | JSON Lines                    |
 | `POST`   | `/v1/import`                          | JSON Lines (up to 1 GiB); `?bulk=true` loads in chunks  | `{namespaces, nodes, edges}`  |
 | `GET`    | `/v1/{ns}/stats`                      |                                                         | statistics                    |

@@ -44,6 +44,7 @@ export const desktop = {
   writeText: (path: string, contents: string) => invoke<void>("write_text", { path, contents }),
   readText: (path: string) => invoke<string>("read_text", { path }),
   openExternal: (url: string) => invoke<void>("open_external", { url }),
+  backupTo: (path: string) => invoke<number>("backup_database", { path }),
   listen: <T>(event: string, handler: (payload: T) => void): (() => void) => {
     let stop: (() => void) | null = null;
     let stopped = false;

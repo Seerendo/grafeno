@@ -150,6 +150,7 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
                 .delete(drop_namespace),
         )
         .route("/export", get(export))
+        .route("/backup", get(backup))
         .route("/import", post(import))
         .route("/{ns}/stats", get(stats))
         .route("/{ns}/check", get(check))
@@ -199,11 +200,27 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
             .route("/studio/", get(crate::studio::index))
             .route("/studio/{*path}", get(crate::studio::asset));
     }
-    let mut app = app.layer(DefaultBodyLimit::max(BODY_LIMIT));
+    // A panic while serving a request (a damaged page, a bug) answers 500
+    // instead of dropping the connection.
+    let mut app = app.layer(DefaultBodyLimit::max(BODY_LIMIT)).layer(
+        tower_http::catch_panic::CatchPanicLayer::custom(panic_response),
+    );
     if !options.cors_origins.is_empty() {
         app = app.layer(cors(&options.cors_origins));
     }
     app.with_state(state)
+}
+
+fn panic_response(panic: Box<dyn std::any::Any + Send + 'static>) -> Response {
+    let detail = panic
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+        .unwrap_or_default();
+    ApiError::internal(format!(
+        "the server failed while serving this request ({detail}); if the database file may be damaged, stop the server and run `grafeno check`"
+    ))
+    .into_response()
 }
 
 fn cors(origins: &[String]) -> tower_http::cors::CorsLayer {
@@ -1307,6 +1324,34 @@ async fn export(
     })
     .await?;
     Ok(([(header::CONTENT_TYPE, "application/x-ndjson")], body).into_response())
+}
+
+/// A copy of the whole database file, consistent, taken while the server
+/// keeps serving (owners only): open it with `grafeno serve --db`.
+async fn backup(State(state): State<AppState>) -> ApiResult<Response> {
+    let bytes = blocking(&state, |db| {
+        let path =
+            std::env::temp_dir().join(format!("grafeno-backup-{}.redb", grafeno::NodeId::new()));
+        let outcome = db.begin_read()?.backup(&path).and_then(|_| {
+            std::fs::read(&path)
+                .map_err(|error| Error::Storage(format!("cannot read the backup: {error}")))
+        });
+        let _ = std::fs::remove_file(&path);
+        outcome
+    })
+    .await?;
+    let name = format!(
+        "attachment; filename=\"grafeno-{}.redb\"",
+        Timestamp::now().date()
+    );
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+            (header::CONTENT_DISPOSITION, name),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 /// Imports a JSON Lines export (up to 1 GiB) in one transaction.

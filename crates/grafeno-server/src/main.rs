@@ -115,6 +115,14 @@ enum Command {
     /// API keys: names with grants per namespace (read, write, admin).
     #[command(subcommand)]
     Keys(KeysCommand),
+    /// Write a consistent copy of the whole database to a new file, from a
+    /// file directly or from a running server, which keeps serving.
+    Backup {
+        /// The new file (it must not exist).
+        output: PathBuf,
+        #[command(flatten)]
+        target: KeysTarget,
+    },
     /// List the namespaces with their node and edge counts.
     Namespaces {
         #[command(flatten)]
@@ -127,7 +135,8 @@ enum Command {
         #[arg(long = "namespace", short = 'n')]
         namespaces: Vec<String>,
     },
-    /// Check that indexes and counters agree with the records. Fails if not.
+    /// Check the file (every page against its checksum), then that indexes
+    /// and counters agree with the records. Fails if not.
     Check {
         #[command(flatten)]
         db: FileArgs,
@@ -431,6 +440,49 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 return Err("some statements failed".into());
             }
         }
+        Command::Backup { output, target } => {
+            if output.exists() {
+                return Err(format!("{} exists already", output.display()).into());
+            }
+            match &target.config {
+                Some(config) => {
+                    let config = Config::load(config)?;
+                    let agent = ureq::Agent::config_builder()
+                        .http_status_as_error(false)
+                        .build()
+                        .new_agent();
+                    let mut request = agent.get(format!("{}/v1/backup", config.local_url()));
+                    if let Some(token) = &config.token {
+                        request = request.header("authorization", format!("Bearer {token}"));
+                    }
+                    let mut response = request.call()?;
+                    if !response.status().is_success() {
+                        let text = response.body_mut().read_to_string().unwrap_or_default();
+                        return Err(format!("the server refused the backup: {text}").into());
+                    }
+                    let bytes = response
+                        .body_mut()
+                        .with_config()
+                        .limit(u64::MAX)
+                        .read_to_vec()?;
+                    std::fs::write(&output, &bytes)?;
+                    println!(
+                        "Backup written to {} ({} bytes).",
+                        output.display(),
+                        bytes.len()
+                    );
+                }
+                None => {
+                    let stats = Grafeno::open(&target.db)?.begin_read()?.backup(&output)?;
+                    println!(
+                        "Backup written to {} ({} entries, {} bytes).",
+                        output.display(),
+                        stats.entries,
+                        stats.bytes
+                    );
+                }
+            }
+        }
         Command::Keys(command) => {
             use grafeno_server::keys;
             match command {
@@ -485,6 +537,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", serde_json::to_string_pretty(&stats)?);
         }
         Command::Check { db, namespaces } => {
+            // First every page against its checksum: reading a damaged
+            // page would stop this program, not report it.
+            match Grafeno::verify_file(&db.db)? {
+                grafeno::FileIntegrity::Clean => println!("file: every page matches its checksum"),
+                grafeno::FileIntegrity::Repaired => {
+                    println!("file: damage found and repaired by redb (recent commits may be lost)")
+                }
+            }
             let db = db.open()?;
             let read = db.begin_read()?;
             let mut failed = 0;

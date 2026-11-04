@@ -34,6 +34,7 @@ const RECENT: usize = 10;
 /// An open database and the router that serves it.
 struct Session {
     path: PathBuf,
+    db: Arc<Grafeno>,
     router: Router,
     /// The app is the owner of the files it opens: its requests carry this
     /// token, so keys created in the file never lock the app out.
@@ -129,9 +130,11 @@ fn open_path(app: &AppHandle, desktop: &Desktop, path: PathBuf) -> Result<Sessio
         }
     })?;
     let token = grafeno_server::auth::new_secret();
-    let router = router_for(db, Some(&token));
+    let db = Arc::new(db);
+    let router = router_for(db.clone(), Some(&token));
     let session = Session {
         path: path.clone(),
+        db,
         router,
         token,
     };
@@ -244,6 +247,31 @@ async fn pick_open(app: AppHandle, extensions: Vec<String>) -> Option<String> {
         .blocking_pick_file()
         .and_then(|file| file.into_path().ok())
         .map(|path| path.display().to_string())
+}
+
+/// Writes a backup of the open database to `path` (a new file).
+#[tauri::command]
+async fn backup_database(desktop: State<'_, Desktop>, path: String) -> Result<u64, String> {
+    let db = desktop
+        .session
+        .lock()
+        .expect("not poisoned")
+        .as_ref()
+        .map(|session| session.db.clone())
+        .ok_or("no database is open")?;
+    tokio::task::spawn_blocking(move || {
+        let path = PathBuf::from(path);
+        // The save dialog has already asked about replacing a file.
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|error| error.to_string())?;
+        }
+        db.begin_read()
+            .and_then(|read| read.backup(&path))
+            .map(|stats| stats.bytes)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -533,9 +561,9 @@ fn path_argument(args: &[String]) -> Option<String> {
 }
 
 /// The router for a database, as the app serves it (no Studio).
-fn router_for(db: Grafeno, token: Option<&str>) -> Router {
+fn router_for(db: Arc<Grafeno>, token: Option<&str>) -> Router {
     router_with(
-        AppState::new(Arc::new(db), token),
+        AppState::new(db, token),
         &Options {
             studio: false,
             cors_origins: Vec::new(),
@@ -586,6 +614,7 @@ fn main() {
             write_text,
             read_text,
             open_external,
+            backup_database,
             request,
         ])
         .run(tauri::generate_context!())
@@ -611,7 +640,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_bridge_reads_and_writes_in_process() {
-        let router = router_for(Grafeno::in_memory().unwrap(), None);
+        let router = router_for(Arc::new(Grafeno::in_memory().unwrap()), None);
         let health = call(&router, "GET", "/health", None).await;
         assert_eq!(health.status, 200);
         let created = call(&router, "POST", "/v1/namespaces", Some(r#"{"name":"lab"}"#)).await;
@@ -647,7 +676,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn the_bridge_reaches_a_server() {
-        let router = router_for(Grafeno::in_memory().unwrap(), None);
+        let router = router_for(Arc::new(Grafeno::in_memory().unwrap()), None);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });

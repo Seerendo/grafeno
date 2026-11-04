@@ -49,6 +49,16 @@ const OLD_POSTINGS: TableDefinition<PostingKey, u32> = TableDefinition::new("pos
 
 const SCHEMA_KEY: &str = "schema_version";
 
+/// What checking a database file found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileIntegrity {
+    /// Every page matches its checksum.
+    Clean,
+    /// Damage was found and redb repaired it (the last commits may be lost).
+    Repaired,
+}
+
 /// When a commit reaches the disk.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Durability {
@@ -80,6 +90,28 @@ impl Grafeno {
     /// layout if it was written by an older version.
     pub fn open(path: impl AsRef<FsPath>) -> Result<Self> {
         Self::init(Database::create(path).map_err(storage)?)
+    }
+
+    /// Checks every page of a database file against its checksum, which
+    /// normal reads do not (redb trusts its pages, and a damaged one can
+    /// stop the program). Run it on a file that may have been damaged
+    /// (copied badly, a failing disk, edited by something else) before
+    /// using it; no other program may have it open. A file damaged beyond
+    /// repair is an [`Error::Storage`] naming the damage.
+    pub fn verify_file(path: impl AsRef<FsPath>) -> Result<FileIntegrity> {
+        let path = path.as_ref();
+        let damaged = |error: &dyn std::fmt::Display| {
+            Error::Storage(format!("{} is damaged: {error}", path.display()))
+        };
+        let outcome = std::panic::catch_unwind(|| -> Result<FileIntegrity> {
+            let mut db = Database::open(path).map_err(|error| damaged(&error))?;
+            match db.check_integrity() {
+                Ok(true) => Ok(FileIntegrity::Clean),
+                Ok(false) => Ok(FileIntegrity::Repaired),
+                Err(error) => Err(damaged(&error)),
+            }
+        });
+        outcome.unwrap_or_else(|_| Err(damaged(&"its pages cannot be read")))
     }
 
     /// An in-memory database: for tests and short-lived agents.
@@ -218,7 +250,7 @@ impl Grafeno {
             index_entries: tx.open_table(INDEX_ENTRIES).map_err(storage)?,
             registry: tx.open_table(NAMESPACES).map_err(storage)?,
             principals: tx.open_table(PRINCIPALS).map_err(storage)?,
-            _tx: tx,
+            tx,
         })
     }
 
@@ -443,7 +475,7 @@ pub struct ReadTx {
     pub(crate) shared: Arc<Shared>,
     /// The commit this snapshot sees, when known (for the projection cache).
     pub(crate) generation: Option<u64>,
-    _tx: ReadTransaction,
+    pub(crate) tx: ReadTransaction,
 }
 
 impl ReadTx {

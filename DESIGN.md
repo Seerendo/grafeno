@@ -727,7 +727,7 @@ under `/v1` are reserved as namespace names. Tests: a leak matrix over
 every namespace route for a key of another namespace and a reader, owner
 routes, revoked keys, own-only rules over HTTP and GQ, prefix grants.
 
-**10.2 Data integrity under failure.**
+**10.2 Data integrity under failure** (done).
 
 - Crash tests extended to bulk imports, migrations, index rebuilds and
   namespace drops (a child process killed at random moments; every
@@ -738,8 +738,39 @@ routes, revoked keys, own-only rules over HTTP and GQ, prefix grants.
 - Corruption: flipped bytes and truncated files are detected (open fails
   with a clear error, or the check names what is wrong), never a panic or
   silent wrong answers; `grafeno check --all` for every namespace.
-- Online backup: `grafeno backup` and `POST /v1/backup` write a consistent
+- Online backup: `grafeno backup` and `GET /v1/backup` write a consistent
   copy from a read snapshot while writes go on; restore is opening it.
+
+As built:
+- `tests/crash.rs` kills a child process at random moments during a bulk
+  import, a one-transaction import, index rebuilds, namespace drops (and
+  refills) and a layout upgrade: every namespace checks clean afterwards,
+  a one-transaction import is all or nothing, a dropped namespace is gone
+  or whole, an interrupted upgrade upgrades on the next open. A bulk
+  import commits its chunks with eventual durability, so a crash loses
+  the chunks since the last flush, consistently (an *error* keeps them).
+- `tests/fixtures/layout-v1..6.redb.gz` were written by the code of each
+  past layout version (`tests/fixtures/make.py` builds those commits in
+  git worktrees and runs a generator); `tests/upgrade.rs` opens every one
+  with the current code and checks counts, text and vector search, the
+  names index, valid time, traversals, importance, indexes and empty
+  namespaces, then writes and reopens. Every new layout version adds its
+  fixture.
+- Damage: redb trusts its pages, and reading a damaged one can panic
+  inside redb. `Grafeno::verify_file` runs redb's integrity check (every
+  page against its checksum, repairing what it can) before a file is
+  trusted; `grafeno check` runs it first. `tests/corruption.rs` damages a
+  file 150 ways (flipped bytes, zeroed pages, truncation): after
+  verification each file is refused or reads back exactly as before;
+  nothing crashes and no answer silently differs. The server catches
+  panics per request (500, pointing at `grafeno check`).
+- Online backup: `ReadTx::backup` copies every table from the snapshot
+  into a new file (written beside it and renamed when complete; it
+  refuses to run if a table it does not know exists, so a future table
+  cannot be forgotten). `grafeno backup OUT` (from a file, or from a
+  running server with `--config`), `GET /v1/backup` (owners; the response
+  is the file), and a button in the Studio's administration (in the
+  desktop app it writes the file directly). Keys are included.
 
 **10.3 HNSW quality after deletions.** Deleting a vector reconnects its
 neighbors today, but quality after many changes is not measured.

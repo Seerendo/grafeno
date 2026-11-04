@@ -23,6 +23,7 @@
 
 mod access;
 pub mod algo;
+mod backup;
 mod check;
 mod db;
 mod dump;
@@ -37,8 +38,9 @@ mod vector;
 mod writer;
 
 pub use access::{Grant, Principal, Role, check_principal_name};
+pub use backup::BackupStats;
 pub use check::{CheckReport, RebuildReport};
-pub use db::{Actor, Durability, Grafeno, ReadTx, SCHEMA_VERSION, WriteTx};
+pub use db::{Actor, Durability, FileIntegrity, Grafeno, ReadTx, SCHEMA_VERSION, WriteTx};
 pub use dump::{DumpStats, EXPORT_FORMAT, EXPORT_VERSION, ImportOptions, Record};
 pub use grafeno_core::*;
 pub use index::{IndexDef, IndexInfo, IndexRange};

@@ -1722,6 +1722,7 @@ name = "grafeno"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "flate2",
  "grafeno-core",
  "proptest",
  "redb",
@@ -4772,10 +4773,12 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "pin-project-lite",
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
  "url",
 ]
 

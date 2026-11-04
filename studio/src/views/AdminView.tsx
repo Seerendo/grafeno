@@ -5,7 +5,7 @@ import { describeError } from "../api.ts";
 import { IndexesPanel } from "../components/IndexesPanel.tsx";
 import { KeysPanel } from "../components/KeysPanel.tsx";
 import { useStudio } from "../context.ts";
-import { saveText } from "../desktop.ts";
+import { LOCAL_URL, desktop, isDesktop, saveText } from "../desktop.ts";
 import type { CheckReport, DumpStats, RebuildReport } from "../../../clients/typescript/src/index.ts";
 
 /** Saves an export: a save dialog in the desktop app, a download in a browser. */
@@ -14,7 +14,7 @@ function download(name: string, text: string): void {
 }
 
 export function AdminView() {
-  const { client, namespace, namespaces, setNamespace, changed: refreshNamespaces, confirm, toast } = useStudio();
+  const { client, connection, namespace, namespaces, setNamespace, changed: refreshNamespaces, confirm, toast } = useStudio();
   const info = namespaces.find((item) => item.name === namespace);
   const [check, setCheck] = useState<CheckReport | null>(null);
   const [rebuild, setRebuild] = useState<RebuildReport | null>(null);
@@ -97,6 +97,32 @@ export function AdminView() {
           >
             Export everything
           </button>
+          {(!isDesktop || connection.url === LOCAL_URL) && (
+            <button
+              disabled={busy !== null}
+              title="A copy of the whole database file (every namespace and the keys), taken while it keeps working. Owners only."
+              onClick={() =>
+                void task("backup", async () => {
+                  const name = `grafeno-${day}.redb`;
+                  if (isDesktop) {
+                    const path = await desktop.pickSave(name, "redb");
+                    if (!path) return;
+                    const bytes = await desktop.backupTo(path);
+                    toast(`Backup written (${Math.round(bytes / 1024)} KiB).`, "ok");
+                    return;
+                  }
+                  const url = URL.createObjectURL(new Blob([await client.backup()], { type: "application/octet-stream" }));
+                  const link = document.createElement("a");
+                  link.href = url;
+                  link.download = name;
+                  link.click();
+                  URL.revokeObjectURL(url);
+                })
+              }
+            >
+              {busy === "backup" ? "Backing up…" : "Back up the database"}
+            </button>
+          )}
           <label className="button">
             Import a file…
             <input
