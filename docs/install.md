@@ -206,6 +206,8 @@ max_requests = 512          # served at once; more get 503 with Retry-After
 timeout_secs = 30
 max_reads = 50000000        # nodes, edges and index entries read
 max_rows = 1000000          # rows held at once
+max_memory_mb = 512         # one value a query builds, or the rows it holds at once
+max_cost = 0                # refuse queries EXPLAIN estimates above this (0: off)
 ```
 
 Flags and environment variables (`GRAFENO_DB`, `GRAFENO_ADDR`,

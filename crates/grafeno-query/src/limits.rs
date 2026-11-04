@@ -1,5 +1,6 @@
 //! Limits that keep one query from taking the service down: time, records
-//! read, rows held in memory, and cancellation.
+//! read, rows held at once, memory of the values it builds, estimated cost,
+//! and cancellation.
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -7,6 +8,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::QueryError;
+use crate::value::Value;
+
+/// How deeply lists and maps may nest inside one value. Deeper values
+/// would take more stack than a query thread has to build, compare, print
+/// or drop.
+pub(crate) const MAX_VALUE_DEPTH: usize = 128;
 
 /// What one query may use. `None` is no limit.
 #[derive(Clone, Debug, Default)]
@@ -17,6 +24,12 @@ pub struct Limits {
     pub max_reads: Option<u64>,
     /// Rows held at once between clauses, in a match, a sort or a group.
     pub max_rows: Option<usize>,
+    /// Bytes, estimated, of one value the query builds (a string, a list, a
+    /// map) and of the rows it holds at once.
+    pub max_memory: Option<usize>,
+    /// The planner's cost estimate (see `EXPLAIN`) above which a query is
+    /// refused before it runs.
+    pub max_cost: Option<f64>,
     /// Set by the caller to stop the query (when its client goes away).
     pub cancel: Option<Arc<AtomicBool>>,
     /// The namespaces the caller may see, for statements that list them
@@ -46,12 +59,14 @@ impl std::fmt::Debug for NamespaceFilter {
 
 impl Limits {
     /// The server's defaults: 30 seconds, 50 million records read, a
-    /// million rows in memory.
+    /// million rows and 512 MiB in memory, no cost limit.
     pub fn standard() -> Self {
         Self {
             timeout: Some(Duration::from_secs(30)),
             max_reads: Some(50_000_000),
             max_rows: Some(1_000_000),
+            max_memory: Some(512 * 1024 * 1024),
+            max_cost: None,
             cancel: None,
             visible: None,
         }
@@ -68,6 +83,7 @@ pub(crate) struct Budget {
     limits: Limits,
     started: Instant,
     reads: Cell<u64>,
+    work: Cell<u64>,
 }
 
 impl Budget {
@@ -76,7 +92,73 @@ impl Budget {
             limits: limits.clone(),
             started: Instant::now(),
             reads: Cell::new(0),
+            work: Cell::new(0),
         }
+    }
+
+    pub(crate) fn max_cost(&self) -> Option<f64> {
+        self.limits.max_cost
+    }
+
+    /// Counts `n` units of computation (an item of a loop, a kilobyte
+    /// copied) and checks time and cancellation every thousand or so, so
+    /// that queries that compute without reading still stop.
+    pub(crate) fn work(&self, n: u64) -> Result<(), QueryError> {
+        let before = self.work.get();
+        let after = before.saturating_add(n);
+        self.work.set(after);
+        if before >> 10 != after >> 10 {
+            self.tick()?;
+        }
+        Ok(())
+    }
+
+    /// Checks a value the query built: how deeply it nests and how large it
+    /// is, and counts the work of building it.
+    pub(crate) fn value(&self, value: &Value) -> Result<(), QueryError> {
+        let bytes = footprint(value, MAX_VALUE_DEPTH).ok_or_else(|| {
+            QueryError::limit(format!(
+                "the query built a value nested more than {MAX_VALUE_DEPTH} lists or maps deep"
+            ))
+        })?;
+        self.work(bytes as u64 / 256)?;
+        self.memory(bytes, "built a value")
+    }
+
+    /// Checks `bytes` against the memory limit.
+    pub(crate) fn memory(&self, bytes: usize, what: &str) -> Result<(), QueryError> {
+        if let Some(max) = self.limits.max_memory
+            && bytes > max
+        {
+            return Err(QueryError::limit(format!(
+                "the query {what} of more than {} MiB (limit max_memory); aggregate earlier or return less",
+                max / (1024 * 1024)
+            )));
+        }
+        Ok(())
+    }
+
+    /// Checks the rows held at once: how many, and an estimate of their
+    /// memory from a sample of them.
+    pub(crate) fn held<'r, R: 'r>(
+        &self,
+        rows: &'r [R],
+        values: impl Fn(&'r R) -> Box<dyn Iterator<Item = &'r Value> + 'r>,
+    ) -> Result<(), QueryError> {
+        self.rows(rows.len())?;
+        if self.limits.max_memory.is_none() || rows.is_empty() {
+            return Ok(());
+        }
+        let step = (rows.len() / 32).max(1);
+        let (mut sampled, mut bytes) = (0usize, 0usize);
+        for row in rows.iter().step_by(step) {
+            sampled += 1;
+            bytes += 48;
+            for value in values(row) {
+                bytes += 32 + footprint(value, MAX_VALUE_DEPTH).unwrap_or(0);
+            }
+        }
+        self.memory(bytes / sampled * rows.len(), "held rows")
     }
 
     pub(crate) fn reads(&self) -> u64 {
@@ -142,4 +224,32 @@ impl Budget {
         }
         Ok(())
     }
+}
+
+/// The bytes a value takes, roughly; `None` when lists and maps nest deeper
+/// than `depth`. Nodes and edges are shared, and count only a reference.
+pub(crate) fn footprint(value: &Value, depth: usize) -> Option<usize> {
+    const SLOT: usize = std::mem::size_of::<Value>();
+    Some(match value {
+        Value::Str(s) => s.len(),
+        Value::List(items) => {
+            let depth = depth.checked_sub(1)?;
+            let mut bytes = items.len() * SLOT;
+            for item in items {
+                if matches!(item, Value::Str(_) | Value::List(_) | Value::Map(_)) {
+                    bytes += footprint(item, depth)?;
+                }
+            }
+            bytes
+        }
+        Value::Map(entries) => {
+            let depth = depth.checked_sub(1)?;
+            let mut bytes = 0;
+            for (key, item) in entries {
+                bytes += 64 + key.len() + footprint(item, depth)?;
+            }
+            bytes
+        }
+        _ => 0,
+    })
 }

@@ -215,7 +215,9 @@ fn rebuilds_and_drops_survive_being_killed() {
             (1_500, 1_499),
             "the other namespace is untouched"
         );
-        // The dropped namespace is either gone or whole.
+        // The dropped namespace is either gone or whole: whole fills of
+        // 400, as a run killed between a fill and its drop leaves one for
+        // the next run to fill again.
         let temp_ns = db.begin_read().unwrap().namespace("temp").unwrap();
         eprintln!(
             "drop: temp is {:?} after the crash",
@@ -223,7 +225,7 @@ fn rebuilds_and_drops_survive_being_killed() {
         );
         if temp_ns.is_some() {
             let (nodes, _) = consistent(&db, "temp");
-            assert!(nodes == 0 || nodes == 400, "{nodes} nodes in temp");
+            assert!(nodes % 400 == 0, "{nodes} nodes in temp");
         }
     }
     let _ = std::fs::remove_file(&db_path);

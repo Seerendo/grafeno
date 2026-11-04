@@ -804,7 +804,7 @@ of the namespace's own vectors (`grafeno check --recall N`,
 inserts it back, churns three times and compacts, checking recall and
 that every reinserted vector is found.
 
-**10.4 Costly GQ.**
+**10.4 Costly GQ** (done).
 
 - Adversarial tests: cartesian products, long variable-length paths,
   large UNWINDs, deep nesting, huge literals and parameters, sorts and
@@ -816,6 +816,45 @@ that every reinserted vector is found.
   optional limit that refuses plans estimated above it before running.
 - Fuzzing the parser and planner (random queries from the grammar):
   errors, never panics.
+
+As built: `tests/adversarial.rs` runs 32 hostile queries on a graph of
+2 000 nodes and 6 000 edges, each on a thread with a server worker's 2 MiB
+stack, and requires each to end within twice its 2 s timeout. The first
+run found three ways out. Loops that only compute (`reduce`, list
+comprehensions, quantifiers, `UNWIND`) never looked at the clock, so a
+`reduce` over a million items ran for minutes: they now count work
+(`Budget::work`), checking time and cancellation every thousand items and
+every 256 KB copied. Values had no size: a string doubled forty times, a
+`replace` that multiplies its input or a list of lists could take every
+byte of memory, so `max_memory` (512 MiB) bounds each value built (checked
+before a concatenation allocates, and after list and map literals,
+comprehensions and functions), and an estimate of the rows held at once,
+from a sample of 32, is checked between clauses and inside `UNWIND`. And
+deep nesting overflowed the stack (5 000 parentheses, 50 000 `AND`s, 20 000
+`NOT`s): the parser counts the depth of the tree it builds, chains of
+operators included, and stops at 200, while values stop at 128 lists or
+maps deep. Each hostile query now ends with `query_limit` or an error in
+at most 3 s, most in well under one.
+
+`EXPLAIN` gains `rows` and `cost` columns, estimated from the counts the
+namespace keeps (nodes and edges per label): an anchor's rows come from its
+source (one for a bound node or an `@id`, a tenth of the label for an
+index lookup, the label's count for a scan), each expansion multiplies by
+the average degree for its edge labels (summed over the hops of a
+variable-length step), a node label keeps its share of the nodes, and
+conditions keep half. Loops in expressions cost their list's length when it
+can be told (literals, `range` of literals) and ten otherwise; algorithms
+cost what they visit (betweenness, a search from every node). The estimate
+ranks an index lookup (hundreds) below a scan (thousands) below a
+three-way product or ten-hop paths (tens of billions). `max_cost` refuses
+a statement whose total is above it before it reads anything; it is off by
+default, as the estimate is only as good as the counts.
+
+`tests/fuzz.rs` (proptest) feeds random token sequences, valid queries with
+random edits and arbitrary text to the lexer, parser, planner, `EXPLAIN`
+and executor: errors, never panics. Parameters need no limit of their own:
+the HTTP body limit bounds them, `serde_json` refuses nesting deeper than
+128, and their use is checked like any value's.
 
 **10.5 Correct memory merges.** Merging today joins two nodes when asked.
 

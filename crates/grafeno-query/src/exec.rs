@@ -201,9 +201,13 @@ pub fn execute_read_with(
 }
 
 fn plan_info(read: &ReadTx, ns: &str) -> Result<PlanInfo, QueryError> {
+    let stats = read.stats(ns)?;
     Ok(PlanInfo {
         indexes: read.index_defs(ns)?,
-        label_counts: read.stats(ns)?.node_labels.into_iter().collect(),
+        label_counts: stats.node_labels.into_iter().collect(),
+        edge_labels: stats.edge_labels.into_iter().collect(),
+        nodes: stats.nodes,
+        edges: stats.edges,
     })
 }
 
@@ -481,6 +485,16 @@ impl<'a> Runner<'a> {
     }
 
     fn run(mut self, statement: &Statement) -> Result<QueryResult, QueryError> {
+        if let Some(max) = self.budget.max_cost() {
+            let (_, cost) = crate::cost::estimate(statement, &self.info);
+            if cost > max {
+                return Err(QueryError::limit(format!(
+                    "the query's estimated cost {} is above {} (limit max_cost); EXPLAIN shows where it comes from",
+                    show_cost(cost),
+                    show_cost(max)
+                )));
+            }
+        }
         let mut columns: Option<Vec<String>> = None;
         let mut rows: Vec<Vec<Value>> = Vec::new();
         for (index, part) in statement.parts.iter().enumerate() {
@@ -560,7 +574,7 @@ impl<'a> Runner<'a> {
                 _ => None,
             };
             flow = self.apply(clause, flow, cap)?;
-            self.budget.rows(flow.rows.len())?;
+            self.budget.held(&flow.rows, |row| Box::new(row.values()))?;
             bound.extend(flow.vars.iter().cloned());
             self.record(
                 clause.name(),
@@ -702,10 +716,15 @@ impl<'a> Runner<'a> {
                         Value::Null => Vec::new(),
                         other => vec![other],
                     };
+                    let next_len = row.len();
                     for item in items {
                         let mut next = row.clone();
                         next.insert(var.clone(), item);
                         out.push(next);
+                        self.budget.work(1 + next_len as u64)?;
+                        if out.len() % 1024 == 0 {
+                            self.budget.held(&out, |row| Box::new(row.values()))?;
+                        }
                     }
                 }
                 flow.rows = out;
@@ -2001,6 +2020,7 @@ fn explain(statement: &Statement, info: &PlanInfo) -> Result<QueryResult, QueryE
             profile: None,
         });
     }
+    let (estimates, _) = crate::cost::estimate(statement, info);
     let mut steps: Vec<(String, String)> = Vec::new();
     for (index, part) in statement.parts.iter().enumerate() {
         if index > 0 {
@@ -2021,21 +2041,35 @@ fn explain(statement: &Statement, info: &PlanInfo) -> Result<QueryResult, QueryE
         }
     }
     Ok(QueryResult {
-        columns: vec!["step".into(), "operation".into(), "details".into()],
+        columns: ["step", "operation", "details", "rows", "cost"]
+            .map(String::from)
+            .to_vec(),
         rows: steps
             .into_iter()
+            .zip(estimates)
             .enumerate()
-            .map(|(index, (operation, details))| {
+            .map(|(index, ((operation, details), estimate))| {
                 vec![
                     Value::Int(index as i64 + 1),
                     Value::Str(operation),
                     Value::Str(details),
+                    Value::Float(estimate.rows.round()),
+                    Value::Float(estimate.cost.round()),
                 ]
             })
             .collect(),
         stats: WriteStats::default(),
         profile: None,
     })
+}
+
+/// A cost as people read it: `12 400`, `3.1e9`.
+fn show_cost(cost: f64) -> String {
+    if cost < 1e7 {
+        format!("{cost:.0}")
+    } else {
+        format!("{cost:.1e}")
+    }
 }
 
 /// Variables a clause binds, for planning the clauses after it.

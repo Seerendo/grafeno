@@ -21,6 +21,9 @@ use crate::value::Value;
 pub(crate) struct PlanInfo {
     pub(crate) indexes: Vec<IndexDef>,
     pub(crate) label_counts: HashMap<String, u64>,
+    pub(crate) edge_labels: HashMap<String, u64>,
+    pub(crate) nodes: u64,
+    pub(crate) edges: u64,
 }
 
 /// The parts of a condition joined by `AND`.

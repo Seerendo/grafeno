@@ -265,6 +265,13 @@ cancelled.
 
 `EXPLAIN` before a statement returns its plan as a table (step, operation,
 details: where each pattern starts and how it expands) without running it.
+Its last two columns are estimates from the namespace's counts of nodes
+and edges per label: `rows`, the rows after the step, and `cost`, the work
+so far (rows touched, records read, items computed in loops such as
+`reduce` or a comprehension). They are rough, assuming for instance that a
+condition keeps half the rows, but they tell a query that touches thousands
+of rows from one that touches billions; the cost of the last step is the
+statement's total, which `max_cost` compares.
 `PROFILE` runs the statement and adds, per step, the rows it produced and
 the milliseconds it took (`profile` in the JSON result, a second table in
 the shell, the *Profile* view in the Studio).
@@ -505,11 +512,24 @@ DROP CONSTRAINT Person_email_unique IF EXISTS;
 - Indexes travel with exports and survive `rebuild`; `check` verifies them.
 
 **Limits.** Over HTTP and MCP, each query runs within limits, so one query
-cannot take the service down: 30 seconds, 50 million records read and a
-million rows held at once by default (`[query]` in `grafeno.toml`). A query
-over a limit fails with the code `query_limit` and changes nothing; a query
-whose client disconnects is cancelled. The library and the local shell run
-without limits (`grafeno_query::execute_with` takes them).
+cannot take the service down. By default (`[query]` in `grafeno.toml`):
+
+| Limit | Default | What it bounds |
+| --- | --- | --- |
+| `timeout_secs` | 30 | wall time, checked while reading and inside loops that only compute (`reduce`, comprehensions, `UNWIND`) |
+| `max_reads` | 50 000 000 | nodes, edges and index entries read |
+| `max_rows` | 1 000 000 | rows held at once, between clauses and inside a match, an `UNWIND`, a sort or a group |
+| `max_memory_mb` | 512 | one value the query builds (a string, list or map) and, estimated from a sample, the rows held at once |
+| `max_cost` | off | the `EXPLAIN` estimate: a statement above it is refused before it runs |
+
+A query over a limit fails with the code `query_limit` and changes nothing;
+a query whose client disconnects is cancelled. Two more bounds hold
+everywhere: an expression may nest at most 200 levels deep (parentheses,
+lists, calls, and chains of operators: `a OR b OR …` with hundreds of terms
+is better written `x IN [...]`), and a value at most 128 lists or maps
+deep. Past either, the query fails with an error instead of exhausting the
+stack. The library and the local shell run without the other limits
+(`grafeno_query::execute_with` takes them).
 
 ## Not supported (yet)
 

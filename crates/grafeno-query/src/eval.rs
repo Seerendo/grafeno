@@ -336,18 +336,26 @@ pub(crate) fn eval(ctx: &Context, expr: &Expr, scope: Scope) -> Result<Value, Qu
                 ))),
             }
         }
-        Expr::List(items) => Ok(Value::List(
-            items
-                .iter()
-                .map(|item| eval(ctx, item, scope))
-                .collect::<Result<_, _>>()?,
-        )),
-        Expr::Map(entries) => Ok(Value::Map(
-            entries
-                .iter()
-                .map(|(key, value)| Ok((key.clone(), eval(ctx, value, scope)?)))
-                .collect::<Result<BTreeMap<_, _>, QueryError>>()?,
-        )),
+        Expr::List(items) => {
+            let value = Value::List(
+                items
+                    .iter()
+                    .map(|item| eval(ctx, item, scope))
+                    .collect::<Result<_, _>>()?,
+            );
+            ctx.budget.value(&value)?;
+            Ok(value)
+        }
+        Expr::Map(entries) => {
+            let value = Value::Map(
+                entries
+                    .iter()
+                    .map(|(key, value)| Ok((key.clone(), eval(ctx, value, scope)?)))
+                    .collect::<Result<BTreeMap<_, _>, QueryError>>()?,
+            );
+            ctx.budget.value(&value)?;
+            Ok(value)
+        }
         Expr::Unary(UnOp::Not, inner) => {
             Ok(from_truth(truth(&eval(ctx, inner, scope)?)?.map(|b| !b)))
         }
@@ -391,7 +399,23 @@ pub(crate) fn eval(ctx: &Context, expr: &Expr, scope: Scope) -> Result<Value, Qu
             Ok(from_truth(left.zip(right).map(|(a, b)| a != b)))
         }
         Expr::Binary(op, left, right) => {
-            binary(*op, &eval(ctx, left, scope)?, &eval(ctx, right, scope)?)
+            let (left, right) = (eval(ctx, left, scope)?, eval(ctx, right, scope)?);
+            if *op == BinOp::Add {
+                // Before the concatenation allocates: a string doubled
+                // forty times must stop at the limit, not past it.
+                let shallow = |value: &Value| match value {
+                    Value::Str(s) => s.len(),
+                    Value::List(items) => items.len() * std::mem::size_of::<Value>(),
+                    _ => 0,
+                };
+                ctx.budget
+                    .memory(shallow(&left) + shallow(&right), "built a value")?;
+            }
+            let value = binary(*op, &left, &right)?;
+            if *op == BinOp::Add && matches!(value, Value::Str(_) | Value::List(_)) {
+                ctx.budget.value(&value)?;
+            }
+            Ok(value)
         }
         Expr::IsNull { expr, negated } => {
             Ok(Value::Bool(eval(ctx, expr, scope)?.is_null() != *negated))
@@ -476,19 +500,27 @@ pub(crate) fn eval(ctx: &Context, expr: &Expr, scope: Scope) -> Result<Value, Qu
             let items = items_of(eval(ctx, list, scope)?, "a list comprehension")?;
             let mut row = scope.row();
             let mut out = Vec::new();
+            let mut bytes = 0usize;
             for item in items {
+                ctx.budget.work(1)?;
                 row.insert(var.clone(), item.clone());
                 if let Some(filter) = filter
                     && truth(&eval(ctx, filter, Scope::Row(&row))?)? != Some(true)
                 {
                     continue;
                 }
-                out.push(match map {
+                let item = match map {
                     Some(map) => eval(ctx, map, Scope::Row(&row))?,
                     None => item,
-                });
+                };
+                bytes += std::mem::size_of::<Value>()
+                    + crate::limits::footprint(&item, crate::limits::MAX_VALUE_DEPTH).unwrap_or(0);
+                ctx.budget.memory(bytes, "built a list")?;
+                out.push(item);
             }
-            Ok(Value::List(out))
+            let value = Value::List(out);
+            ctx.budget.value(&value)?;
+            Ok(value)
         }
         Expr::Quantified {
             quantifier,
@@ -504,6 +536,7 @@ pub(crate) fn eval(ctx: &Context, expr: &Expr, scope: Scope) -> Result<Value, Qu
             let mut row = scope.row();
             let (mut yes, mut no, mut unknown) = (0usize, 0usize, 0usize);
             for item in items {
+                ctx.budget.work(1)?;
                 row.insert(var.clone(), item);
                 match truth(&eval(ctx, predicate, Scope::Row(&row))?)? {
                     Some(true) => yes += 1,
@@ -536,6 +569,7 @@ pub(crate) fn eval(ctx: &Context, expr: &Expr, scope: Scope) -> Result<Value, Qu
             let items = items_of(eval(ctx, list, scope)?, "reduce()")?;
             let mut row = scope.row();
             for item in items {
+                ctx.budget.work(1)?;
                 row.insert(acc.clone(), value);
                 row.insert(var.clone(), item);
                 value = eval(ctx, expr, Scope::Row(&row))?;
@@ -558,7 +592,11 @@ pub(crate) fn eval(ctx: &Context, expr: &Expr, scope: Scope) -> Result<Value, Qu
                 .iter()
                 .map(|arg| eval(ctx, arg, scope))
                 .collect::<Result<Vec<_>, _>>()?;
-            function(ctx, name, values)
+            let value = function(ctx, name, values)?;
+            if matches!(value, Value::Str(_) | Value::List(_) | Value::Map(_)) {
+                ctx.budget.value(&value)?;
+            }
+            Ok(value)
         }
     }
 }
@@ -1153,7 +1191,19 @@ fn function(ctx: &Context, name: &str, args: Vec<Value>) -> Result<Value, QueryE
         "replace" => {
             arity(name, &args, 3..=3)?;
             let text = string_arg(name, &args[0])?;
-            Value::Str(text.replace(string_arg(name, &args[1])?, string_arg(name, &args[2])?))
+            let (from, to) = (string_arg(name, &args[1])?, string_arg(name, &args[2])?);
+            if to.len() > from.len() {
+                let found = if from.is_empty() {
+                    text.chars().count() + 1
+                } else {
+                    text.matches(from).count()
+                };
+                ctx.budget.memory(
+                    text.len() + found.saturating_mul(to.len() - from.len()),
+                    "built a value",
+                )?;
+            }
+            Value::Str(text.replace(from, to))
         }
         "split" => {
             arity(name, &args, 2..=2)?;

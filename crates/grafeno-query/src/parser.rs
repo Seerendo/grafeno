@@ -15,6 +15,7 @@ pub(crate) fn parse(source: &str) -> Result<Statement, QueryError> {
         source,
         tokens: lex(source)?,
         position: 0,
+        depth: 0,
     };
     let statement = parser.statement()?;
     parser.eat(&Token::Semicolon);
@@ -24,13 +25,32 @@ pub(crate) fn parse(source: &str) -> Result<Statement, QueryError> {
     Ok(statement)
 }
 
+/// How deep the syntax tree of an expression may grow: nested
+/// parentheses, lists, calls and subqueries, and chains of operators
+/// (`a + b + c` nests too). Deeper trees would take more stack than a query
+/// thread has, to evaluate or to drop.
+const MAX_DEPTH: usize = 200;
+
 struct Parser<'a> {
     source: &'a str,
     tokens: Vec<Spanned>,
     position: usize,
+    /// The depth of the syntax tree being built.
+    depth: usize,
 }
 
 impl Parser<'_> {
+    /// One level deeper in the syntax tree.
+    fn deeper(&mut self) -> Result<(), QueryError> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(self.error(format!(
+                "the query nests too deeply (more than {MAX_DEPTH} levels of parentheses, lists, calls or operators in a row); split it, or use a list and IN"
+            )));
+        }
+        Ok(())
+    }
+
     fn peek(&self) -> &Token {
         &self.tokens[self.position].token
     }
@@ -760,43 +780,66 @@ impl Parser<'_> {
     // ------------------------------------------------------------ expressions
 
     pub(crate) fn expr(&mut self) -> Result<Expr, QueryError> {
-        self.or()
+        let base = self.depth;
+        self.deeper()?;
+        let expr = self.or()?;
+        self.depth = base;
+        Ok(expr)
     }
 
     fn or(&mut self) -> Result<Expr, QueryError> {
+        let base = self.depth;
         let mut left = self.xor()?;
         while self.eat_keyword("OR") {
+            self.deeper()?;
             left = Expr::Binary(BinOp::Or, Box::new(left), Box::new(self.xor()?));
         }
+        self.depth = base;
         Ok(left)
     }
 
     fn xor(&mut self) -> Result<Expr, QueryError> {
+        let base = self.depth;
         let mut left = self.and()?;
         while self.eat_keyword("XOR") {
+            self.deeper()?;
             left = Expr::Binary(BinOp::Xor, Box::new(left), Box::new(self.and()?));
         }
+        self.depth = base;
         Ok(left)
     }
 
     fn and(&mut self) -> Result<Expr, QueryError> {
+        let base = self.depth;
         let mut left = self.not()?;
         while self.eat_keyword("AND") {
+            self.deeper()?;
             left = Expr::Binary(BinOp::And, Box::new(left), Box::new(self.not()?));
         }
+        self.depth = base;
         Ok(left)
     }
 
     fn not(&mut self) -> Result<Expr, QueryError> {
-        if self.eat_keyword("NOT") {
-            return Ok(Expr::Unary(UnOp::Not, Box::new(self.not()?)));
+        let base = self.depth;
+        let mut count = 0;
+        while self.eat_keyword("NOT") {
+            self.deeper()?;
+            count += 1;
         }
-        self.comparison()
+        let mut expr = self.comparison()?;
+        for _ in 0..count {
+            expr = Expr::Unary(UnOp::Not, Box::new(expr));
+        }
+        self.depth = base;
+        Ok(expr)
     }
 
     fn comparison(&mut self) -> Result<Expr, QueryError> {
+        let base = self.depth;
         let mut left = self.additive()?;
         loop {
+            self.deeper()?;
             let op = match self.peek() {
                 Token::Eq => Some(BinOp::Eq),
                 Token::Neq => Some(BinOp::Neq),
@@ -833,64 +876,88 @@ impl Parser<'_> {
             } else if self.peek() == &Token::Colon {
                 left = Expr::HasLabels(Box::new(left), self.labels()?);
             } else {
+                self.depth = base;
                 return Ok(left);
             }
         }
     }
 
     fn additive(&mut self) -> Result<Expr, QueryError> {
+        let base = self.depth;
         let mut left = self.multiplicative()?;
         loop {
             let op = match self.peek() {
                 Token::Plus => BinOp::Add,
                 Token::Minus => BinOp::Sub,
-                _ => return Ok(left),
+                _ => {
+                    self.depth = base;
+                    return Ok(left);
+                }
             };
             self.advance();
+            self.deeper()?;
             left = Expr::Binary(op, Box::new(left), Box::new(self.multiplicative()?));
         }
     }
 
     fn multiplicative(&mut self) -> Result<Expr, QueryError> {
+        let base = self.depth;
         let mut left = self.unary()?;
         loop {
             let op = match self.peek() {
                 Token::Star => BinOp::Mul,
                 Token::Slash => BinOp::Div,
                 Token::Percent => BinOp::Mod,
-                _ => return Ok(left),
+                _ => {
+                    self.depth = base;
+                    return Ok(left);
+                }
             };
             self.advance();
+            self.deeper()?;
             left = Expr::Binary(op, Box::new(left), Box::new(self.unary()?));
         }
     }
 
     fn unary(&mut self) -> Result<Expr, QueryError> {
-        if self.eat(&Token::Minus) {
-            return Ok(Expr::Unary(UnOp::Neg, Box::new(self.unary()?)));
+        let base = self.depth;
+        let mut negations = 0usize;
+        loop {
+            if self.eat(&Token::Minus) {
+                self.deeper()?;
+                negations += 1;
+            } else if self.eat(&Token::Plus) {
+                self.deeper()?;
+            } else {
+                break;
+            }
         }
-        if self.eat(&Token::Plus) {
-            return self.unary();
+        let mut expr = self.power()?;
+        for _ in 0..negations {
+            expr = Expr::Unary(UnOp::Neg, Box::new(expr));
         }
-        self.power()
+        self.depth = base;
+        Ok(expr)
     }
 
     /// `a ^ b`, right-associative and tighter than unary minus.
     fn power(&mut self) -> Result<Expr, QueryError> {
+        let depth = self.depth;
         let base = self.postfix()?;
         if self.eat(&Token::Caret) {
-            return Ok(Expr::Binary(
-                BinOp::Pow,
-                Box::new(base),
-                Box::new(self.unary()?),
-            ));
+            self.deeper()?;
+            let exponent = self.unary()?;
+            self.depth = depth;
+            return Ok(Expr::Binary(BinOp::Pow, Box::new(base), Box::new(exponent)));
         }
         Ok(base)
     }
 
     fn postfix(&mut self) -> Result<Expr, QueryError> {
+        let base = self.depth;
         let mut expr = self.atom()?;
         loop {
+            self.deeper()?;
             if self.eat(&Token::Dot) {
                 expr = Expr::Property(Box::new(expr), self.key()?);
             } else if self.eat(&Token::LBracket) {
@@ -908,6 +975,7 @@ impl Parser<'_> {
                 self.expect(Token::RBracket, "`]`")?;
                 expr = Expr::Index(Box::new(expr), Box::new(index));
             } else {
+                self.depth = base;
                 return Ok(expr);
             }
         }

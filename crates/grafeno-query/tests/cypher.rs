@@ -370,7 +370,10 @@ fn explain_and_profile() {
         &db,
         "EXPLAIN MATCH (a:Person {name: 'Ana'})-[:knows]->(f) WITH f MATCH (f)-[:works_at]->(c) RETURN c.name",
     );
-    assert_eq!(plan.columns, ["step", "operation", "details"]);
+    assert_eq!(
+        plan.columns,
+        ["step", "operation", "details", "rows", "cost"]
+    );
     let steps: Vec<(String, String)> = plan
         .rows
         .iter()

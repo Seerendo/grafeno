@@ -102,6 +102,11 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
   deletions, reinserts and churn; four repair bugs fixed (a reinserted
   vector could become its own only neighbor), so recall stays at 0.99 or
   more; `grafeno compact` and a recall estimate (`grafeno check --recall`).
+- **Phase 10.4, costly queries:** 32 hostile queries (products, long paths,
+  huge `UNWIND`s and reduces, deep nesting) all stop within their limits; a
+  memory limit for values and held rows, time checked inside computing
+  loops, a nesting limit, cost estimates in `EXPLAIN` with an optional
+  `max_cost`, and a fuzz test that the parser and planner never panic.
 
 ## Installing
 

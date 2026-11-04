@@ -14,6 +14,8 @@
 //! timeout_secs = 30
 //! max_reads = 50000000   # nodes, edges and index entries read
 //! max_rows = 1000000     # rows held at once
+//! max_memory_mb = 512    # one value built, or the rows held at once
+//! max_cost = 0           # refuse queries EXPLAIN estimates above this (off)
 //! ```
 
 use std::net::SocketAddr;
@@ -72,6 +74,10 @@ pub struct QueryConfig {
     pub max_reads: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_rows: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_memory_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost: Option<f64>,
 }
 
 impl QueryConfig {
@@ -96,6 +102,18 @@ impl QueryConfig {
                 Some(0) => None,
                 Some(max) => Some(max),
                 None => standard.max_rows,
+            },
+            max_memory: match self.max_memory_mb {
+                Some(0) => None,
+                Some(mb) => {
+                    Some(usize::try_from(mb.saturating_mul(1024 * 1024)).unwrap_or(usize::MAX))
+                }
+                None => standard.max_memory,
+            },
+            max_cost: match self.max_cost {
+                Some(max) if max > 0.0 => Some(max),
+                Some(_) => None,
+                None => standard.max_cost,
             },
             cancel: None,
             visible: None,

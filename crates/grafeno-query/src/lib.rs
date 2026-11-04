@@ -40,6 +40,7 @@
 
 mod algorithms;
 mod ast;
+mod cost;
 mod eval;
 mod exec;
 mod lexer;

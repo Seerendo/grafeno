@@ -178,8 +178,8 @@ All bodies are JSON. Everything under `/v1` needs `Authorization: Bearer
 <secret>` (the token or a key) unless the server is open. Errors look like
 `{"error": {"code": "not_found", "message": "…"}}`, with codes `bad_request`
 (malformed body), `invalid` (rejected input), `invalid_query` (a GQ error),
-`query_limit` (a GQ query over its time, reads or rows limit; see `[query]` in
-`grafeno.toml`), `not_found`, `conflict` (409: it exists already),
+`query_limit` (a GQ query over its time, reads, rows, memory or cost limit;
+see `[query]` in `grafeno.toml`), `not_found`, `conflict` (409: it exists already),
 `unauthorized` (401: no valid secret), `forbidden` (403: the key may not do
 this), `busy` (503 with `Retry-After`:
 too many requests at once, or too many writes waiting) and `internal`.
