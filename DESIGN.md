@@ -353,8 +353,9 @@ without a current user. They remain possible for embedded use.
    archiving, consolidation into summaries.
 8. **Performance, query language and analysis** (done, in five steps;
    see below).
-9. **Desktop application**: from the browser to a desktop app (guidelines
-   to come after phase 8).
+9. **Desktop application** (planned, in five steps; see below): Grafeno
+   as a desktop app with its own installers, a new design and a graph you
+   can handle directly.
 10. **Integrations**: Grafito first, Python bindings, read replicas.
 
 ### Phase 8 plan
@@ -497,6 +498,95 @@ cancellation between rounds.
 A performance pass (layout version 3) followed phase 4: traversals 3-4×
 faster, BM25 3× faster, vector inserts 2.5× faster in batches. Numbers and
 the remaining limits are in [docs/benchmarks.md](docs/benchmarks.md).
+
+### Phase 9 plan
+
+The guidelines (2026-11-04): a desktop application with `.exe` and Linux
+installers; a complete redesign with new typography and an avant-garde
+look; a graph that moves (click, drag freely, interact with its nodes);
+namespaces that behave predictably; and the Grafeno icon on every
+executable and installer. Shell: Tauri (Rust, the engine runs inside the
+app). Direction: *graph lab*. Each step ends with tests, documentation and
+its own commit.
+
+**9.1 Namespaces as things you create.** Today a namespace exists only
+while it holds a node: the Studio's picker "opens" a name without creating
+anything, so an empty `demo` disappears from the list as soon as another
+one is chosen, and choosing `demo` again cannot show whether it was
+created or only switched to. Namespaces become records of their own.
+
+- A `namespaces` table (layout version 6) with the name, creation time
+  and an optional description; the upgrade registers every namespace that
+  has data. Writing to an unknown namespace still registers it, so
+  libraries and imports keep working.
+- `ReadTx::namespaces` lists registered namespaces, empty ones included,
+  with their counts. `WriteTx::create_namespace`, `rename_namespace` and
+  `drop_namespace` (deletes everything in it, after a confirmation in
+  every UI).
+- HTTP `POST /v1/namespaces`, `PATCH`/`DELETE /v1/namespaces/{ns}`; MCP
+  and the shell (`\ns create`, `\ns drop`); GQ `SHOW NAMESPACES`.
+- The Studio separates *switching* (a list of every namespace, the current
+  one marked) from *creating* (an explicit "New namespace" with a name,
+  which fails visibly if it exists), and says which happened.
+
+**9.2 Graph lab design system.** A full redesign of the Studio, which the
+desktop app shares.
+
+- Dark first (with a light theme), the graph canvas filling the window
+  and the tools in floating panels with blur; a command bar instead of the
+  top bar; views as workspaces on the left rail.
+- Typography: Space Grotesk for the interface and headings, JetBrains Mono
+  for data, ids and code; both bundled (SIL OFL), so the desktop app works
+  offline.
+- New tokens (color, space, radius, elevation, motion), components rebuilt
+  on them (buttons, inputs, menus, tables, dialogs, toasts, inspector), and
+  the dataviz palette re-validated for both themes.
+- Every view redone on it: overview, explorer, graph, scripts, search,
+  memory, administration.
+
+**9.3 A graph you can handle.** Cytoscape's static layouts give way to a
+live physics simulation (d3-force) drawn on a canvas of its own.
+
+- Drag any node and the rest reacts; release to let it settle, or pin it
+  where it is (double-click unpins). The simulation cools down when
+  nothing moves and wakes up on any change.
+- Hover lights a node's neighborhood; click selects and opens the
+  inspector; double-click expands its neighbors, which grow out of it;
+  lasso and shift-click select several nodes to move, pin, hide or delete
+  together; a context menu on nodes and edges (expand, connect, pin, hide,
+  delete, end a fact).
+- Connect two nodes by dragging from a node's handle onto another; edges
+  drawn with arrows, labels on hover, curved when parallel.
+- Zoom and pan with inertia, fit, a minimap, search to fly to a node;
+  labels and colors by label, community or property; sizes by centrality
+  (phase 8.5); clusters can be collapsed into one node.
+- Smooth at a few thousand nodes on screen (canvas, spatial index for
+  hits, labels only when legible).
+
+**9.4 Desktop application (Tauri).** A new crate, `grafeno-desktop`
+(`apps/desktop`), wraps the Studio in a native window.
+
+- Local mode: the app opens a database file (create, open, recent files)
+  and runs the engine inside its own process, serving the HTTP API on a
+  random loopback port with a random token that only its window knows; the
+  window loads the Studio from it. No service or terminal needed.
+- Remote mode: connect to a Grafeno server (the installed service or
+  another machine) with its URL and token; saved connections.
+- Native menus and shortcuts, file dialogs for import and export, one
+  instance per database, window size and position kept, links opened in
+  the system browser.
+
+**9.5 Installers and icons.** One source for every icon: the graphene logo
+rendered to `.ico` (16-256 px), `.png` sizes and the Linux icon theme.
+
+- Desktop app installers from the Tauri bundler: Windows NSIS `.exe` (and
+  `.msi`), Linux `.deb`, `.rpm` and `.AppImage`, each with the Grafeno
+  icon on the installer, the executable, the shortcut, the task bar and the
+  application menu (`.desktop` entry).
+- The server packages keep their role (service, headless machines) and
+  get the icon too: the setup `.exe` and `grafeno.exe` on Windows, a
+  `.desktop` entry and icons in the `.deb` and `.rpm`.
+- The release workflow builds both families on tags.
 
 ## Open decisions
 
