@@ -1,3 +1,4 @@
 /target
 *.redb
 /dist
+.claude

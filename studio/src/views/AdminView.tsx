@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { describeError } from "../api.ts";
-import { useStudio } from "../App.tsx";
+import { useStudio } from "../context.ts";
 import type { CheckReport, DumpStats, RebuildReport } from "../../../clients/typescript/src/index.ts";
 
 function download(name: string, text: string): void {
@@ -14,7 +14,7 @@ function download(name: string, text: string): void {
 }
 
 export function AdminView() {
-  const { client, namespace, refreshNamespaces } = useStudio();
+  const { client, namespace, changed: refreshNamespaces, confirm } = useStudio();
   const [check, setCheck] = useState<CheckReport | null>(null);
   const [rebuild, setRebuild] = useState<RebuildReport | null>(null);
   const [imported, setImported] = useState<DumpStats | null>(null);
@@ -51,8 +51,8 @@ export function AdminView() {
           </button>
           <button
             disabled={busy !== null}
-            onClick={() => {
-              if (!window.confirm(`Rebuild every index of "${namespace}" from its records?`)) return;
+            onClick={async () => {
+              if (!(await confirm({ title: `Rebuild the indexes of “${namespace}”?`, message: "Every index and counter is rebuilt from the records. Reads keep working.", confirm: "Rebuild" }))) return;
               void task("rebuild", async () => setRebuild(await client.namespace(namespace).rebuild()));
             }}
           >

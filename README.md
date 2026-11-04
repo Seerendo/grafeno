@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/assets/logo.svg" width="96" alt="Grafeno logo: three fused carbon rings of a graphene lattice"></p>
+
 # Grafeno
 
 A graph engine in Rust for agent memory and knowledge: a property graph with
@@ -29,6 +31,12 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
   installer with a Windows service; `.deb` and `.rpm` packages with a
   systemd service; `install.sh` for any Linux. See
   [docs/install.md](docs/install.md).
+- **Studio redesign:** a new look with light and dark themes; nodes, labels,
+  properties, text, importance and facts are created and edited from the
+  interface (explorer, graph and dialogs); a script workspace with tabs,
+  GQ highlighting and completion, run-at-cursor or run-all, and results as a
+  table, JSON or graph; a command palette (Ctrl+K). The logo is a piece of
+  graphene: three fused carbon rings.
 - **Phase 7, memory:** entities found by normalized names and aliases (MCP
   `remember` updates them instead of duplicating), importance, accesses and
   decay in recall ranking, duplicate detection and merging, archiving, and

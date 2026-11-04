@@ -1,9 +1,33 @@
 # Grafeno Studio
 
-The web interface of Grafeno: overview, explorer, graph view with time
-travel, GQ query editor, search and context lab, memory upkeep (duplicates,
-weak memories, consolidation) and administration. It is
-built into `grafeno serve` at <http://127.0.0.1:7810/studio/>.
+The web interface of Grafeno, built into `grafeno serve` at
+<http://127.0.0.1:7810/studio/>. Everything can be done from it, without a
+terminal:
+
+- **Overview**: namespaces, counts per label, quick actions.
+- **Explorer**: filter by label, name or text; create nodes; edit names,
+  labels, properties (typed: text, number, yes/no, JSON), text and
+  importance in place; add, end, retract or delete facts; select several
+  nodes to archive or delete them.
+- **Graph**: draw the graph around search results or everything, create
+  nodes, connect two nodes by clicking them, inspect and end facts, travel
+  in time with “valid at”.
+- **Scripts**: a GQ workspace like a SQL editor. Several scripts in tabs
+  (kept in the browser, opened from and saved to `.gq` files), highlighting
+  and completion (keywords, functions, the namespace's labels,
+  pseudo-properties), a schema panel with snippets, Ctrl+Enter to run the
+  statement under the cursor or the selection, F5 to run the whole script
+  (each statement in its own transaction, stopping at the first error, whose
+  line is marked). Results per statement as a table, JSON or graph, with
+  CSV and JSON export, and a messages log with times and changes.
+- **Search**: full text, recall with its signals, context within a token
+  budget.
+- **Memory**: duplicates to merge, weak memories to archive, groups to
+  consolidate.
+- **Administration**: check, rebuild, export, import.
+
+Ctrl+K opens a command palette (views, actions, namespaces and nodes). The
+theme follows the system, or can be set to light or dark.
 
 ## Development
 
@@ -17,7 +41,7 @@ npm run dev
 
 `npm run dev` serves it with live reload and forwards `/v1` and `/health`
 to a `grafeno serve` on `127.0.0.1:7810` (start one first, for example
-`grafeno serve --memory`).
+`grafeno serve --memory`), or to the server in `GRAFENO_URL`.
 
 ```bash
 npm run build

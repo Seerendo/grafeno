@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { type Node, describeError, displayName, labelColor } from "../api.ts";
-import { useStudio } from "../App.tsx";
+import { useStudio } from "../context.ts";
 import type { Context, Recalled } from "../../../clients/typescript/src/index.ts";
 
 type Mode = "text" | "recall" | "context";

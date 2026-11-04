@@ -188,11 +188,20 @@ modes cannot share a file. An MCP mode that forwards to an HTTP server
 
 - **Grafeno Studio** (`studio/`): React, Vite and TypeScript, with
   Cytoscape.js for the graph and the TypeScript client for every call.
-  Views: overview (namespaces, counts per label), explorer (paged nodes,
-  detail with facts, editing), graph (search to seed, double-click to
-  expand, "valid at" date for time travel), query (GQ editor, history,
-  table or JSON), search (full text, recall with its signals, context with
-  a token budget) and administration (check, rebuild, export, import).
+  Views: overview, explorer (create and edit nodes, labels, typed
+  properties, text, importance and facts in place; bulk archive and
+  delete), graph (create nodes, connect them by clicking, inspect and end
+  facts, "valid at" time travel), scripts (a SQL-editor-style GQ workspace
+  on CodeMirror: tabs kept in the browser, highlighting and completion, run
+  at cursor or all statements, errors marked on their line, results as a
+  table, JSON or graph), search, memory and administration, plus a command
+  palette and light and dark themes. Scripts are split into statements in
+  the browser; each runs as its own `POST /query`, so each is its own
+  transaction.
+- **Logo**: a fragment of graphene, three fused six-carbon rings
+  (`docs/assets/logo.svg`, `studio/public/favicon.svg`). The Windows icon
+  (`packaging/windows/grafeno.ico`, rendered from the favicon) is embedded
+  in `grafeno.exe` by `build.rs` and used by the installer.
 - The build is embedded in the binary (`include_dir`, when `studio/dist`
   exists at compile time; otherwise `/studio/` explains how to build it) and
   served at `/studio/` without authentication; the API it calls still needs

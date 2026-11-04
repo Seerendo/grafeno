@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 
-import { describeError, labelColor } from "../api.ts";
-import { useStudio } from "../App.tsx";
+import { describeError, go, labelColor } from "../api.ts";
+import { Icon } from "../icons.tsx";
+import { useStudio } from "../context.ts";
 import type { NamespaceInfo, NamespaceStats } from "../../../clients/typescript/src/index.ts";
 
 function Bars({ counts }: { counts: Record<string, number> }) {
@@ -28,22 +29,38 @@ function Bars({ counts }: { counts: Record<string, number> }) {
 }
 
 export function OverviewView() {
-  const { client, namespace, setNamespace } = useStudio();
+  const { client, namespace, setNamespace, revision, newNode, newEdge } = useStudio();
   const [namespaces, setNamespaces] = useState<NamespaceInfo[]>([]);
   const [stats, setStats] = useState<NamespaceStats | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     client.namespaces().then(setNamespaces).catch((e) => setError(describeError(e)));
-  }, [client]);
+  }, [client, revision]);
 
   useEffect(() => {
     client.namespace(namespace).stats().then(setStats).catch((e) => setError(describeError(e)));
-  }, [client, namespace]);
+  }, [client, namespace, revision]);
 
   return (
     <div className="stack">
-      <h1>Overview</h1>
+      <div className="page-head">
+        <div>
+          <h1>Overview</h1>
+          <p className="muted">What “{namespace}” holds, and where to start.</p>
+        </div>
+        <div className="row">
+          <button onClick={() => newNode({ onCreated: (id) => go("explorer", id) })}>
+            <Icon name="node" /> New node
+          </button>
+          <button onClick={() => newEdge()}>
+            <Icon name="link" /> New fact
+          </button>
+          <button className="primary" onClick={() => go("scripts")}>
+            <Icon name="scripts" /> Open scripts
+          </button>
+        </div>
+      </div>
       {error && <div className="error">{error}</div>}
       {stats && (
         <div className="cards">
@@ -66,8 +83,8 @@ export function OverviewView() {
           <h2>Namespaces</h2>
           {namespaces.length === 0 && (
             <p className="muted small">
-              The database is empty. Create data in <a href="#/query">Query</a>, for example{" "}
-              <code>CREATE (n:Note {"{"}title: 'Hello'{"}"});</code>
+              The database is empty. Create a node with <strong>New node</strong>, or run a script in{" "}
+              <a href="#/scripts">Scripts</a>, such as <code>CREATE (n:Note {"{"}title: 'Hello'{"}"});</code>
             </p>
           )}
           <div className="table-wrap">

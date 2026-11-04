@@ -31,6 +31,7 @@ Compression=lzma2/max
 SolidCompression=yes
 ChangesEnvironment=yes
 WizardStyle=modern
+SetupIconFile=grafeno.ico
 UninstallDisplayIcon={app}\grafeno.exe
 UninstallDisplayName=Grafeno {#AppVersion}
 SetupLogging=yes
@@ -52,6 +53,7 @@ Name: "{#DataDir}\data"
 Filename: "{group}\Grafeno Studio.url"; Section: "InternetShortcut"; Key: "URL"; String: "http://127.0.0.1:7810/studio/"; Tasks: service
 
 [Icons]
+Name: "{group}\Grafeno Studio"; Filename: "http://127.0.0.1:7810/studio/"; IconFilename: "{app}\grafeno.exe"; Comment: "Web interface of the local service (default address)"; Tasks: service
 Name: "{group}\Grafeno Shell"; Filename: "{app}\grafeno.exe"; Parameters: "shell --config ""{#ConfigFile}"""; Comment: "GQ console connected to the local service"; Tasks: service
 Name: "{group}\Grafeno settings"; Filename: "{sys}\notepad.exe"; Parameters: """{#ConfigFile}"""; Comment: "grafeno.toml: address, token, Studio"
 Name: "{group}\Uninstall Grafeno"; Filename: "{uninstallexe}"

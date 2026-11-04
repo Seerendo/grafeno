@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { type Edge, type Node, type NodeWithText, describeError, displayName, formatTime, go, labelColor } from "../api.ts";
-import { useStudio } from "../App.tsx";
+import { type Edge, type Node, type NodeWithText, describeError, displayName, formatTime, go } from "../api.ts";
+import { useStudio } from "../context.ts";
+import { Icon } from "../icons.tsx";
+import { LabelChip, LabelInput, PropsEditor, type PropRow, propsFromRows, rowsFromProps, useTask } from "../ui.tsx";
 
 interface Fact {
   edge: Edge;
@@ -9,18 +11,22 @@ interface Fact {
   other: Node | undefined;
 }
 
-/** A node with its facts, and forms to change or delete it. */
-export function NodeDetail({ id, onChanged }: { id: string; onChanged?: () => void }) {
-  const { client, namespace } = useStudio();
+type Editing = null | "props" | "text" | "name";
+
+/** A node with its facts; everything on it can be edited in place. */
+export function NodeDetail({ id, onChanged, compact }: { id: string; onChanged?: () => void; compact?: boolean }) {
+  const { client, namespace, schema, changed, toast, confirm, newEdge, revision } = useStudio();
   const graph = client.namespace(namespace);
   const [node, setNode] = useState<NodeWithText | null>(null);
   const [facts, setFacts] = useState<Fact[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [editing, setEditing] = useState(false);
-  const [propsText, setPropsText] = useState("");
+  const [editing, setEditing] = useState<Editing>(null);
+  const [rows, setRows] = useState<PropRow[]>([]);
   const [text, setText] = useState("");
-  const [importance, setImportance] = useState("0.5");
-  const [saving, setSaving] = useState(false);
+  const [name, setName] = useState("");
+  const [importance, setImportance] = useState(0.5);
+  const [adding, setAdding] = useState<string[]>([]);
+  const { busy, run } = useTask();
 
   const load = useCallback(async () => {
     try {
@@ -28,18 +34,12 @@ export function NodeDetail({ id, onChanged }: { id: string; onChanged?: () => vo
       const around = await graph.subgraph([id], { depth: 1 });
       const nodes = new Map(around.nodes.map((n) => [n.id, n]));
       setNode(found);
+      setImportance(found.memory.importance);
       setFacts(
         around.edges
           .filter((edge) => edge.from === id || edge.to === id)
-          .map((edge) => ({
-            edge,
-            outgoing: edge.from === id,
-            other: nodes.get(edge.from === id ? edge.to : edge.from),
-          })),
+          .map((edge) => ({ edge, outgoing: edge.from === id, other: nodes.get(edge.from === id ? edge.to : edge.from) })),
       );
-      setPropsText(JSON.stringify(found.props, null, 2));
-      setText(found.text ?? "");
-      setImportance(String(Math.round(found.memory.importance * 100) / 100));
       setError(null);
     } catch (problem) {
       setNode(null);
@@ -49,74 +49,154 @@ export function NodeDetail({ id, onChanged }: { id: string; onChanged?: () => vo
   }, [client, namespace, id]);
 
   useEffect(() => {
-    setEditing(false);
     void load();
-  }, [load]);
+  }, [load, revision]);
 
   if (error) return <div className="error">{error}</div>;
-  if (!node) return <div className="muted">Loading…</div>;
+  if (!node) return <div className="muted pad">Loading…</div>;
 
-  const save = async () => {
-    setSaving(true);
-    try {
-      const props = JSON.parse(propsText || "{}") as Record<string, unknown>;
-      if (typeof props !== "object" || props === null || Array.isArray(props)) {
-        throw new Error("Properties must be a JSON object.");
-      }
-      // Keys that are gone are removed with `null`.
-      for (const key of Object.keys(node.props)) {
-        if (!(key in props)) props[key] = null;
-      }
-      const level = Number(importance);
-      if (!Number.isFinite(level) || level < 0 || level > 1) throw new Error("Importance must be between 0 and 1.");
-      await graph.patchNode(id, { props, text: text.trim() ? text : null, importance: level });
-      setEditing(false);
-      await load();
+  const write = (work: () => Promise<unknown>, message?: string) =>
+    run(async () => {
+      await work();
+      setEditing(null);
+      changed();
       onChanged?.();
-    } catch (problem) {
-      setError(describeError(problem));
-    } finally {
-      setSaving(false);
-    }
+      if (message) toast(message, "ok");
+    });
+
+  const patchProps = (props: Record<string, unknown>) => {
+    // Keys that are gone are removed with `null`.
+    for (const key of Object.keys(node.props)) if (!(key in props)) props[key] = null;
+    return graph.patchNode(id, { props });
   };
 
   const remove = async () => {
-    if (!window.confirm(`Delete "${displayName(node)}" and its ${facts.length} facts? This cannot be undone.`)) return;
-    try {
-      await graph.deleteNode(id);
-      onChanged?.();
-      go("explorer");
-    } catch (problem) {
-      setError(describeError(problem));
+    const ok = await confirm({
+      title: `Delete “${displayName(node)}”?`,
+      message: `Its ${facts.length} facts, text and embedding are deleted too. This cannot be undone.`,
+      confirm: "Delete node",
+      danger: true,
+    });
+    if (!ok) return;
+    await write(() => graph.deleteNode(id), `Deleted ${displayName(node)}.`);
+    go(window.location.hash.startsWith("#/graph") ? "graph" : "explorer");
+  };
+
+  const factAction = async (fact: Fact, action: "invalidate" | "retract" | "delete") => {
+    const label = `${fact.outgoing ? displayName(node) : displayName(fact.other ?? node)} —${fact.edge.label}→ ${
+      fact.outgoing ? displayName(fact.other ?? node) : displayName(node)
+    }`;
+    if (action === "delete") {
+      const ok = await confirm({ title: "Delete this fact?", message: `${label}. Its history is lost; to keep it, end it instead.`, confirm: "Delete", danger: true });
+      if (!ok) return;
+      await write(() => graph.deleteEdge(fact.edge.id), "Fact deleted.");
+    } else if (action === "retract") {
+      const ok = await confirm({ title: "Retract this fact?", message: `${label} was a mistake. It stays visible to KNOWN AT queries.`, confirm: "Retract" });
+      if (!ok) return;
+      await write(() => graph.retractEdge(fact.edge.id), "Fact retracted.");
+    } else {
+      await write(() => graph.invalidateEdge(fact.edge.id, new Date().toISOString()), "Fact ended today.");
     }
   };
 
+  const now = Date.now() * 1000;
+  const labels = Object.keys(schema.labels).filter((label) => !node.labels.includes(label));
+
   return (
-    <div className="stack">
-      <div className="row">
-        <h2 style={{ margin: 0 }}>{displayName(node)}</h2>
+    <div className={compact ? "detail compact" : "detail"}>
+      <div className="detail-head">
+        {editing === "name" ? (
+          <form
+            className="row"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void write(() => patchProps({ ...node.props, name: name.trim() || null }));
+            }}
+          >
+            <input autoFocus value={name} onChange={(event) => setName(event.target.value)} className="title-input" />
+            <button className="primary" type="submit" disabled={busy}>Save</button>
+            <button type="button" onClick={() => setEditing(null)}>Cancel</button>
+          </form>
+        ) : (
+          <h2
+            className="editable"
+            title="Click to rename"
+            onClick={() => {
+              setName(typeof node.props.name === "string" ? node.props.name : "");
+              setEditing("name");
+            }}
+          >
+            {displayName(node)} <Icon name="edit" size={14} className="faint" />
+          </h2>
+        )}
         <div className="chips">
           {node.labels.map((label) => (
-            <span key={label} className="chip">
-              <span className="dot" style={{ background: labelColor(label) }} />
-              {label}
-            </span>
+            <LabelChip
+              key={label}
+              label={label}
+              onRemove={node.labels.length > 1 ? () => void write(() => graph.patchNode(id, { remove_labels: [label] })) : undefined}
+            />
           ))}
+          <div className="add-label">
+            <LabelInput
+              value={adding}
+              suggestions={labels}
+              placeholder="+ label"
+              onChange={(next) => {
+                setAdding([]);
+                const fresh = next.filter((label) => !node.labels.includes(label));
+                if (fresh.length) void write(() => graph.patchNode(id, { add_labels: fresh }));
+              }}
+            />
+          </div>
         </div>
       </div>
+
+      <div className="detail-actions">
+        <button onClick={() => newEdge({ from: { id, name: displayName(node) }, onCreated: () => void load() })}>
+          <Icon name="link" /> Add fact
+        </button>
+        {!window.location.hash.startsWith("#/graph") && (
+          <button onClick={() => go("graph", id)}>
+            <Icon name="graph" /> Graph
+          </button>
+        )}
+        <div className="spacer" />
+        <button className="danger ghost" onClick={() => void remove()} disabled={busy}>
+          <Icon name="trash" /> Delete
+        </button>
+      </div>
+
       <dl className="facts small">
         <dt>@id</dt>
-        <dd className="mono">{node.id}</dd>
+        <dd className="mono">
+          {node.id}{" "}
+          <button
+            className="ghost icon-button inline"
+            aria-label="Copy id"
+            onClick={() => void navigator.clipboard?.writeText(node.id).then(() => toast("Id copied.", "info"))}
+          >
+            <Icon name="copy" size={13} />
+          </button>
+        </dd>
         <dt>created</dt>
         <dd>{formatTime(node.created_at)}</dd>
         <dt>updated</dt>
         <dd>{formatTime(node.updated_at)}</dd>
         <dt>importance</dt>
-        <dd>
-          <span className="meter" title={String(node.memory.importance)}>
-            <span style={{ width: `${node.memory.importance * 100}%` }} />
-          </span>{" "}
-          {node.memory.importance.toFixed(2)}
+        <dd className="row nowrap">
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={importance}
+            onChange={(event) => setImportance(Number(event.target.value))}
+            onPointerUp={() => importance !== node.memory.importance && void write(() => graph.patchNode(id, { importance }))}
+            onKeyUp={() => importance !== node.memory.importance && void write(() => graph.patchNode(id, { importance }))}
+            aria-label="Importance"
+          />
+          <span className="mono">{importance.toFixed(2)}</span>
         </dd>
         <dt>accesses</dt>
         <dd>
@@ -137,64 +217,116 @@ export function NodeDetail({ id, onChanged }: { id: string; onChanged?: () => vo
         )}
       </dl>
 
-      {editing ? (
-        <div className="stack">
-          <label className="field">
-            Properties (JSON)
-            <textarea className="code" rows={8} value={propsText} onChange={(e) => setPropsText(e.target.value)} />
-          </label>
-          <label className="field">
-            Text (@text, searchable)
-            <textarea rows={4} value={text} onChange={(e) => setText(e.target.value)} />
-          </label>
-          <label className="field">
-            Importance (0 to 1: ranks higher and fades slower)
-            <input type="number" min={0} max={1} step={0.05} value={importance} onChange={(e) => setImportance(e.target.value)} style={{ width: 120 }} />
-          </label>
-          <div className="row">
-            <button className="primary" disabled={saving} onClick={() => void save()}>Save</button>
-            <button onClick={() => setEditing(false)}>Cancel</button>
-          </div>
-        </div>
-      ) : (
-        <>
-          <div>
-            <h3>Properties</h3>
-            <pre>{JSON.stringify(node.props, null, 2)}</pre>
-          </div>
-          {node.text && (
-            <div>
-              <h3>Text</h3>
-              <pre>{node.text}</pre>
-            </div>
+      <section>
+        <div className="section-head">
+          <h3>Properties</h3>
+          {editing !== "props" && (
+            <button
+              className="ghost small-button"
+              onClick={() => {
+                setRows(rowsFromProps(node.props));
+                setEditing("props");
+              }}
+            >
+              <Icon name="edit" size={14} /> Edit
+            </button>
           )}
-        </>
-      )}
-
-      <div>
-        <h3>Facts ({facts.length})</h3>
-        {facts.length === 0 && <div className="muted small">No current facts.</div>}
-        <div className="list">
-          {facts.map(({ edge, outgoing, other }) => (
-            <div key={edge.id} className="row small" style={{ padding: "4px 0", borderBottom: "1px solid var(--border)" }}>
-              <span className="mono">{outgoing ? `-[:${edge.label}]->` : `<-[:${edge.label}]-`}</span>
-              {other ? <a href={`#/explorer/${other.id}`}>{displayName(other)}</a> : <span className="muted">?</span>}
-              {(edge.valid_from !== null || edge.valid_to !== null) && (
-                <span className="muted">
-                  {edge.valid_from !== null ? formatTime(edge.valid_from).slice(0, 10) : "…"} →{" "}
-                  {edge.valid_to !== null ? formatTime(edge.valid_to).slice(0, 10) : "now"}
-                </span>
-              )}
-            </div>
-          ))}
         </div>
-      </div>
+        {editing === "props" ? (
+          <div className="stack tight">
+            <PropsEditor rows={rows} onChange={setRows} />
+            <div className="row">
+              <button className="primary" disabled={busy} onClick={() => void write(() => patchProps(propsFromRows(rows)), "Properties saved.")}>
+                Save
+              </button>
+              <button onClick={() => setEditing(null)}>Cancel</button>
+            </div>
+          </div>
+        ) : Object.keys(node.props).length === 0 ? (
+          <div className="muted small">No properties.</div>
+        ) : (
+          <table className="kv">
+            <tbody>
+              {Object.entries(node.props).map(([key, value]) => (
+                <tr key={key}>
+                  <th className="mono">{key}</th>
+                  <td>{typeof value === "string" ? value : <span className="mono">{JSON.stringify(value)}</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
 
-      <div className="row">
-        <button onClick={() => go("graph", id)}>Show in graph</button>
-        {!editing && <button onClick={() => setEditing(true)}>Edit</button>}
-        <button className="danger" onClick={() => void remove()}>Delete</button>
-      </div>
+      <section>
+        <div className="section-head">
+          <h3>Text</h3>
+          {editing !== "text" && (
+            <button
+              className="ghost small-button"
+              onClick={() => {
+                setText(node.text ?? "");
+                setEditing("text");
+              }}
+            >
+              <Icon name="edit" size={14} /> {node.text ? "Edit" : "Add"}
+            </button>
+          )}
+        </div>
+        {editing === "text" ? (
+          <div className="stack tight">
+            <textarea rows={5} autoFocus value={text} onChange={(event) => setText(event.target.value)} />
+            <div className="row">
+              <button className="primary" disabled={busy} onClick={() => void write(() => graph.patchNode(id, { text: text.trim() ? text : null }), "Text saved.")}>
+                Save
+              </button>
+              <button onClick={() => setEditing(null)}>Cancel</button>
+            </div>
+          </div>
+        ) : node.text ? (
+          <pre className="text-block">{node.text}</pre>
+        ) : (
+          <div className="muted small">No text: full-text search and recall do not see this node's words.</div>
+        )}
+      </section>
+
+      <section>
+        <div className="section-head">
+          <h3>Facts <span className="muted">{facts.length}</span></h3>
+        </div>
+        {facts.length === 0 && <div className="muted small">No facts yet. Use “Add fact” to connect it.</div>}
+        <div className="fact-list">
+          {facts.map((fact) => {
+            const ended = fact.edge.valid_to !== null && fact.edge.valid_to <= now;
+            return (
+              <div key={fact.edge.id} className={ended ? "fact ended" : "fact"}>
+                <span className="fact-arrow mono">{fact.outgoing ? `→ ${fact.edge.label}` : `← ${fact.edge.label}`}</span>
+                {fact.other ? <a href={`#/explorer/${fact.other.id}`}>{displayName(fact.other)}</a> : <span className="muted">?</span>}
+                {(fact.edge.valid_from !== null || fact.edge.valid_to !== null) && (
+                  <span className="muted small">
+                    {fact.edge.valid_from !== null ? formatTime(fact.edge.valid_from).slice(0, 10) : "…"} →{" "}
+                    {fact.edge.valid_to !== null ? formatTime(fact.edge.valid_to).slice(0, 10) : "now"}
+                  </span>
+                )}
+                <span className="spacer" />
+                <span className="fact-tools">
+                  {!ended && (
+                    <button className="ghost icon-button" title="It stopped being true today (keeps its history)" onClick={() => void factAction(fact, "invalidate")}>
+                      <Icon name="clock" size={14} />
+                    </button>
+                  )}
+                  <button className="ghost icon-button" title="Retract: it was a mistake" onClick={() => void factAction(fact, "retract")}>
+                    <Icon name="ban" size={14} />
+                  </button>
+                  <button className="ghost icon-button danger" title="Delete" onClick={() => void factAction(fact, "delete")}>
+                    <Icon name="trash" size={14} />
+                  </button>
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </section>
     </div>
   );
 }

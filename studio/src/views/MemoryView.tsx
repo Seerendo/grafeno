@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { describeError, displayName, formatTime } from "../api.ts";
-import { useStudio } from "../App.tsx";
+import { useStudio } from "../context.ts";
 import type { ConsolidationGroup, Duplicate, Node, WeakMemory } from "../../../clients/typescript/src/index.ts";
 
 function NodeLink({ node }: { node: Node }) {
@@ -17,7 +17,7 @@ function NodeLink({ node }: { node: Node }) {
  * groups of older memories an agent could summarize.
  */
 export function MemoryView() {
-  const { client, namespace } = useStudio();
+  const { client, namespace, confirm, changed } = useStudio();
   const graph = client.namespace(namespace);
   const [duplicates, setDuplicates] = useState<Duplicate[] | null>(null);
   const [weak, setWeak] = useState<WeakMemory[] | null>(null);
@@ -53,6 +53,7 @@ export function MemoryView() {
     setBusy(true);
     try {
       setNotice(await work());
+      changed();
       await load();
     } catch (problem) {
       setError(describeError(problem));
@@ -61,8 +62,13 @@ export function MemoryView() {
     }
   };
 
-  const merge = (keep: Node, other: Node) => {
-    if (!window.confirm(`Merge "${displayName(other)}" into "${displayName(keep)}"? "${displayName(other)}" is deleted.`)) return;
+  const merge = async (keep: Node, other: Node) => {
+    const ok = await confirm({
+      title: `Merge “${displayName(other)}” into “${displayName(keep)}”?`,
+      message: `Its facts move to “${displayName(keep)}”, its name becomes an alias, and it is deleted.`,
+      confirm: "Merge",
+    });
+    if (!ok) return;
     void act(async () => {
       const report = await graph.merge(keep.id, other.id);
       return `Merged: ${report.edges_moved} facts moved, ${report.edges_dropped} dropped.`;
@@ -150,8 +156,8 @@ export function MemoryView() {
           <div className="row">
             <button
               disabled={busy}
-              onClick={() => {
-                if (!window.confirm(`Archive all ${weak.length} weak memories?`)) return;
+              onClick={async () => {
+                if (!(await confirm({ title: `Archive all ${weak.length} weak memories?`, message: "They are kept, but recall leaves them out.", confirm: "Archive" }))) return;
                 void act(async () => `${await graph.archive(weak.map((item) => item.node.id))} archived.`);
               }}
             >

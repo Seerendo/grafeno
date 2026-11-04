@@ -1,67 +1,65 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   type Connection,
-  type Grafeno,
   clientFor,
   defaultUrl,
   describeError,
+  displayName,
   forgetConnection,
+  go,
+  labelColor,
   loadConnection,
   probe,
   saveConnection,
 } from "./api.ts";
+import { EdgeForm, NodeForm } from "./components/Forms.tsx";
+import { type ConfirmOptions, type NewEdgeOptions, type NewNodeOptions, type Studio, StudioContext, useStudio } from "./context.ts";
+import { Icon, type IconName, Logo } from "./icons.tsx";
+import { Modal, useNodeSearch } from "./ui.tsx";
 import { AdminView } from "./views/AdminView.tsx";
 import { ExplorerView } from "./views/ExplorerView.tsx";
 import { GraphView } from "./views/GraphView.tsx";
 import { MemoryView } from "./views/MemoryView.tsx";
 import { OverviewView } from "./views/OverviewView.tsx";
-import { QueryView } from "./views/QueryView.tsx";
+import { ScriptsView } from "./views/ScriptsView.tsx";
 import { SearchView } from "./views/SearchView.tsx";
 
-interface Studio {
-  client: Grafeno;
-  connection: Connection;
-  namespace: string;
-  setNamespace: (name: string) => void;
-  namespaces: string[];
-  /** Reloads the namespace list (after writes that may add or empty one). */
-  refreshNamespaces: () => void;
-}
+export { useStudio };
 
-const StudioContext = createContext<Studio | null>(null);
+const VIEWS: { id: string; title: string; icon: IconName; hint: string }[] = [
+  { id: "overview", title: "Overview", icon: "overview", hint: "Namespaces and what they hold" },
+  { id: "explorer", title: "Explorer", icon: "explorer", hint: "Browse, create and edit nodes" },
+  { id: "graph", title: "Graph", icon: "graph", hint: "Draw and connect the graph" },
+  { id: "scripts", title: "Scripts", icon: "scripts", hint: "Write and run GQ scripts" },
+  { id: "search", title: "Search", icon: "search", hint: "Full text, recall and context" },
+  { id: "memory", title: "Memory", icon: "memory", hint: "Duplicates, decay, consolidation" },
+  { id: "admin", title: "Administration", icon: "admin", hint: "Check, rebuild, export, import" },
+];
 
-export function useStudio(): Studio {
-  const studio = useContext(StudioContext);
-  if (!studio) throw new Error("useStudio outside the Studio");
-  return studio;
-}
-
-const VIEWS = [
-  { id: "overview", title: "Overview" },
-  { id: "explorer", title: "Explorer" },
-  { id: "graph", title: "Graph" },
-  { id: "query", title: "Query" },
-  { id: "search", title: "Search" },
-  { id: "memory", title: "Memory" },
-  { id: "admin", title: "Administration" },
-] as const;
-
-type ViewId = (typeof VIEWS)[number]["id"];
-
-function parseHash(): { view: ViewId; param?: string } {
-  const [view, param] = window.location.hash.replace(/^#\/?/, "").split("/");
+function parseHash(): { view: string; param?: string } {
+  const [raw, param] = window.location.hash.replace(/^#\/?/, "").split("/");
+  const view = raw === "query" ? "scripts" : raw;
   const known = VIEWS.find((v) => v.id === view);
   return { view: known ? known.id : "overview", param: param ? decodeURIComponent(param) : undefined };
 }
 
-function Logo() {
-  return (
-    <svg width="22" height="22" viewBox="0 0 32 32" aria-hidden="true">
-      <path d="M16 3l11 6.5v13L16 29 5 22.5v-13z" fill="none" stroke="currentColor" strokeWidth="2.5" />
-      <circle cx="16" cy="16" r="4" fill="currentColor" />
-    </svg>
-  );
+type Theme = "system" | "light" | "dark";
+
+function readSetting(key: string, fallback: string): string {
+  try {
+    return localStorage.getItem(key) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeSetting(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Settings are a convenience.
+  }
 }
 
 function ConnectScreen({ initial, error, onConnect }: {
@@ -74,34 +72,211 @@ function ConnectScreen({ initial, error, onConnect }: {
   const [remember, setRemember] = useState(false);
   return (
     <div className="connect">
+      <div className="connect-art" aria-hidden="true" />
       <form
-        className="panel stack"
+        className="connect-card"
         onSubmit={(event) => {
           event.preventDefault();
           onConnect({ url: url.trim().replace(/\/+$/, ""), token: token.trim() }, remember);
         }}
       >
-        <div className="brand">
-          <Logo /> Grafeno Studio
+        <div className="connect-brand">
+          <Logo size={56} />
+          <div>
+            <h1>Grafeno Studio</h1>
+            <p className="muted">The graph engine for agent memory.</p>
+          </div>
         </div>
-        <p className="muted small">Connect to a running <code>grafeno serve</code>.</p>
         <label className="field">
           Server URL
           <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="http://127.0.0.1:7810" required />
         </label>
         <label className="field">
-          Token <span className="muted small">(if the server was started with --token)</span>
+          Token <span className="hint">if the server was started with --token</span>
           <input type="password" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" />
         </label>
-        <label className="row small">
+        <label className="check small">
           <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
           Remember on this browser
         </label>
         {error && <div className="error">{error}</div>}
-        <button className="primary" type="submit">Connect</button>
+        <button className="primary big" type="submit">Connect</button>
       </form>
     </div>
   );
+}
+
+function NamespaceMenu() {
+  const { namespace, namespaces, setNamespace } = useStudio();
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => !box.current?.contains(event.target as Node) && setOpen(false);
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [open]);
+  const choose = (value: string) => {
+    setNamespace(value);
+    setOpen(false);
+    setName("");
+  };
+  return (
+    <div className="ns-menu" ref={box}>
+      <button className="ns-button" onClick={() => setOpen((value) => !value)} title="Namespace">
+        <span className="ns-dot" />
+        <span className="muted small">namespace</span>
+        <strong>{namespace}</strong>
+        <Icon name="chevronDown" size={14} />
+      </button>
+      {open && (
+        <div className="menu">
+          {namespaces.length === 0 && <div className="muted small menu-note">No namespaces with data yet.</div>}
+          {namespaces.map((item) => (
+            <button key={item} className={item === namespace ? "menu-item active" : "menu-item"} onClick={() => choose(item)}>
+              {item}
+              {item === namespace && <Icon name="check" size={14} />}
+            </button>
+          ))}
+          <form
+            className="menu-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (name.trim()) choose(name.trim());
+            }}
+          >
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="New or other namespace…" />
+            <button className="primary icon-button" type="submit" aria-label="Open namespace">
+              <Icon name="chevronRight" />
+            </button>
+          </form>
+          <div className="muted small menu-note">A namespace appears once it has a node.</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NewMenu() {
+  const { newNode, newEdge } = useStudio();
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => !box.current?.contains(event.target as Node) && setOpen(false);
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [open]);
+  const item = (icon: IconName, title: string, hint: string, action: () => void) => (
+    <button
+      className="menu-item rich"
+      onClick={() => {
+        setOpen(false);
+        action();
+      }}
+    >
+      <Icon name={icon} />
+      <span>
+        {title}
+        <span className="muted small">{hint}</span>
+      </span>
+    </button>
+  );
+  return (
+    <div className="ns-menu" ref={box}>
+      <button className="primary" onClick={() => setOpen((value) => !value)}>
+        <Icon name="plus" /> New
+      </button>
+      {open && (
+        <div className="menu right">
+          {item("node", "Node", "A person, note, project, memory…", () => newNode({ onCreated: (id) => go("explorer", id) }))}
+          {item("link", "Fact", "A relation between two nodes", () => newEdge())}
+          {item("scripts", "Script", "Write GQ statements", () => go("scripts"))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Ctrl+K: jump to a view, run an action or open a node. */
+function CommandPalette({ onClose }: { onClose: () => void }) {
+  const { newNode, newEdge, namespaces, setNamespace } = useStudio();
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const { results, searching } = useNodeSearch(query, 6);
+  const text = query.trim().toLowerCase();
+  const commands = [
+    ...VIEWS.map((view) => ({ key: `v-${view.id}`, icon: view.icon, title: `Go to ${view.title}`, hint: view.hint, run: () => go(view.id) })),
+    { key: "new-node", icon: "node" as IconName, title: "New node", hint: "Create a node", run: () => newNode({ onCreated: (id) => go("explorer", id) }) },
+    { key: "new-edge", icon: "link" as IconName, title: "New fact", hint: "Connect two nodes", run: () => newEdge() },
+    ...namespaces.map((name) => ({ key: `ns-${name}`, icon: "folder" as IconName, title: `Namespace: ${name}`, hint: "Switch namespace", run: () => setNamespace(name) })),
+  ].filter((command) => !text || command.title.toLowerCase().includes(text) || command.hint.toLowerCase().includes(text));
+  const nodes = results.map((node) => ({
+    key: `n-${node.id}`,
+    icon: "node" as IconName,
+    title: displayName(node),
+    hint: node.labels.join(", "),
+    color: labelColor(node.labels[0] ?? ""),
+    run: () => go("explorer", node.id),
+  }));
+  const items = [...commands.slice(0, text ? 8 : 12), ...nodes];
+  const pick = (index: number) => {
+    const item = items[index];
+    if (!item) return;
+    onClose();
+    item.run();
+  };
+  return (
+    <div className="backdrop top" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="palette" role="dialog" aria-label="Command palette">
+        <div className="palette-input">
+          <Icon name="search" />
+          <input
+            autoFocus
+            value={query}
+            placeholder="Go to a view, create something, or find a node…"
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setActive(0);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") onClose();
+              else if (event.key === "ArrowDown") {
+                event.preventDefault();
+                setActive((i) => Math.min(i + 1, items.length - 1));
+              } else if (event.key === "ArrowUp") {
+                event.preventDefault();
+                setActive((i) => Math.max(i - 1, 0));
+              } else if (event.key === "Enter") pick(active);
+            }}
+          />
+          <kbd>Esc</kbd>
+        </div>
+        <div className="palette-list">
+          {items.length === 0 && <div className="muted pad small">{searching ? "Searching…" : "Nothing matches."}</div>}
+          {items.map((item, index) => (
+            <button
+              key={item.key}
+              className={index === active ? "palette-item active" : "palette-item"}
+              onMouseEnter={() => setActive(index)}
+              onClick={() => pick(index)}
+            >
+              {"color" in item ? <span className="dot" style={{ background: item.color as string }} /> : <Icon name={item.icon} />}
+              <span className="grow-text">{item.title}</span>
+              <span className="muted small">{item.hint}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface Toast {
+  id: number;
+  message: string;
+  kind: "ok" | "error" | "info";
 }
 
 export function App() {
@@ -111,13 +286,22 @@ export function App() {
   const [checking, setChecking] = useState(true);
   const [route, setRoute] = useState(parseHash);
   const [namespaces, setNamespaces] = useState<string[]>([]);
-  const [namespace, setNamespaceState] = useState<string>(() => {
-    try {
-      return localStorage.getItem("grafeno.studio.namespace") ?? "";
-    } catch {
-      return "";
-    }
-  });
+  const [namespace, setNamespaceState] = useState(() => readSetting("grafeno.studio.namespace", ""));
+  const [schema, setSchema] = useState<Studio["schema"]>({ labels: {}, edgeLabels: {} });
+  const [revision, setRevision] = useState(0);
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [confirming, setConfirming] = useState<(ConfirmOptions & { resolve: (ok: boolean) => void }) | null>(null);
+  const [nodeForm, setNodeForm] = useState<NewNodeOptions | null>(null);
+  const [edgeForm, setEdgeForm] = useState<NewEdgeOptions | null>(null);
+  const [palette, setPalette] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => readSetting("grafeno.studio.collapsed", "") === "1");
+  const [theme, setTheme] = useState<Theme>(() => readSetting("grafeno.studio.theme", "system") as Theme);
+
+  useEffect(() => {
+    if (theme === "system") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = theme;
+    writeSetting("grafeno.studio.theme", theme);
+  }, [theme]);
 
   const connect = useCallback(async (candidate: Connection, remember?: boolean) => {
     setChecking(true);
@@ -149,33 +333,65 @@ export function App() {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  const client = useMemo(() => (connection ? clientFor(connection) : null), [connection]);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setPalette((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
-  const refreshNamespaces = useCallback(() => {
+  const client = useMemo(() => (connection ? clientFor(connection) : null), [connection]);
+  const current = namespace || "default";
+
+  const toast = useCallback((message: string, kind: Toast["kind"] = "info") => {
+    const id = Date.now() + Math.random();
+    setToasts((list) => [...list.slice(-3), { id, message, kind }]);
+    window.setTimeout(() => setToasts((list) => list.filter((item) => item.id !== id)), kind === "error" ? 7000 : 3500);
+  }, []);
+
+  useEffect(() => {
     if (!client) return;
     client
       .namespaces()
       .then((list) => {
         const names = list.map((info) => info.name);
         setNamespaces(names);
-        setNamespaceState((current) => current || names[0] || "default");
+        setNamespaceState((value) => value || names[0] || "default");
       })
-      .catch((problem) => setError(describeError(problem)));
-  }, [client]);
+      .catch((problem) => toast(describeError(problem), "error"));
+  }, [client, revision, toast]);
 
-  useEffect(refreshNamespaces, [refreshNamespaces]);
+  useEffect(() => {
+    if (!client) return;
+    client
+      .namespace(current)
+      .stats()
+      .then((stats) => setSchema({ labels: stats.node_labels, edgeLabels: stats.edge_labels }))
+      .catch(() => setSchema({ labels: {}, edgeLabels: {} }));
+  }, [client, current, revision]);
 
   const setNamespace = useCallback((name: string) => {
     setNamespaceState(name);
-    try {
-      localStorage.setItem("grafeno.studio.namespace", name);
-    } catch {
-      // Not remembered: only a convenience.
-    }
+    writeSetting("grafeno.studio.namespace", name);
   }, []);
 
+  const changed = useCallback(() => setRevision((value) => value + 1), []);
+  const confirm = useCallback((options: ConfirmOptions) => new Promise<boolean>((resolve) => setConfirming({ ...options, resolve })), []);
+
   if (checking && !connection) {
-    return <div className="connect muted">Connecting…</div>;
+    return (
+      <div className="connect">
+        <div className="connect-art" aria-hidden="true" />
+        <div className="loading">
+          <Logo size={48} />
+          <span className="muted">Connecting…</span>
+        </div>
+      </div>
+    );
   }
   if (!connection || !client) {
     return (
@@ -187,61 +403,128 @@ export function App() {
     );
   }
 
-  const studio: Studio = { client, connection, namespace: namespace || "default", setNamespace, namespaces, refreshNamespaces };
+  const studio: Studio = {
+    client,
+    connection,
+    namespace: current,
+    setNamespace,
+    namespaces,
+    schema,
+    revision,
+    changed,
+    toast,
+    confirm,
+    newNode: (options = {}) => setNodeForm(options),
+    newEdge: (options = {}) => setEdgeForm(options),
+  };
   const view = route.view;
+  const full = view === "graph" || view === "scripts";
+  const closeConfirm = (ok: boolean) => {
+    confirming?.resolve(ok);
+    setConfirming(null);
+  };
 
   return (
     <StudioContext.Provider value={studio}>
-      <div className="app">
-        <header className="topbar">
-          <div className="brand">
-            <Logo /> Grafeno Studio
+      <div className={collapsed ? "app collapsed" : "app"}>
+        <nav className="sidebar">
+          <a className="sidebar-brand" href="#/overview">
+            <Logo size={30} />
+            <span className="brand-text">
+              Grafeno <span>Studio</span>
+            </span>
+          </a>
+          <div className="nav">
+            {VIEWS.map((item) => (
+              <a key={item.id} href={`#/${item.id}`} className={item.id === view ? "nav-item active" : "nav-item"} title={collapsed ? item.title : item.hint}>
+                <Icon name={item.icon} size={18} />
+                <span>{item.title}</span>
+              </a>
+            ))}
           </div>
-          <label className="row small">
-            <span className="muted">Namespace</span>
-            <input
-              list="namespaces"
-              value={studio.namespace}
-              onChange={(e) => setNamespace(e.target.value)}
-              style={{ width: 180 }}
-              aria-label="Namespace"
-            />
-            <datalist id="namespaces">
-              {namespaces.map((name) => (
-                <option key={name} value={name} />
+          <div className="sidebar-foot">
+            <div className="theme-switch" role="group" aria-label="Theme">
+              {(["light", "system", "dark"] as Theme[]).map((option) => (
+                <button key={option} className={theme === option ? "active" : ""} onClick={() => setTheme(option)} title={`${option} theme`}>
+                  <Icon name={option === "light" ? "sun" : option === "dark" ? "moon" : "monitor"} size={14} />
+                </button>
               ))}
-            </datalist>
-          </label>
+            </div>
+            <button
+              className="ghost nav-item collapse-button"
+              onClick={() => {
+                setCollapsed((value) => !value);
+                writeSetting("grafeno.studio.collapsed", collapsed ? "0" : "1");
+              }}
+              title={collapsed ? "Expand the sidebar" : "Collapse the sidebar"}
+            >
+              <Icon name={collapsed ? "chevronRight" : "chevronLeft"} size={18} />
+              <span>Collapse</span>
+            </button>
+          </div>
+        </nav>
+        <header className="topbar">
+          <NamespaceMenu />
+          <button className="search-trigger" onClick={() => setPalette(true)}>
+            <Icon name="search" />
+            <span>Search or jump to…</span>
+            <kbd>Ctrl K</kbd>
+          </button>
           <div className="spacer" />
-          <span className="muted small" title={connection.url}>
+          <NewMenu />
+          <span className="server-pill" title={connection.url}>
+            <span className="live-dot" />
             {connection.url.replace(/^https?:\/\//, "")} · v{version}
           </span>
           <button
+            className="ghost icon-button"
+            title="Disconnect"
             onClick={() => {
               forgetConnection();
               setConnection(null);
             }}
           >
-            Disconnect
+            <Icon name="logout" />
           </button>
         </header>
-        <nav className="sidebar">
-          {VIEWS.map((item) => (
-            <a key={item.id} href={`#/${item.id}`} className={item.id === view ? "active" : ""}>
-              {item.title}
-            </a>
-          ))}
-        </nav>
-        <main className={view === "graph" ? "main full" : "main"}>
-          {error && <div className="error" onClick={() => setError(null)}>{error}</div>}
+        <main className={full ? "main full" : "main"} key={current}>
           {view === "overview" && <OverviewView />}
           {view === "explorer" && <ExplorerView selected={route.param} />}
           {view === "graph" && <GraphView seed={route.param} />}
-          {view === "query" && <QueryView />}
+          {view === "scripts" && <ScriptsView />}
           {view === "search" && <SearchView />}
           {view === "memory" && <MemoryView />}
           {view === "admin" && <AdminView />}
         </main>
+      </div>
+
+      {nodeForm && <NodeForm options={nodeForm} onClose={() => setNodeForm(null)} />}
+      {edgeForm && <EdgeForm options={edgeForm} onClose={() => setEdgeForm(null)} />}
+      {palette && <CommandPalette onClose={() => setPalette(false)} />}
+      {confirming && (
+        <Modal
+          title={confirming.title}
+          onClose={() => closeConfirm(false)}
+          footer={
+            <>
+              <div className="spacer" />
+              <button onClick={() => closeConfirm(false)}>Cancel</button>
+              <button className={confirming.danger ? "danger solid" : "primary"} autoFocus onClick={() => closeConfirm(true)}>
+                {confirming.confirm ?? "Confirm"}
+              </button>
+            </>
+          }
+        >
+          {confirming.message && <p className="muted">{confirming.message}</p>}
+        </Modal>
+      )}
+      <div className="toasts" aria-live="polite">
+        {toasts.map((item) => (
+          <div key={item.id} className={`toast ${item.kind}`} onClick={() => setToasts((list) => list.filter((t) => t.id !== item.id))}>
+            <Icon name={item.kind === "error" ? "x" : item.kind === "ok" ? "check" : "command"} size={15} />
+            {item.message}
+          </div>
+        ))}
       </div>
     </StudioContext.Provider>
   );

@@ -74,3 +74,6 @@ assets = [
     { source = "../../packaging/linux/setup.sh", dest = "/usr/share/grafeno/setup.sh", mode = "755" },
     { source = "../../README.md", dest = "/usr/share/doc/grafeno/README.md", mode = "644", doc = true },
 ]
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

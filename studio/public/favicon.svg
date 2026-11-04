@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Grafeno: three fused carbon rings of a graphene lattice. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1b24"/>
+      <stop offset="1" stop-color="#0d3b3f"/>
+    </linearGradient>
+    <linearGradient id="bond" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5eead4"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <path fill="none" stroke="url(#bond)" stroke-width="3.6" stroke-linecap="round" d="M10.46 16.46L10.46 28.89M10.46 16.46L21.23 10.24M10.46 28.89L21.23 35.11M21.23 10.24L32 16.46M21.23 35.11L21.23 47.54M21.23 35.11L32 28.89M21.23 47.54L32 53.76M32 16.46L32 28.89M32 16.46L42.77 10.24M32 28.89L42.77 35.11M32 53.76L42.77 47.54M42.77 10.24L53.54 16.46M42.77 35.11L42.77 47.54M42.77 35.11L53.54 28.89M53.54 16.46L53.54 28.89"/>
+  <g fill="#ecfeff">
+    <circle cx="10.46" cy="16.46" r="4"/><circle cx="10.46" cy="28.89" r="4"/><circle cx="21.23" cy="10.24" r="4"/>
+    <circle cx="21.23" cy="35.11" r="4"/><circle cx="21.23" cy="47.54" r="4"/><circle cx="32" cy="16.46" r="4"/>
+    <circle cx="32" cy="53.76" r="4"/><circle cx="42.77" cy="10.24" r="4"/><circle cx="42.77" cy="35.11" r="4"/>
+    <circle cx="42.77" cy="47.54" r="4"/><circle cx="53.54" cy="16.46" r="4"/><circle cx="53.54" cy="28.89" r="4"/>
+  </g>
+  <circle cx="32" cy="28.89" r="5.6" fill="#2dd4bf" stroke="#ecfeff" stroke-width="2"/>
+</svg>
