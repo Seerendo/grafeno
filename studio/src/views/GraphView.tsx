@@ -1,17 +1,18 @@
-import cytoscape, { type Core, type ElementDefinition } from "cytoscape";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { type Edge, type Node, describeError, displayName, formatTime, labelColor } from "../api.ts";
-import { cssVar, graphStyle, layoutFor, useThemeVersion } from "../components/MiniGraph.tsx";
 import { NodeDetail } from "../components/NodeDetail.tsx";
 import { useStudio } from "../context.ts";
-import { Icon } from "../icons.tsx";
+import { type EdgeInput, GraphEngine, type NodeInput, type Target } from "../graph/engine.ts";
+import { cssVar, enginePalette, useThemeVersion } from "../graph/theme.ts";
+import { Icon, type IconName } from "../icons.tsx";
 import { useTask } from "../ui.tsx";
 
 /** Nodes added at most per expansion, so a hub does not flood the view. */
 const MAX_NEW = 150;
-
-type Selection = { kind: "node"; id: string } | { kind: "edge"; edge: Edge } | null;
+/** Radius of a node, and of one whose neighbors are shown. */
+const SIZE = 11;
+const SIZE_EXPANDED = 13;
 
 /** Graph algorithms that color nodes by group, run on the whole namespace. */
 const COLOR_BY = {
@@ -35,6 +36,10 @@ type SizeBy = keyof typeof SIZE_BY;
 /** Group or score per node id, from one algorithm run. */
 type Analysis = { values: Map<string, number>; groups: number; max: number };
 
+type Menu = { x: number; y: number; target: Target; nodes: string[] };
+
+const CLUSTER = "cluster:";
+
 async function analyze(
   graph: ReturnType<ReturnType<typeof useStudio>["client"]["namespace"]>,
   name: string,
@@ -49,126 +54,120 @@ async function analyze(
 
 export function GraphView({ seed }: { seed?: string }) {
   const { client, namespace, revision, newNode, newEdge, confirm, changed, toast } = useStudio();
-  const container = useRef<HTMLDivElement>(null);
-  const cy = useRef<Core | null>(null);
+  const host = useRef<HTMLDivElement>(null);
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const minimap = useRef<HTMLCanvasElement>(null);
+  const toolbar = useRef<HTMLDivElement>(null);
+  const engine = useRef<GraphEngine | null>(null);
   const [expanded, setExpanded] = useState<string[]>(seed ? [seed] : []);
-  const [selection, setSelection] = useState<Selection>(seed ? { kind: "node", id: seed } : null);
-  const [connectFrom, setConnectFrom] = useState<{ id: string; name: string } | null>(null);
+  const [nodes, setNodes] = useState(new Map<string, Node>());
+  const [edges, setEdges] = useState(new Map<string, Edge>());
+  const [hidden, setHidden] = useState(new Set<string>());
+  const [collapsed, setCollapsed] = useState(new Set<number>());
+  const [selected, setSelected] = useState<string[]>(seed ? [seed] : []);
+  const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
+  const [menu, setMenu] = useState<Menu | null>(null);
   const [search, setSearch] = useState("");
   const [validAt, setValidAt] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [count, setCount] = useState({ nodes: 0, edges: 0 });
-  const edges = useRef(new Map<string, Edge>());
-  const names = useRef(new Map<string, string>());
-  // Event handlers are bound once; they read the latest state from here.
-  const state = useRef({ connectFrom, newEdge });
-  state.current = { connectFrom, newEdge };
-  const { busy, run } = useTask();
-  const theme = useThemeVersion();
   const [colorBy, setColorBy] = useState<ColorBy>("label");
   const [sizeBy, setSizeBy] = useState<SizeBy>("none");
   const [groups, setGroups] = useState<Analysis | null>(null);
   const [scores, setScores] = useState<Analysis | null>(null);
-  const labels = useRef(new Map<string, string>());
-  // Counts redraws, so painting follows each one.
-  const [drawn, setDrawn] = useState(0);
+  const [showMap, setShowMap] = useState(true);
+  const { busy, run } = useTask();
+  const theme = useThemeVersion();
 
+  const expand = useCallback((id: string) => setExpanded((current) => (current.includes(id) ? current : [...current, id])), []);
+  const names = useMemo(() => new Map([...nodes.values()].map((node) => [node.id, displayName(node)])), [nodes]);
+  const nameOf = (id: string) => names.get(id) ?? id;
+
+  // Handlers bound once read the latest values from here.
+  const latest = useRef({ expand, newEdge, nameOf, collapsed, setCollapsed });
+  latest.current = { expand, newEdge, nameOf, collapsed, setCollapsed };
+
+  // The engine lives as long as the view.
   useEffect(() => {
-    cy.current?.style(graphStyle());
-  }, [theme]);
-
-  const expand = (id: string) => setExpanded((current) => (current.includes(id) ? current : [...current, id]));
-
-  // Create the canvas once.
-  useEffect(() => {
-    if (!container.current) return;
-    cy.current = cytoscape({ container: container.current, wheelSensitivity: 0.3, style: graphStyle() });
-    cy.current.on("tap", "node", (event) => {
-      const id = event.target.id();
-      const from = state.current.connectFrom;
-      if (from) {
-        setConnectFrom(null);
-        if (from.id !== id) {
-          state.current.newEdge({ from, to: { id, name: names.current.get(id) ?? id } });
-        }
-        return;
-      }
-      setSelection({ kind: "node", id });
-    });
-    cy.current.on("tap", "edge", (event) => {
-      const edge = edges.current.get(event.target.id());
-      if (edge) setSelection({ kind: "edge", edge });
-    });
-    cy.current.on("tap", (event) => {
-      if (event.target === cy.current) {
-        setSelection(null);
-        setConnectFrom(null);
-      }
-    });
-    cy.current.on("dbltap", "node", (event) => expand(event.target.id()));
-    return () => cy.current?.destroy();
+    if (!canvas.current) return;
+    const created = new GraphEngine(
+      canvas.current,
+      {
+        select: (ids, edge) => {
+          setSelected(ids);
+          setSelectedEdge(edge);
+          setMenu(null);
+        },
+        open: (id) => {
+          if (id.startsWith(CLUSTER)) {
+            const group = Number(id.slice(CLUSTER.length));
+            latest.current.setCollapsed((current) => new Set([...current].filter((c) => c !== group)));
+          } else {
+            latest.current.expand(id);
+          }
+        },
+        menu: (target, x, y, ids) => setMenu({ target, x, y, nodes: ids }),
+        connect: (from, to) => {
+          if (from.startsWith(CLUSTER) || to.startsWith(CLUSTER)) return;
+          const { nameOf: name } = latest.current;
+          latest.current.newEdge({ from: { id: from, name: name(from) }, to: { id: to, name: name(to) } });
+        },
+      },
+      enginePalette(),
+    );
+    engine.current = created;
+    created.attachMinimap(minimap.current);
+    // For checks in the browser console while developing.
+    if (import.meta.env.DEV) (window as unknown as { graphEngine?: GraphEngine }).graphEngine = created;
+    return () => {
+      created.destroy();
+      engine.current = null;
+    };
   }, []);
 
   useEffect(() => {
-    const graph = cy.current;
-    if (!graph) return;
-    graph.nodes().removeClass("source");
-    if (connectFrom) graph.getElementById(connectFrom.id).addClass("source");
-    if (container.current) container.current.style.cursor = connectFrom ? "crosshair" : "";
-  }, [connectFrom]);
+    engine.current?.setPalette(enginePalette());
+  }, [theme]);
+
+  // Keep fitting clear of the floating toolbar and inspector.
+  const inspectorOpen = selected.length > 0 || selectedEdge !== null;
+  useEffect(() => {
+    const update = () => {
+      const area = host.current?.getBoundingClientRect();
+      const bar = toolbar.current?.getBoundingClientRect();
+      if (!area || !bar) return;
+      engine.current?.setInsets({
+        top: bar.bottom - area.top + 8,
+        left: bar.left - area.left,
+        right: inspectorOpen ? 410 : 12,
+        bottom: 40,
+      });
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    if (host.current) observer.observe(host.current);
+    if (toolbar.current) observer.observe(toolbar.current);
+    return () => observer.disconnect();
+  }, [inspectorOpen]);
 
   // Fetch the neighborhood of every expanded node, as of `validAt`.
-  const redraw = useCallback(async () => {
-    const graph = cy.current;
-    if (!graph) return;
+  const fetchGraph = useCallback(async () => {
     try {
       const filter = validAt ? { valid_at: validAt } : undefined;
-      const nodes = new Map<string, Node>();
-      const found = new Map<string, Edge>();
+      const found = new Map<string, Node>();
+      const facts = new Map<string, Edge>();
       for (const id of expanded) {
         const around = await client.namespace(namespace).subgraph([id], { depth: 1, filter });
         let added = 0;
         for (const node of around.nodes) {
-          if (!nodes.has(node.id) && (added < MAX_NEW || node.id === id)) {
-            nodes.set(node.id, node);
+          if (!found.has(node.id) && (added < MAX_NEW || node.id === id)) {
+            found.set(node.id, node);
             added += 1;
           }
         }
-        for (const edge of around.edges) found.set(edge.id, edge);
+        for (const edge of around.edges) facts.set(edge.id, edge);
       }
-      edges.current = found;
-      names.current = new Map([...nodes.values()].map((node) => [node.id, displayName(node)]));
-      labels.current = new Map([...nodes.values()].map((node) => [node.id, node.labels[0] ?? ""]));
-      const now = Date.now() * 1000;
-      const positions = new Map(graph.nodes().map((node) => [node.id(), { ...node.position() }]));
-      const elements: ElementDefinition[] = [
-        ...[...nodes.values()].map((node) => ({
-          group: "nodes" as const,
-          data: { id: node.id, name: displayName(node), color: labelColor(node.labels[0] ?? "") },
-          classes: expanded.includes(node.id) ? "expanded" : "",
-          position: positions.get(node.id),
-        })),
-        ...[...found.values()]
-          .filter((edge) => nodes.has(edge.from) && nodes.has(edge.to))
-          .map((edge) => ({
-            group: "edges" as const,
-            data: { id: edge.id, source: edge.from, target: edge.to, label: edge.label },
-            classes: edge.valid_to !== null && edge.valid_to <= now ? "ended" : "",
-          })),
-      ];
-      graph.elements().remove();
-      graph.add(elements);
-      // Keep known nodes where they were; lay out only when something is new.
-      const fresh = [...nodes.keys()].some((id) => !positions.has(id));
-      if (fresh) {
-        graph.layout(layoutFor(nodes.size)).run();
-        if (graph.zoom() > 1.4) {
-          graph.zoom(1.4);
-          graph.center();
-        }
-      }
-      setCount({ nodes: nodes.size, edges: graph.edges().length });
-      setDrawn((value) => value + 1);
+      setNodes(found);
+      setEdges(facts);
       setError(null);
     } catch (problem) {
       setError(describeError(problem));
@@ -176,8 +175,8 @@ export function GraphView({ seed }: { seed?: string }) {
   }, [client, namespace, expanded, validAt]);
 
   useEffect(() => {
-    void redraw();
-  }, [redraw, revision]);
+    void fetchGraph();
+  }, [fetchGraph, revision]);
 
   // Run the chosen algorithms on the whole namespace (again after changes).
   useEffect(() => {
@@ -193,6 +192,7 @@ export function GraphView({ seed }: { seed?: string }) {
         if (!current) return;
         setGroups(byGroup);
         setScores(byScore);
+        if (!byGroup) setCollapsed(new Set());
       })
       .catch((problem) => current && setError(describeError(problem)));
     return () => {
@@ -200,27 +200,86 @@ export function GraphView({ seed }: { seed?: string }) {
     };
   }, [client, namespace, colorBy, sizeBy, revision]);
 
-  // Paint groups and scores onto the drawn nodes.
-  useEffect(() => {
-    const graph = cy.current;
-    if (!graph) return;
-    graph.batch(() => {
-      graph.nodes().forEach((node) => {
-        const group = groups?.values.get(node.id());
-        node.data(
-          "color",
-          group === undefined ? labelColor(labels.current.get(node.id()) ?? "") : cssVar(`--series-${(group % 8) + 1}`),
-        );
-        const score = scores?.values.get(node.id());
-        if (scores && score !== undefined && scores.max > 0) {
-          const side = 16 + 34 * Math.sqrt(score / scores.max);
-          node.style({ width: side, height: side });
-        } else {
-          node.removeStyle("width height");
-        }
+  // What the engine draws: visible nodes, collapsed communities as one node
+  // each, and the facts between what is left.
+  const drawn = useMemo(() => {
+    const now = Date.now() * 1000;
+    const groupOf = (id: string) => groups?.values.get(id);
+    const placeOf = (id: string): string | null => {
+      if (hidden.has(id)) return null;
+      const group = groupOf(id);
+      return group !== undefined && collapsed.has(group) ? `${CLUSTER}${group}` : id;
+    };
+    const colorOf = (id: string) => {
+      const group = groupOf(id);
+      return group === undefined ? labelColor(nodes.get(id)?.labels[0] ?? "") : cssVar(`--series-${(group % 8) + 1}`);
+    };
+    const sizeOf = (id: string) => {
+      const score = scores?.values.get(id);
+      if (scores && score !== undefined && scores.max > 0) return 8 + 18 * Math.sqrt(score / scores.max);
+      return expanded.includes(id) ? SIZE_EXPANDED : SIZE;
+    };
+    const out: NodeInput[] = [];
+    const clusters = new Map<number, number>();
+    for (const node of nodes.values()) {
+      const place = placeOf(node.id);
+      if (place === null) continue;
+      if (place !== node.id) {
+        const group = groupOf(node.id)!;
+        clusters.set(group, (clusters.get(group) ?? 0) + 1);
+        continue;
+      }
+      out.push({ id: node.id, name: displayName(node), color: colorOf(node.id), size: sizeOf(node.id), ring: expanded.includes(node.id) });
+    }
+    for (const [group, count] of clusters) {
+      out.push({
+        id: `${CLUSTER}${group}`,
+        name: `Community ${group}`,
+        color: cssVar(`--series-${(group % 8) + 1}`),
+        size: Math.min(34, 12 + Math.sqrt(count) * 4),
+        count,
       });
-    });
-  }, [groups, scores, drawn, theme]);
+    }
+    const links: EdgeInput[] = [];
+    const merged = new Map<string, EdgeInput & { n: number }>();
+    for (const edge of edges.values()) {
+      const from = placeOf(edge.from);
+      const to = placeOf(edge.to);
+      if (!from || !to || !nodes.has(edge.from) || !nodes.has(edge.to)) continue;
+      const ended = edge.valid_to !== null && edge.valid_to <= now;
+      if (from === edge.from && to === edge.to) {
+        links.push({ id: edge.id, from, to, label: edge.label, ended });
+        continue;
+      }
+      if (from === to) continue;
+      // Facts into or out of a collapsed community become one edge.
+      const key = `${from}>${to}`;
+      const known = merged.get(key);
+      if (known) {
+        known.n += 1;
+        known.label = `${known.n} facts`;
+      } else {
+        merged.set(key, { id: `${CLUSTER}${key}`, from, to, label: edge.label, n: 1 });
+      }
+    }
+    links.push(...merged.values());
+    return { nodes: out, edges: links };
+    // The theme changes the series colors, read from CSS.
+  }, [nodes, edges, hidden, collapsed, groups, scores, expanded, theme]);
+
+  useEffect(() => {
+    engine.current?.setData(drawn.nodes, drawn.edges);
+  }, [drawn]);
+
+  // The node the view was opened on starts selected, once it is drawn.
+  const seeded = useRef(false);
+  useEffect(() => {
+    if (!seed || seeded.current || !drawn.nodes.some((node) => node.id === seed)) return;
+    seeded.current = true;
+    engine.current?.select([seed]);
+  }, [seed, drawn]);
+
+  // ------------------------------------------------------------ actions
 
   const addFromSearch = async () => {
     const query = search.trim();
@@ -228,6 +287,14 @@ export function GraphView({ seed }: { seed?: string }) {
     try {
       if (/^[0-9a-f-]{36}$/i.test(query)) {
         expand(query);
+        return;
+      }
+      // A node already drawn: fly to it.
+      const lower = query.toLowerCase();
+      const onScreen = [...nodes.values()].find((node) => !hidden.has(node.id) && displayName(node).toLowerCase().includes(lower));
+      if (onScreen && engine.current?.screenOf(onScreen.id)) {
+        engine.current.focus(onScreen.id);
+        setSearch("");
         return;
       }
       const graph = client.namespace(namespace);
@@ -251,12 +318,56 @@ export function GraphView({ seed }: { seed?: string }) {
   const showAll = () =>
     run(async () => {
       const page = await client.namespace(namespace).listNodes({ limit: 60 });
+      setHidden(new Set());
       setExpanded(page.items.map((node) => node.id));
     });
 
+  const clear = () => {
+    setExpanded([]);
+    setHidden(new Set());
+    setCollapsed(new Set());
+    setSelected([]);
+    setSelectedEdge(null);
+    engine.current?.select([]);
+  };
+
+  const hide = (ids: string[]) => {
+    setHidden((current) => new Set([...current, ...ids.filter((id) => !id.startsWith(CLUSTER))]));
+    setSelected([]);
+    engine.current?.select([]);
+  };
+
+  const collapseGroupOf = (id: string) => {
+    const group = groups?.values.get(id);
+    if (group === undefined) return;
+    setCollapsed((current) => new Set([...current, group]));
+    setSelected([]);
+    engine.current?.select([]);
+  };
+
+  const deleteNodes = async (ids: string[]) => {
+    const real = ids.filter((id) => !id.startsWith(CLUSTER));
+    if (real.length === 0) return;
+    const ok = await confirm({
+      title: real.length === 1 ? `Delete “${nameOf(real[0])}”?` : `Delete ${real.length} nodes?`,
+      message: "Their facts are deleted with them. It cannot be undone.",
+      confirm: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
+    await run(async () => {
+      const graph = client.namespace(namespace);
+      for (const id of real) await graph.deleteNode(id);
+      setExpanded((current) => current.filter((id) => !real.includes(id)));
+      setSelected([]);
+      toast(real.length === 1 ? "Node deleted." : `${real.length} nodes deleted.`, "ok");
+      changed();
+    });
+  };
+
   const edgeAction = async (edge: Edge, action: "invalidate" | "retract" | "delete") => {
     const graph = client.namespace(namespace);
-    const title = `${names.current.get(edge.from) ?? "?"} —${edge.label}→ ${names.current.get(edge.to) ?? "?"}`;
+    const title = `${nameOf(edge.from)} —${edge.label}→ ${nameOf(edge.to)}`;
     if (action !== "invalidate") {
       const ok = await confirm({
         title: action === "delete" ? "Delete this fact?" : "Retract this fact?",
@@ -271,20 +382,119 @@ export function GraphView({ seed }: { seed?: string }) {
       else if (action === "retract") await graph.retractEdge(edge.id);
       else await graph.invalidateEdge(edge.id, new Date().toISOString());
       toast(action === "invalidate" ? "Fact ended today." : action === "delete" ? "Fact deleted." : "Fact retracted.", "ok");
-      setSelection(null);
+      setSelectedEdge(null);
       changed();
     });
   };
 
-  const selectedNode = selection?.kind === "node" ? selection.id : null;
+  const onKey = (event: React.KeyboardEvent) => {
+    if (event.target instanceof Element && event.target.closest("input, textarea, select, .inspector")) return;
+    const key = event.key.toLowerCase();
+    if (key === "escape") {
+      setMenu(null);
+      setSelected([]);
+      setSelectedEdge(null);
+      engine.current?.select([]);
+    } else if (key === "delete" && selected.length > 0) {
+      void deleteNodes(selected);
+    } else if (key === "f") {
+      engine.current?.fit(true, selected.length > 1 ? selected : undefined);
+    } else if (key === "h" && selected.length > 0) {
+      hide(selected);
+    } else if (key === "p" && selected.length > 0) {
+      const pinned = selected.every((id) => engine.current?.isPinned(id));
+      engine.current?.pin(selected, !pinned);
+    } else if (key === "+" || key === "=") {
+      engine.current?.zoomBy(1.3);
+    } else if (key === "-") {
+      engine.current?.zoomBy(1 / 1.3);
+    } else {
+      return;
+    }
+    event.preventDefault();
+  };
+
+  // ------------------------------------------------------------ menus
+
+  type Item = { icon: IconName; label: string; run: () => void; danger?: boolean; hint?: string } | "sep";
+  const menuItems = (current: Menu): Item[] => {
+    const e = engine.current;
+    if (current.target.kind === "node") {
+      const id = current.target.id;
+      if (id.startsWith(CLUSTER)) {
+        const group = Number(id.slice(CLUSTER.length));
+        return [{ icon: "expand", label: "Expand the community", run: () => setCollapsed((c) => new Set([...c].filter((g) => g !== group))) }];
+      }
+      const ids = current.nodes.length > 1 ? current.nodes : [id];
+      const pinned = ids.every((one) => e?.isPinned(one));
+      if (ids.length > 1) {
+        return [
+          { icon: "fit", label: `Frame these ${ids.length} nodes`, hint: "F", run: () => e?.fit(true, ids) },
+          { icon: "expand", label: "Expand all of them", run: () => setExpanded((c) => [...new Set([...c, ...ids])]) },
+          { icon: "pin", label: pinned ? "Unpin them" : "Pin them", hint: "P", run: () => e?.pin(ids, !pinned) },
+          { icon: "eyeOff", label: "Hide them", hint: "H", run: () => hide(ids) },
+          "sep",
+          { icon: "trash", label: `Delete ${ids.length} nodes`, danger: true, hint: "Del", run: () => void deleteNodes(ids) },
+        ];
+      }
+      return [
+        { icon: "expand", label: "Expand neighbors", hint: "double-click", run: () => expand(id) },
+        { icon: "link", label: "Connect to…", hint: "drag the +", run: () => newEdge({ from: { id, name: nameOf(id) } }) },
+        { icon: "pin", label: pinned ? "Unpin" : "Pin here", hint: "P", run: () => e?.pin([id], !pinned) },
+        { icon: "target", label: "Center on it", run: () => e?.focus(id) },
+        { icon: "eyeOff", label: "Hide", hint: "H", run: () => hide([id]) },
+        ...(groups?.values.has(id) ? [{ icon: "cluster" as IconName, label: "Collapse its community", run: () => collapseGroupOf(id) }] : []),
+        "sep",
+        { icon: "trash", label: "Delete node", danger: true, hint: "Del", run: () => void deleteNodes([id]) },
+      ];
+    }
+    if (current.target.kind === "edge") {
+      const edge = edges.get(current.target.id);
+      if (!edge) return [];
+      return [
+        { icon: "clock", label: "End it today", run: () => void edgeAction(edge, "invalidate") },
+        { icon: "ban", label: "Retract (a mistake)", run: () => void edgeAction(edge, "retract") },
+        "sep",
+        { icon: "trash", label: "Delete fact", danger: true, run: () => void edgeAction(edge, "delete") },
+      ];
+    }
+    return [
+      { icon: "fit", label: "Fit to screen", hint: "F", run: () => e?.fit(true) },
+      { icon: "graph", label: "Lay out again", run: () => e?.reheat() },
+      { icon: "pin", label: "Unpin all", run: () => e?.unpinAll() },
+      ...(hidden.size > 0 ? [{ icon: "undo" as IconName, label: `Show ${hidden.size} hidden`, run: () => setHidden(new Set()) }] : []),
+      ...(collapsed.size > 0 ? [{ icon: "cluster" as IconName, label: "Expand every community", run: () => setCollapsed(new Set()) }] : []),
+      ...(groups && collapsed.size === 0
+        ? [{ icon: "cluster" as IconName, label: "Collapse every community", run: () => setCollapsed(new Set(groups.values.values())) }]
+        : []),
+      "sep",
+      { icon: "node", label: "New node", run: () => newNode({ onCreated: (id) => expand(id) }) },
+    ];
+  };
+
+  useEffect(() => {
+    if (!menu) return;
+    const close = (event: MouseEvent) => {
+      if (!(event.target instanceof Element && event.target.closest(".context-menu"))) setMenu(null);
+    };
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [menu]);
+
+  const edge = selectedEdge ? edges.get(selectedEdge) : undefined;
+  const single = selected.length === 1 && !selected[0].startsWith(CLUSTER) ? selected[0] : null;
+  const visible = drawn.nodes.length;
 
   return (
-    <div className="graph">
-      <div className="graph-toolbar">
+    <div className="graph" ref={host} tabIndex={-1} onKeyDown={onKey}>
+      <div className="canvas">
+        <canvas className="graph-canvas" ref={canvas} aria-label="Graph canvas" />
+      </div>
+      <div className="graph-toolbar" ref={toolbar}>
         <div className="input-icon grow">
           <Icon name="search" />
           <input
-            placeholder="Add nodes: search a name or text, or paste an id"
+            placeholder="Find a node: on screen, by name or text, or paste an id"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && void addFromSearch()}
@@ -295,32 +505,12 @@ export function GraphView({ seed }: { seed?: string }) {
           Show all
         </button>
         <span className="toolbar-sep" />
-        <button
-          className="primary"
-          onClick={() =>
-            newNode({
-              onCreated: (id) => {
-                expand(id);
-                setSelection({ kind: "node", id });
-              },
-            })
-          }
-        >
+        <button className="primary" onClick={() => newNode({ onCreated: (id) => expand(id) })}>
           <Icon name="node" /> Node
-        </button>
-        <button
-          className={connectFrom ? "active" : ""}
-          disabled={!selectedNode && !connectFrom}
-          onClick={() =>
-            connectFrom ? setConnectFrom(null) : selectedNode && setConnectFrom({ id: selectedNode, name: names.current.get(selectedNode) ?? selectedNode })
-          }
-          title="Select a node, press Connect, then click the target node"
-        >
-          <Icon name="link" /> {connectFrom ? "Cancel" : "Connect"}
         </button>
         <span className="toolbar-sep" />
         <label className="row small nowrap" title="Color nodes by a graph algorithm run on the whole namespace">
-          <Icon name="graph" /> Color
+          Color
           <select value={colorBy} onChange={(e) => setColorBy(e.target.value as ColorBy)}>
             {Object.entries(COLOR_BY).map(([key, option]) => (
               <option key={key} value={key}>
@@ -344,110 +534,179 @@ export function GraphView({ seed }: { seed?: string }) {
           <Icon name="clock" /> Valid at
           <input type="date" value={validAt} onChange={(e) => setValidAt(e.target.value)} />
         </label>
-        {validAt && <button className="ghost small-button" onClick={() => setValidAt("")}>Now</button>}
-        <button className="ghost icon-button" onClick={() => cy.current?.fit(undefined, 40)} title="Fit to screen">
-          <Icon name="fit" />
-        </button>
-        <button
-          className="ghost icon-button"
-          onClick={() => cy.current?.layout(layoutFor(cy.current.nodes().length, true)).run()}
-          title="Lay out again"
-        >
-          <Icon name="graph" />
-        </button>
-        <button
-          className="ghost icon-button"
-          onClick={() => {
-            setExpanded([]);
-            setSelection(null);
-            setConnectFrom(null);
-          }}
-          title="Clear the canvas"
-        >
-          <Icon name="eraser" />
-        </button>
+        {validAt && (
+          <button className="ghost small-button" onClick={() => setValidAt("")}>
+            Now
+          </button>
+        )}
       </div>
-      <div className="canvas">
-        <div className="cy" ref={container} />
-        <div className="canvas-status small">
-          {count.nodes} nodes · {count.edges} facts
-          {validAt && ` · valid on ${validAt}`}
-          {groups && ` · ${groups.groups} ${colorBy === "wcc" ? "components" : "communities"}`}
-          {scores && ` · sized by ${SIZE_BY[sizeBy].title}`}
-          {" · "}
-          {connectFrom ? <strong className="accent">Click the node that “{connectFrom.name}” points to</strong> : "click to inspect · double-click to expand"}
+
+      <div className="graph-controls" role="toolbar" aria-label="View">
+          <button className="ghost icon-button" onClick={() => engine.current?.zoomBy(1 / 1.3)} title="Zoom out (−)">
+            <Icon name="zoomOut" />
+          </button>
+          <button className="ghost icon-button" onClick={() => engine.current?.zoomBy(1.3)} title="Zoom in (+)">
+            <Icon name="zoomIn" />
+          </button>
+          <button className="ghost icon-button" onClick={() => engine.current?.fit(true)} title="Fit to screen (F, or double-click the background)">
+            <Icon name="fit" />
+          </button>
+          <button className="ghost icon-button" onClick={() => engine.current?.reheat()} title="Lay out again">
+            <Icon name="graph" />
+          </button>
+          <button className="ghost icon-button" onClick={() => engine.current?.unpinAll()} title="Unpin every node">
+            <Icon name="pin" />
+          </button>
+          <button className={showMap ? "ghost icon-button active" : "ghost icon-button"} onClick={() => setShowMap((v) => !v)} title="Minimap">
+            <Icon name="map" />
+          </button>
+          <button className="ghost icon-button" onClick={clear} title="Clear the canvas">
+            <Icon name="eraser" />
+          </button>
+      </div>
+
+      <div className="canvas-status small">
+        {visible} nodes · {drawn.edges.length} facts
+        {hidden.size > 0 && ` · ${hidden.size} hidden`}
+        {validAt && ` · valid on ${validAt}`}
+        {groups && ` · ${groups.groups} ${colorBy === "wcc" ? "components" : "communities"}`}
+        {scores && ` · sized by ${SIZE_BY[sizeBy].title}`}
+        <span className="faint"> · drag to move and pin · shift-drag to select · drag the + to connect · right-click for more</span>
+      </div>
+      <canvas className="minimap" ref={minimap} hidden={!showMap || visible === 0} aria-label="Minimap" />
+
+      {error && (
+        <div className="canvas-error error" onClick={() => setError(null)}>
+          {error}
         </div>
-        {error && (
-          <div className="canvas-error error" onClick={() => setError(null)}>
-            {error}
+      )}
+      {expanded.length === 0 && (
+        <div className="hint">
+          <div className="empty-art" aria-hidden="true" />
+          <p>Find a node above, press “Show all”, or create a node.</p>
+        </div>
+      )}
+
+      {menu && (
+        <div className="context-menu menu" style={{ left: menu.x, top: menu.y }} onContextMenu={(e) => e.preventDefault()}>
+          {menuItems(menu).map((item, index) =>
+            item === "sep" ? (
+              <div key={`sep-${index}`} className="menu-sep" />
+            ) : (
+              <button
+                key={item.label}
+                className={item.danger ? "menu-item danger-item" : "menu-item"}
+                onClick={() => {
+                  setMenu(null);
+                  item.run();
+                }}
+              >
+                <span className="row nowrap">
+                  <Icon name={item.icon} size={15} /> {item.label}
+                </span>
+                {item.hint && <kbd>{item.hint}</kbd>}
+              </button>
+            ),
+          )}
+        </div>
+      )}
+
+      {inspectorOpen && (
+        <aside className="inspector">
+          <div className="inspector-head">
+            {single && (
+              <>
+                <button className="small-button" onClick={() => expand(single)}>
+                  <Icon name="expand" size={14} /> Expand
+                </button>
+                <button className="small-button" onClick={() => newEdge({ from: { id: single, name: nameOf(single) } })}>
+                  <Icon name="link" size={14} /> Connect to…
+                </button>
+                <button
+                  className="small-button"
+                  onClick={() => engine.current?.pin([single], !engine.current.isPinned(single))}
+                  title="Pin or unpin (P)"
+                >
+                  <Icon name="pin" size={14} />
+                </button>
+              </>
+            )}
+            {selected.length > 1 && <strong>{selected.length} nodes</strong>}
+            {edge && <strong>Fact</strong>}
+            <div className="spacer" />
+            <button
+              className="ghost icon-button"
+              onClick={() => {
+                setSelected([]);
+                setSelectedEdge(null);
+                engine.current?.select([]);
+              }}
+              aria-label="Close"
+            >
+              <Icon name="x" />
+            </button>
           </div>
-        )}
-        {expanded.length === 0 && (
-          <div className="hint">
-            <div className="empty-art" aria-hidden="true" />
-            <p>Search above, press “Show all”, or create a node.</p>
-          </div>
-        )}
-        {selection && (
-          <aside className="inspector">
-            <div className="inspector-head">
-              {selection.kind === "node" ? (
-                <>
-                  <button className="small-button" onClick={() => expand(selection.id)}>
-                    <Icon name="expand" size={14} /> Expand
-                  </button>
-                  <button
-                    className="small-button"
-                    onClick={() => setConnectFrom({ id: selection.id, name: names.current.get(selection.id) ?? selection.id })}
-                  >
-                    <Icon name="link" size={14} /> Connect to…
-                  </button>
-                </>
-              ) : (
-                <strong>Fact</strong>
-              )}
-              <div className="spacer" />
-              <button className="ghost icon-button" onClick={() => setSelection(null)} aria-label="Close">
-                <Icon name="x" />
+          {single && <NodeDetail key={single} id={single} compact />}
+          {selected.length > 1 && (
+            <div className="stack tight">
+              <p className="muted small">Drag any of them to move them together. Right-click for more.</p>
+              <button onClick={() => engine.current?.fit(true, selected)}>
+                <Icon name="fit" /> Frame them
+              </button>
+              <button onClick={() => engine.current?.pin(selected, true)}>
+                <Icon name="pin" /> Pin them
+              </button>
+              <button onClick={() => engine.current?.pin(selected, false)}>Unpin them</button>
+              <button onClick={() => hide(selected)}>
+                <Icon name="eyeOff" /> Hide them
+              </button>
+              <button className="danger ghost" onClick={() => void deleteNodes(selected)} disabled={busy}>
+                <Icon name="trash" /> Delete them
               </button>
             </div>
-            {selection.kind === "node" ? (
-              <NodeDetail key={selection.id} id={selection.id} compact />
-            ) : (
-              <div className="detail compact">
-                <div className="edge-title">
-                  <span>{names.current.get(selection.edge.from)}</span>
-                  <span className="mono accent">—{selection.edge.label}→</span>
-                  <span>{names.current.get(selection.edge.to)}</span>
-                </div>
-                <dl className="facts small">
-                  <dt>@id</dt>
-                  <dd className="mono">{selection.edge.id}</dd>
-                  <dt>valid</dt>
-                  <dd>
-                    {selection.edge.valid_from !== null ? formatTime(selection.edge.valid_from).slice(0, 10) : "always"} →{" "}
-                    {selection.edge.valid_to !== null ? formatTime(selection.edge.valid_to).slice(0, 10) : "now"}
-                  </dd>
-                  <dt>recorded</dt>
-                  <dd>{formatTime(selection.edge.recorded_at)}</dd>
-                </dl>
-                {Object.keys(selection.edge.props).length > 0 && <pre>{JSON.stringify(selection.edge.props, null, 2)}</pre>}
-                <div className="stack tight">
-                  <button onClick={() => void edgeAction(selection.edge, "invalidate")} disabled={busy || (selection.edge.valid_to ?? Infinity) <= Date.now() * 1000}>
-                    <Icon name="clock" /> End it today (keeps history)
-                  </button>
-                  <button onClick={() => void edgeAction(selection.edge, "retract")} disabled={busy}>
-                    <Icon name="ban" /> Retract (it was a mistake)
-                  </button>
-                  <button className="danger ghost" onClick={() => void edgeAction(selection.edge, "delete")} disabled={busy}>
-                    <Icon name="trash" /> Delete
-                  </button>
-                </div>
+          )}
+          {selected.length === 1 && selected[0].startsWith(CLUSTER) && (
+            <div className="stack tight">
+              <p className="muted small">A collapsed community. Double-click it to expand it.</p>
+              <button onClick={() => setCollapsed((c) => new Set([...c].filter((g) => `${CLUSTER}${g}` !== selected[0])))}>
+                <Icon name="expand" /> Expand it
+              </button>
+            </div>
+          )}
+          {edge && (
+            <div className="detail compact">
+              <div className="edge-title">
+                <span>{nameOf(edge.from)}</span>
+                <span className="mono accent">—{edge.label}→</span>
+                <span>{nameOf(edge.to)}</span>
               </div>
-            )}
-          </aside>
-        )}
-      </div>
+              <dl className="facts small">
+                <dt>@id</dt>
+                <dd className="mono">{edge.id}</dd>
+                <dt>valid</dt>
+                <dd>
+                  {edge.valid_from !== null ? formatTime(edge.valid_from).slice(0, 10) : "always"} →{" "}
+                  {edge.valid_to !== null ? formatTime(edge.valid_to).slice(0, 10) : "now"}
+                </dd>
+                <dt>recorded</dt>
+                <dd>{formatTime(edge.recorded_at)}</dd>
+              </dl>
+              {Object.keys(edge.props).length > 0 && <pre>{JSON.stringify(edge.props, null, 2)}</pre>}
+              <div className="stack tight">
+                <button onClick={() => void edgeAction(edge, "invalidate")} disabled={busy || (edge.valid_to ?? Infinity) <= Date.now() * 1000}>
+                  <Icon name="clock" /> End it today (keeps history)
+                </button>
+                <button onClick={() => void edgeAction(edge, "retract")} disabled={busy}>
+                  <Icon name="ban" /> Retract (it was a mistake)
+                </button>
+                <button className="danger ghost" onClick={() => void edgeAction(edge, "delete")} disabled={busy}>
+                  <Icon name="trash" /> Delete
+                </button>
+              </div>
+            </div>
+          )}
+        </aside>
+      )}
     </div>
   );
 }

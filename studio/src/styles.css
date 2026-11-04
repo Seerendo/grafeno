@@ -2054,25 +2054,89 @@ dl.facts dd {
   min-height: 300px;
 }
 
-.cy,
+/* Canvases fill their box; the engine sizes their pixels. */
+.graph-canvas,
 .mini-graph {
   position: absolute;
   inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
 }
 
-/* Nodes are laid out in the area the floating tools leave free; the
-   background still runs under them. */
-.graph .cy {
-  top: calc(var(--clear-top) + 60px);
-  left: var(--clear-left);
+.graph:focus {
+  outline: none;
 }
 
 .graph-toolbar .grow {
   max-width: 340px;
 }
 
-.mini-graph {
-  border-radius: inherit;
+.minimap {
+  position: absolute;
+  right: var(--gap);
+  bottom: var(--gap);
+  width: 200px;
+  height: 130px;
+  z-index: 3;
+  border-radius: var(--radius);
+  background: var(--glass);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  cursor: crosshair;
+}
+
+.graph-controls {
+  position: absolute;
+  right: var(--gap);
+  bottom: calc(130px + var(--gap) * 2);
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  border-radius: var(--radius);
+  background: var(--glass);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+
+.graph:has(.inspector) .graph-controls,
+.graph:has(.inspector) .minimap {
+  right: calc(min(390px, 100% - 24px) + var(--gap) * 2);
+}
+
+.context-menu {
+  position: fixed;
+  min-width: 230px;
+  z-index: 60;
+}
+
+.context-menu .menu-item {
+  padding: 7px 10px;
+}
+
+.context-menu kbd {
+  font-size: 10px;
+}
+
+.menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+
+.menu-item.danger-item {
+  color: var(--danger);
+}
+
+.menu-item.danger-item:hover {
+  background: var(--danger-soft);
 }
 
 .canvas-status {

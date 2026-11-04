@@ -12,11 +12,17 @@ terminal:
   labels, properties (typed: text, number, yes/no, JSON), text and
   importance in place; add, end, retract or delete facts; select several
   nodes to archive or delete them.
-- **Graph**: draw the graph around search results or everything, create
-  nodes, connect two nodes by clicking them, inspect and end facts, travel
-  in time with “valid at”, color nodes by community (Louvain, label
-  propagation, connected components) and size them by centrality
-  (PageRank, degree, betweenness), computed over the whole namespace.
+- **Graph**: a live, physics-driven graph you handle directly. Drag nodes
+  and the rest reacts (dragged nodes stay pinned); hover or select one to
+  light its neighborhood; shift-click or shift-drag a lasso to select
+  several and move, pin, hide or delete them together; drag the `+` of a
+  selected node onto another to connect them; double-click to expand
+  neighbors; right-click for every action on nodes, facts or the canvas.
+  Zoom at the cursor, pan with momentum, a minimap, find a node to fly to
+  it, travel in time with “valid at”. Color by community (Louvain, label
+  propagation, connected components), collapse a community into one node,
+  and size nodes by centrality (PageRank, degree, betweenness), computed
+  over the whole namespace. Keys: Delete, Esc, F, H, P, + and -.
 - **Scripts**: a GQ workspace like a SQL editor. Several scripts in tabs
   (kept in the browser, opened from and saved to `.gq` files), highlighting
   and completion (keywords, functions, the namespace's labels,

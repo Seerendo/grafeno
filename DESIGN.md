@@ -193,7 +193,8 @@ modes cannot share a file. An MCP mode that forwards to an HTTP server
 ### Studio and distribution (phase 6)
 
 - **Grafeno Studio** (`studio/`): React, Vite and TypeScript, with
-  Cytoscape.js for the graph and the TypeScript client for every call.
+  its own canvas graph engine on d3-force (phase 9.3) and the TypeScript
+  client for every call.
   Views: overview, explorer (create and edit nodes, labels, typed
   properties, text, importance and facts in place; bulk archive and
   delete), graph (create nodes, connect them by clicking, inspect and end
@@ -565,7 +566,7 @@ their own color. The chart palette kept its slots: the validator passes
 both themes on the new surfaces (in light, three slots stay under 3:1
 against the surface, relieved by the legend and the table view).
 
-**9.3 A graph you can handle.** Cytoscape's static layouts give way to a
+**9.3 A graph you can handle** (done). Cytoscape's static layouts give way to a
 live physics simulation (d3-force) drawn on a canvas of its own.
 
 - Drag any node and the rest reacts; release to let it settle, or pin it
@@ -583,6 +584,26 @@ live physics simulation (d3-force) drawn on a canvas of its own.
   (phase 8.5); clusters can be collapsed into one node.
 - Smooth at a few thousand nodes on screen (canvas, spatial index for
   hits, labels only when legible).
+
+As built: `studio/src/graph/engine.ts` is a framework-free engine (one
+canvas, d3-force for links, charge, collision and a weak pull to the
+center); the graph view and the result graph of Scripts both use it, and
+Cytoscape is gone. Dragging pins what was moved (a dot marks it), and the
+simulation reheats while dragging and cools after. Hover and a single
+selection light the node's neighborhood and dim the rest; shift-click,
+ctrl-click and shift-drag (lasso) select several, which then move,
+pin, hide or delete together. A selected node shows a `+` handle: dragging
+it onto another node opens the new-fact form with both ends. Right-click
+opens a menu for a node, several nodes, a fact or the background.
+Parallel facts curve apart, self-loops loop, facts that ended are dashed,
+labels are drawn in screen space and only when legible. Zoom follows the
+cursor, panning keeps its momentum, fitting keeps clear of the floating
+panels, and a minimap shows and moves the view. With communities on
+(8.5), a community collapses into one node with its count, and facts in
+and out of it merge into one edge per pair; double-click expands it.
+Hit testing scans the nodes and edges under the pointer (linear, fine at
+the few thousand nodes a view draws). Keys: Delete, Esc, F (frame), H
+(hide), P (pin), + and -.
 
 **9.4 Desktop application (Tauri).** A new crate, `grafeno-desktop`
 (`apps/desktop`), wraps the Studio in a native window.

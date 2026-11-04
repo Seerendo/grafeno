@@ -75,6 +75,10 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
 - **Phase 9.2, graph lab design:** a new design for the Studio, dark first,
   with a floating rail and command bar over the canvas, Space Grotesk and
   JetBrains Mono bundled for offline use, and glowing nodes.
+- **Phase 9.3, a graph you can handle:** the Studio's graph is a live
+  physics simulation on its own canvas: drag and pin nodes, lasso and
+  move groups, connect by dragging, context menus, a minimap, and
+  communities that collapse into one node.
 
 ## Installing
 
