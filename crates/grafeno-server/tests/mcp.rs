@@ -438,3 +438,61 @@ fn maintain_merge_and_consolidate() {
     );
     assert_eq!(empty["isError"], true);
 }
+
+#[test]
+fn agents_are_fenced_and_recorded() {
+    use grafeno_server::mcp::McpAccess;
+    let db = Grafeno::in_memory().unwrap();
+    let server = McpServer::new(db, "agent".into()).with_access(McpAccess {
+        allow: vec!["agent".into(), "team-*".into()],
+        read_only: false,
+        actor: Some(grafeno::Actor::new("claude")),
+    });
+    let call = |name: &str, arguments: serde_json::Value| {
+        let request = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
+        server.handle_line(&request.to_string()).unwrap()
+    };
+    let ok = call(
+        "remember",
+        serde_json::json!({ "text": "Ana likes Rust", "labels": ["Note"] }),
+    );
+    assert_eq!(ok["result"]["isError"], false, "{ok}");
+    let who = call(
+        "query",
+        serde_json::json!({ "query": "MATCH (n:Note) RETURN n.@recorded_by" }),
+    );
+    assert!(who.to_string().contains("claude"), "{who}");
+    let fenced = call(
+        "recall",
+        serde_json::json!({ "query": "Rust", "namespace": "other" }),
+    );
+    assert_eq!(fenced["result"]["isError"], true, "{fenced}");
+    let allowed = call(
+        "recall",
+        serde_json::json!({ "query": "Rust", "namespace": "team-a" }),
+    );
+    assert_eq!(allowed["result"]["isError"], false, "{allowed}");
+
+    let reader =
+        McpServer::new(Grafeno::in_memory().unwrap(), "agent".into()).with_access(McpAccess {
+            read_only: true,
+            ..McpAccess::default()
+        });
+    let list = reader
+        .handle_line(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+        .unwrap();
+    let names: Vec<&str> = list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"recall") && !names.contains(&"remember"),
+        "{names:?}"
+    );
+    let refused = reader
+        .handle_line(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"remember","arguments":{"text":"x"}}}"#)
+        .unwrap();
+    assert_eq!(refused["result"]["isError"], true);
+}

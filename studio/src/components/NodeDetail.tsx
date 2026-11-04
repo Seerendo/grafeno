@@ -183,6 +183,12 @@ export function NodeDetail({ id, onChanged, compact }: { id: string; onChanged?:
         <dd>{formatTime(node.created_at)}</dd>
         <dt>updated</dt>
         <dd>{formatTime(node.updated_at)}</dd>
+        {node.recorded_by && (
+          <>
+            <dt>recorded by</dt>
+            <dd className="mono">{node.recorded_by}</dd>
+          </>
+        )}
         <dt>importance</dt>
         <dd className="row nowrap">
           <input

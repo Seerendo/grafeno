@@ -14,6 +14,8 @@ The `grafeno` binary serves and manages a Grafeno database (installers:
   administration, on a file or on a running server (like `psql`).
 - `grafeno namespaces | stats | check | rebuild | export | import`:
   administration commands on a file (like `pg_dump`).
+- `grafeno keys list | create | revoke`: API keys, on a file or through a
+  running server (see *Access* below).
 
 ```bash
 cargo install --path crates/grafeno-server
@@ -121,15 +123,57 @@ docker run -p 7810:7810 -v grafeno-data:/data -e GRAFENO_TOKEN=change-me grafeno
 The image listens on `0.0.0.0:7810` and stores data in `/data`. Set a token
 whenever the port is reachable by anything but the application.
 
+## Access
+
+Every request under `/v1` carries `Authorization: Bearer <secret>`, where
+the secret is either the server's **token** (`grafeno.toml`, `--token`),
+which may do everything, or an **API key**. A key has a name and grants:
+a role on a namespace (`vault`), on every namespace starting with a prefix
+(`team-*`), or on all (`*`). Roles add up:
+
+| Role | May |
+| --- | --- |
+| `read` | read, search, recall, run read queries and algorithms |
+| `write` | also create and change nodes and facts, merge, archive, touch |
+| `admin` | also indexes and constraints, rebuild, describe and drop the namespace, create it |
+
+A key may also be an **owner** (everything, including managing keys) and
+may be limited to **its own records**: then it changes or deletes only
+nodes and facts it recorded (others' are `403 forbidden`, in GQ too).
+Every write by a key records its name: `recorded_by` on nodes and edges,
+`n.@recorded_by` in GQ. A key sees only the namespaces it may read: in
+`/v1/namespaces`, `SHOW NAMESPACES` and exports.
+
+```bash
+grafeno keys create research-agent --grant vault:write --grant "team-*:read" --config grafeno.toml
+```
+
+```bash
+grafeno keys list --config grafeno.toml
+```
+
+```bash
+grafeno keys revoke research-agent --config grafeno.toml
+```
+
+With `--config`, the commands go through the running server (its address
+and token); with `--db`, they open a database file whose server is
+stopped. The secret is printed once; only its SHA-256 is stored. Keys are
+also managed from the Studio (Administration) and over HTTP
+(`/v1/keys`, owners only). A server with neither a token nor keys is open
+to anyone who reaches it; its first key must then be an owner, and from
+then on every request needs a key.
+
 ## HTTP API
 
 All bodies are JSON. Everything under `/v1` needs `Authorization: Bearer
-<token>` when the server has a token. Errors look like
+<secret>` (the token or a key) unless the server is open. Errors look like
 `{"error": {"code": "not_found", "message": "…"}}`, with codes `bad_request`
 (malformed body), `invalid` (rejected input), `invalid_query` (a GQ error),
 `query_limit` (a GQ query over its time, reads or rows limit; see `[query]` in
 `grafeno.toml`), `not_found`, `conflict` (409: it exists already),
-`unauthorized`, `busy` (503 with `Retry-After`:
+`unauthorized` (401: no valid secret), `forbidden` (403: the key may not do
+this), `busy` (503 with `Retry-After`:
 too many requests at once, or too many writes waiting) and `internal`.
 
 Writes from concurrent requests are committed together (group commit): each
@@ -175,6 +219,10 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `POST`   | `/v1/{ns}/context`                    | recall query + `{budget, fact_share, max_facts, facts}` | `{items, facts, tokens, rendered}` |
 | `POST`   | `/v1/{ns}/batch`                      | `{ops}`                                                 | `{results, refs}`             |
 | `POST`   | `/v1/{ns}/query`                      | `{query, params?}` ([GQ](../../docs/query-language.md)) | `{columns, rows, stats}`      |
+| `GET`    | `/v1/whoami`                          |                                                         | the caller: `{name, owner, grants, own_only}` |
+| `GET`    | `/v1/keys`                            |                                                         | the keys, never their secrets (owners) |
+| `POST`   | `/v1/keys`                            | `{name, grants: [{namespace, role}], owner?, own_only?, description?}` | `{key, secret}` (201; the secret only here) |
+| `DELETE` | `/v1/keys/{name}`                     |                                                         | 204                           |
 | `GET`    | `/v1/algorithms`                      |                                                         | `[{name, arguments, columns, description}]` |
 | `POST`   | `/v1/{ns}/algo/{name}`                | `{args?, settings?, write?, column?}`                   | `{columns, rows, stats}`      |
 | `GET`    | `/v1/{ns}/resolve`                    | `?name=&label=`                                         | nodes with that name or alias |
@@ -256,6 +304,16 @@ Syncing a note and replacing its links in one request:
 | `consolidate` | Stores a summary of several memories and archives them.                     |
 
 Every tool takes an optional `namespace`, which defaults to `--namespace`.
+
+The MCP server opens the database file itself, so it cannot keep out the
+user who starts it, but it fences the agent it serves:
+
+| Flag | Effect |
+| --- | --- |
+| `--allow vault,team-*` | the namespaces the agent may use (all by default) |
+| `--read-only` | only the tools that read are offered (and recall records no accesses) |
+| `--as NAME` | its writes are recorded as `NAME` (`@recorded_by`) |
+| `--own-only` | with `--as`: it may change only what it recorded |
 
 Claude Code:
 

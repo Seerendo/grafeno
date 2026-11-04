@@ -189,6 +189,7 @@ impl WriteTx {
             return Err(Error::Invalid("importance must be between 0 and 1".into()));
         }
         let node = self.node(ns, id)?.ok_or(Error::NodeNotFound(id))?;
+        self.guard_node(&node)?;
         let state = MemoryState {
             importance,
             ..self.memory(ns, &node)?
@@ -238,6 +239,8 @@ impl WriteTx {
         }
         let keep = self.node(ns, kept)?.ok_or(Error::NodeNotFound(kept))?;
         let gone = self.node(ns, merged)?.ok_or(Error::NodeNotFound(merged))?;
+        self.guard_node(&keep)?;
+        self.guard_node(&gone)?;
         let mut report = MergeReport {
             kept,
             merged,

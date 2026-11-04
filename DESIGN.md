@@ -684,7 +684,7 @@ benchmark where it measures something, documentation and its own commit.
 
 #### Phase 10: hardening
 
-**10.1 Isolation and authorization.** One static token today gives full
+**10.1 Isolation and authorization** (done). One static token gave full
 access to every namespace.
 
 - Principals: named API keys (stored hashed), each with grants per
@@ -703,6 +703,29 @@ access to every namespace.
   the wrong namespace and the wrong role, plus property tests that random
   queries never return another namespace's ids.
 - Studio and `grafeno keys create | list | revoke`.
+
+As built: principals live in a `principals` table (layout version 7) with
+the SHA-256 of their secret (`gfk_` and 40 hex digits); the server keeps
+them in memory by hash and reloads them when one changes. One middleware
+maps every `/v1` route to what it needs (any caller, owner, or a role on
+the namespace in its path) and serves the request with the caller in a
+task-local, so handlers ask for more where the route alone cannot tell:
+writing queries need write and index commands admin (from the parsed
+statement), creating a namespace needs admin on its name, and listings,
+`SHOW NAMESPACES` (through a filter in the query limits) and exports keep
+to what the caller may read. Writes run as an `Actor` set on the write
+transaction for each job of a group commit: the engine stamps
+`recorded_by` and, for own-only actors, refuses changes to others' nodes
+and edges (deleting a node checks its edges too; merging checks both nodes
+and the moved edges) with `Error::Forbidden`, which GQ and HTTP report as
+403. The owner token records nothing. A server without a token stays open
+until its first key, which must be an owner; the Studio switches to it.
+The desktop app gives each opened file a random owner token of its own.
+MCP opens the file itself, so its fences (`--allow`, `--read-only`,
+`--as`, `--own-only`) guard against the agent, not the user. Route names
+under `/v1` are reserved as namespace names. Tests: a leak matrix over
+every namespace route for a key of another namespace and a reader, owner
+routes, revoked keys, own-only rules over HTTP and GQ, prefix grants.
 
 **10.2 Data integrity under failure.**
 

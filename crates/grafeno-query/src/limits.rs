@@ -19,6 +19,29 @@ pub struct Limits {
     pub max_rows: Option<usize>,
     /// Set by the caller to stop the query (when its client goes away).
     pub cancel: Option<Arc<AtomicBool>>,
+    /// The namespaces the caller may see, for statements that list them
+    /// (`SHOW NAMESPACES`); all when `None`.
+    pub visible: Option<NamespaceFilter>,
+}
+
+/// Which namespaces a caller may see.
+#[derive(Clone)]
+pub struct NamespaceFilter(pub Arc<dyn Fn(&str) -> bool + Send + Sync>);
+
+impl NamespaceFilter {
+    pub fn new(filter: impl Fn(&str) -> bool + Send + Sync + 'static) -> Self {
+        Self(Arc::new(filter))
+    }
+
+    pub fn allows(&self, ns: &str) -> bool {
+        (self.0)(ns)
+    }
+}
+
+impl std::fmt::Debug for NamespaceFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NamespaceFilter")
+    }
 }
 
 impl Limits {
@@ -30,6 +53,7 @@ impl Limits {
             max_reads: Some(50_000_000),
             max_rows: Some(1_000_000),
             cancel: None,
+            visible: None,
         }
     }
 

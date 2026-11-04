@@ -35,6 +35,9 @@ const RECENT: usize = 10;
 struct Session {
     path: PathBuf,
     router: Router,
+    /// The app is the owner of the files it opens: its requests carry this
+    /// token, so keys created in the file never lock the app out.
+    token: String,
 }
 
 #[derive(Default)]
@@ -125,10 +128,12 @@ fn open_path(app: &AppHandle, desktop: &Desktop, path: PathBuf) -> Result<Sessio
             format!("cannot open {}: {text}", path.display())
         }
     })?;
-    let router = router_for(db);
+    let token = grafeno_server::auth::new_secret();
+    let router = router_for(db, Some(&token));
     let session = Session {
         path: path.clone(),
         router,
+        token,
     };
     let reply = info(&session);
     *desktop.session.lock().expect("not poisoned") = Some(session);
@@ -317,8 +322,11 @@ async fn request(
             .lock()
             .expect("not poisoned")
             .as_ref()
-            .map(|session| session.router.clone())
+            .map(|session| (session.router.clone(), session.token.clone()))
             .ok_or("no database is open")?;
+        let (router, token) = router;
+        let mut headers = headers;
+        headers.insert("authorization".into(), format!("Bearer {token}"));
         return local_request(router, &method, path, &headers, body).await;
     }
     if !(url.starts_with("http://") || url.starts_with("https://")) {
@@ -524,10 +532,10 @@ fn path_argument(args: &[String]) -> Option<String> {
         .cloned()
 }
 
-/// The router for a database, as the app serves it (no Studio, no token).
-fn router_for(db: Grafeno) -> Router {
+/// The router for a database, as the app serves it (no Studio).
+fn router_for(db: Grafeno, token: Option<&str>) -> Router {
     router_with(
-        AppState::new(Arc::new(db), None),
+        AppState::new(Arc::new(db), token),
         &Options {
             studio: false,
             cors_origins: Vec::new(),
@@ -603,7 +611,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_bridge_reads_and_writes_in_process() {
-        let router = router_for(Grafeno::in_memory().unwrap());
+        let router = router_for(Grafeno::in_memory().unwrap(), None);
         let health = call(&router, "GET", "/health", None).await;
         assert_eq!(health.status, 200);
         let created = call(&router, "POST", "/v1/namespaces", Some(r#"{"name":"lab"}"#)).await;
@@ -639,7 +647,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn the_bridge_reaches_a_server() {
-        let router = router_for(Grafeno::in_memory().unwrap());
+        let router = router_for(Grafeno::in_memory().unwrap(), None);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });

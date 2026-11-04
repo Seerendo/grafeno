@@ -3,6 +3,7 @@ import { useState } from "react";
 
 import { describeError } from "../api.ts";
 import { IndexesPanel } from "../components/IndexesPanel.tsx";
+import { KeysPanel } from "../components/KeysPanel.tsx";
 import { useStudio } from "../context.ts";
 import { saveText } from "../desktop.ts";
 import type { CheckReport, DumpStats, RebuildReport } from "../../../clients/typescript/src/index.ts";
@@ -39,6 +40,8 @@ export function AdminView() {
     <div className="stack">
       <h1>Administration</h1>
       {error && <div className="error">{error}</div>}
+
+      <KeysPanel />
 
       <IndexesPanel />
 

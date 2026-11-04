@@ -9,6 +9,7 @@ use redb::{
     ReadableTableMetadata, TableDefinition, WriteTransaction,
 };
 
+use crate::access::PRINCIPALS;
 use crate::algo::Shared;
 use crate::index::{INDEX_ENTRIES, INDEXES, IndexKey};
 use crate::memory::names_of;
@@ -38,7 +39,8 @@ use crate::{Hit, text, vector};
 /// 5. Adds property indexes (`indexes`, `index_entries`), empty until one
 ///    is declared.
 /// 6. Adds the `namespaces` registry, so that empty namespaces exist.
-pub const SCHEMA_VERSION: u64 = 6;
+/// 7. Adds `principals` (API keys), empty until one is created.
+pub const SCHEMA_VERSION: u64 = 7;
 
 /// The tables replaced in version 3, by name (their types no longer matter).
 const OLD_ADJ_OUT: TableDefinition<AdjKey, u128> = TableDefinition::new("adj_out");
@@ -111,6 +113,7 @@ impl Grafeno {
         tx.open_table(INDEXES).map_err(storage)?;
         tx.open_table(INDEX_ENTRIES).map_err(storage)?;
         tx.open_table(NAMESPACES).map_err(storage)?;
+        tx.open_table(PRINCIPALS).map_err(storage)?;
 
         let stored = tx
             .open_table(META)
@@ -214,6 +217,7 @@ impl Grafeno {
             indexes: tx.open_table(INDEXES).map_err(storage)?,
             index_entries: tx.open_table(INDEX_ENTRIES).map_err(storage)?,
             registry: tx.open_table(NAMESPACES).map_err(storage)?,
+            principals: tx.open_table(PRINCIPALS).map_err(storage)?,
             _tx: tx,
         })
     }
@@ -228,6 +232,7 @@ impl Grafeno {
             tx,
             vectors: vector::Cache::default(),
             shared: self.shared.clone(),
+            actor: None,
         })
     }
 
@@ -434,6 +439,7 @@ pub struct ReadTx {
     pub(crate) indexes: ReadOnlyTable<(&'static str, &'static str), &'static [u8]>,
     pub(crate) index_entries: ReadOnlyTable<IndexKey, ()>,
     pub(crate) registry: ReadOnlyTable<&'static str, &'static [u8]>,
+    pub(crate) principals: ReadOnlyTable<&'static str, &'static [u8]>,
     pub(crate) shared: Arc<Shared>,
     /// The commit this snapshot sees, when known (for the projection cache).
     pub(crate) generation: Option<u64>,
@@ -576,15 +582,91 @@ impl ReadTx {
     }
 }
 
+/// Who is writing: the principal recorded on what it creates, and whether
+/// it may change only what it recorded itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Actor {
+    pub name: String,
+    /// Refuse changes to nodes and edges recorded by anyone else.
+    pub own_only: bool,
+}
+
+impl Actor {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            own_only: false,
+        }
+    }
+
+    pub fn own_only(mut self) -> Self {
+        self.own_only = true;
+        self
+    }
+}
+
 /// A write transaction. Nothing is visible to others until `commit`.
 pub struct WriteTx {
     pub(crate) tx: WriteTransaction,
     /// Decoded vectors and links, shared by the vector writes of this transaction.
     pub(crate) vectors: vector::Cache,
     pub(crate) shared: Arc<Shared>,
+    pub(crate) actor: Option<Actor>,
 }
 
 impl WriteTx {
+    /// Writes from now on are made by `actor` (until it is changed again):
+    /// new nodes and edges record its name, and with `own_only` changes to
+    /// records of others fail with [`Error::Forbidden`].
+    pub fn act_as(&mut self, actor: Option<Actor>) {
+        self.actor = actor;
+    }
+
+    pub fn actor(&self) -> Option<&Actor> {
+        self.actor.as_ref()
+    }
+
+    /// Fails if the actor may change only its own records and this one is
+    /// someone else's.
+    fn guard(&self, recorded_by: Option<&str>, what: impl FnOnce() -> String) -> Result<()> {
+        match &self.actor {
+            Some(actor) if actor.own_only && recorded_by != Some(actor.name.as_str()) => {
+                Err(Error::Forbidden(format!(
+                    "{} may only change what it recorded, and {} was recorded by {}",
+                    actor.name,
+                    what(),
+                    recorded_by.unwrap_or("someone else")
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub(crate) fn guard_node(&self, node: &Node) -> Result<()> {
+        self.guard(node.recorded_by.as_deref(), || {
+            format!("node {:?}", node.display_name())
+        })
+    }
+
+    pub(crate) fn guard_edge(&self, edge: &Edge) -> Result<()> {
+        self.guard(edge.recorded_by.as_deref(), || {
+            format!("the {} fact {}", edge.label, edge.id)
+        })
+    }
+
+    /// The node, if this actor may change it.
+    fn node_to_change(&self, ns: &str, id: NodeId) -> Result<Node> {
+        let node = self.node(ns, id)?.ok_or(Error::NodeNotFound(id))?;
+        self.guard_node(&node)?;
+        Ok(node)
+    }
+
+    fn edge_to_change(&self, ns: &str, id: EdgeId) -> Result<Edge> {
+        let edge = self.edge(ns, id)?.ok_or(Error::EdgeNotFound(id))?;
+        self.guard_edge(&edge)?;
+        Ok(edge)
+    }
+
     pub fn commit(self) -> Result<()> {
         let Self { tx, shared, .. } = self;
         shared.committing(|| tx.commit().map_err(storage))
@@ -656,6 +738,9 @@ impl WriteTx {
         let labels = normalize_labels(new.labels)?;
         let now = Timestamp::now();
         let existing = self.node(ns, id)?;
+        if let Some(old) = &existing {
+            self.guard_node(old)?;
+        }
         let node = Node {
             id,
             labels,
@@ -663,6 +748,10 @@ impl WriteTx {
             sources: new.sources,
             created_at: existing.as_ref().map_or(now, |old| old.created_at),
             updated_at: now,
+            recorded_by: match &existing {
+                Some(old) => old.recorded_by.clone(),
+                None => self.actor.as_ref().map(|actor| actor.name.clone()),
+            },
         };
         self.put_node(ns, &node, existing.as_ref())?;
         self.replace_indexes(ns, id, new.text.as_deref(), new.embedding.as_deref())?;
@@ -709,7 +798,7 @@ impl WriteTx {
 
     /// Merges `props` into the node; a `null` value removes the property.
     pub fn set_node_props(&mut self, ns: &str, id: NodeId, props: Props) -> Result<()> {
-        let mut node = self.node(ns, id)?.ok_or(Error::NodeNotFound(id))?;
+        let mut node = self.node_to_change(ns, id)?;
         let previous = node.clone();
         merge_props(&mut node.props, props);
         node.updated_at = Timestamp::now();
@@ -718,7 +807,7 @@ impl WriteTx {
 
     pub fn add_label(&mut self, ns: &str, id: NodeId, label: &str) -> Result<()> {
         check_label(label)?;
-        let mut node = self.node(ns, id)?.ok_or(Error::NodeNotFound(id))?;
+        let mut node = self.node_to_change(ns, id)?;
         if let Err(at) = node
             .labels
             .binary_search_by(|item| item.as_str().cmp(label))
@@ -732,7 +821,7 @@ impl WriteTx {
     }
 
     pub fn remove_label(&mut self, ns: &str, id: NodeId, label: &str) -> Result<()> {
-        let mut node = self.node(ns, id)?.ok_or(Error::NodeNotFound(id))?;
+        let mut node = self.node_to_change(ns, id)?;
         if let Ok(at) = node
             .labels
             .binary_search_by(|item| item.as_str().cmp(label))
@@ -750,7 +839,7 @@ impl WriteTx {
 
     /// Indexes `text` for full-text search, replacing the previous text.
     pub fn set_text(&mut self, ns: &str, id: NodeId, text: &str) -> Result<()> {
-        self.node(ns, id)?.ok_or(Error::NodeNotFound(id))?;
+        self.node_to_change(ns, id)?;
         text::index(&self.tx, ns, id, text)
     }
 
@@ -758,32 +847,39 @@ impl WriteTx {
     /// loading, several times faster than one [`WriteTx::set_text`] each.
     pub fn set_texts(&mut self, ns: &str, texts: &[(NodeId, String)]) -> Result<()> {
         for (node, _) in texts {
-            self.node(ns, *node)?.ok_or(Error::NodeNotFound(*node))?;
+            self.node_to_change(ns, *node)?;
         }
         text::index_many(&self.tx, ns, texts)
     }
 
     /// Removes the node's text from the index. Returns whether it had any.
     pub fn remove_text(&mut self, ns: &str, id: NodeId) -> Result<bool> {
+        if let Some(node) = self.node(ns, id)? {
+            self.guard_node(&node)?;
+        }
         text::remove(&self.tx, ns, id)
     }
 
     /// Indexes `embedding` for vector search, replacing the previous one. All
     /// embeddings of a namespace must have the same dimension.
     pub fn set_embedding(&mut self, ns: &str, id: NodeId, embedding: &[f32]) -> Result<()> {
-        self.node(ns, id)?.ok_or(Error::NodeNotFound(id))?;
+        self.node_to_change(ns, id)?;
         vector::insert(&self.tx, &mut self.vectors, ns, id, embedding)
     }
 
     /// Removes the node's embedding from the index. Returns whether it had one.
     pub fn remove_embedding(&mut self, ns: &str, id: NodeId) -> Result<bool> {
+        if let Some(node) = self.node(ns, id)? {
+            self.guard_node(&node)?;
+        }
         vector::remove(&self.tx, &mut self.vectors, ns, id)
     }
 
     /// Deletes the node, its edges and its indexed text and embedding, without
     /// keeping history.
     pub fn delete_node(&mut self, ns: &str, id: NodeId) -> Result<()> {
-        let node = self.node(ns, id)?.ok_or(Error::NodeNotFound(id))?;
+        // Its edges go too: with `own_only`, each must be the actor's.
+        let node = self.node_to_change(ns, id)?;
         let mut edges: Vec<EdgeId> = Vec::new();
         for definition in [ADJ_OUT, ADJ_IN] {
             let table = self.tx.open_table(definition).map_err(storage)?;
@@ -841,6 +937,7 @@ impl WriteTx {
             valid_to: new.valid_to,
             recorded_at: Timestamp::now(),
             expired_at: None,
+            recorded_by: self.actor.as_ref().map(|actor| actor.name.clone()),
         };
         let id = edge.id;
         self.restore_edge(ns, edge)?;
@@ -868,14 +965,14 @@ impl WriteTx {
 
     /// Merges `props` into the edge; a `null` value removes the property.
     pub fn set_edge_props(&mut self, ns: &str, id: EdgeId, props: Props) -> Result<()> {
-        let mut edge = self.edge(ns, id)?.ok_or(Error::EdgeNotFound(id))?;
+        let mut edge = self.edge_to_change(ns, id)?;
         merge_props(&mut edge.props, props);
         self.put_edge(ns, &edge)
     }
 
     /// The fact stopped being true at `at`: the world changed, not what we know.
     pub fn invalidate_edge(&mut self, ns: &str, id: EdgeId, at: Timestamp) -> Result<()> {
-        let mut edge = self.edge(ns, id)?.ok_or(Error::EdgeNotFound(id))?;
+        let mut edge = self.edge_to_change(ns, id)?;
         check_interval(edge.valid_from, Some(at))?;
         edge.valid_to = Some(at);
         self.put_edge(ns, &edge)
@@ -884,7 +981,7 @@ impl WriteTx {
     /// The fact was a mistake. It stays in history, visible with
     /// `EdgeFilter::known_at` at an earlier instant.
     pub fn retract_edge(&mut self, ns: &str, id: EdgeId) -> Result<()> {
-        let mut edge = self.edge(ns, id)?.ok_or(Error::EdgeNotFound(id))?;
+        let mut edge = self.edge_to_change(ns, id)?;
         if edge.expired_at.is_none() {
             edge.expired_at = Some(Timestamp::now());
             self.put_edge(ns, &edge)?;
@@ -914,7 +1011,7 @@ impl WriteTx {
 
     /// Deletes the edge without keeping history.
     pub fn delete_edge(&mut self, ns: &str, id: EdgeId) -> Result<()> {
-        let edge = self.edge(ns, id)?.ok_or(Error::EdgeNotFound(id))?;
+        let edge = self.edge_to_change(ns, id)?;
         let (from, to, edge_id) = (edge.from.as_u128(), edge.to.as_u128(), id.as_u128());
         let label = edge.label.as_str();
         self.tx

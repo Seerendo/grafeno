@@ -2654,6 +2654,32 @@ button.schema-item {
   }
 }
 
+/* ---------------------------------------------------------- access keys */
+
+.secret-box {
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  background: var(--accent-soft);
+}
+
+.secret-box code {
+  font-size: 13px;
+  user-select: all;
+}
+
+.key-form {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
+
+.key-form .badge,
+td .badge {
+  margin-left: 8px;
+}
+
 /* ------------------------------------------------- desktop start screen */
 
 .start-card {

@@ -426,6 +426,7 @@ Read with `n.@name`. They are what a node or edge has besides properties.
 | `@embedding`   | `@valid_from`, `@valid_to` |
 | `@sources`     | `@recorded_at`, `@expired_at` |
 | `@created_at`, `@updated_at` | `@sources` |
+| `@recorded_by` (the API key that created it) | `@recorded_by` |
 | `@importance` (0 to 1), `@accesses`, `@last_access` | |
 
 Times are time values; they compare with ISO strings and print as ISO 8601.
@@ -478,7 +479,7 @@ CREATE INDEX FOR (p:Person) ON (p.age);                   // named Person_age
 CREATE INDEX people_by_name IF NOT EXISTS FOR (p:Person) ON (p.name);
 CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE; // Person_email_unique
 SHOW INDEXES;                                             // name, label, property, unique, entries
-SHOW NAMESPACES;                                          // name, nodes, edges, created_at, description
+SHOW NAMESPACES;                                          // name, nodes, edges, created_at, description (those the caller may read)
 SHOW CONSTRAINTS;
 DROP INDEX people_by_name;
 DROP CONSTRAINT Person_email_unique IF EXISTS;

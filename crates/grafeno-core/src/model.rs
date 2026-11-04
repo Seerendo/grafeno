@@ -19,6 +19,9 @@ pub struct Node {
     pub sources: Vec<NodeId>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
+    /// The principal (API key, agent) that created it, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_by: Option<String>,
 }
 
 impl Node {
@@ -70,6 +73,9 @@ pub struct Edge {
     pub valid_to: Option<Timestamp>,
     pub recorded_at: Timestamp,
     pub expired_at: Option<Timestamp>,
+    /// The principal (API key, agent) that recorded it, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_by: Option<String>,
 }
 
 impl Edge {

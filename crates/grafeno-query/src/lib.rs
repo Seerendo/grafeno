@@ -32,9 +32,9 @@
 //!   FastRP embeddings, plus `algo.*` pair functions.
 //! - `EXPLAIN` returns the plan; `PROFILE` adds rows and time per step.
 //! - **Pseudo-properties** (`@name`) expose what is not a property: `@id`,
-//!   `@labels`, `@text`, `@embedding`, `@sources`, `@created_at` on nodes;
+//!   `@labels`, `@text`, `@embedding`, `@sources`, `@created_at`, `@recorded_by` on nodes;
 //!   `@id`, `@label`, `@from`, `@to`, `@valid_from`, `@valid_to`,
-//!   `@recorded_at`, `@expired_at` on edges.
+//!   `@recorded_at`, `@expired_at`, `@recorded_by` on edges.
 //!
 //! The full reference is in `docs/query-language.md`.
 
@@ -54,10 +54,10 @@ use std::fmt;
 
 pub use eval::Params;
 pub use exec::{
-    MAX_PATH_LENGTH, PlanStep, QueryResult, WriteStats, execute, execute_in, execute_read,
-    execute_read_with, execute_with, is_write,
+    MAX_PATH_LENGTH, PlanStep, QueryResult, StatementKind, WriteStats, execute, execute_in,
+    execute_read, execute_read_with, execute_with, is_write, statement_kind,
 };
-pub use limits::Limits;
+pub use limits::{Limits, NamespaceFilter};
 pub use temporal::Duration;
 pub use value::Value;
 
@@ -73,6 +73,9 @@ pub struct QueryError {
     /// The query went over one of its [`Limits`] (time, reads, rows) or
     /// was cancelled.
     pub limit: bool,
+    /// The writer may not change what the query touched (an `own_only`
+    /// principal and someone else's record).
+    pub forbidden: bool,
 }
 
 impl QueryError {
@@ -86,6 +89,7 @@ impl QueryError {
             column: Some(column),
             internal: false,
             limit: false,
+            forbidden: false,
         }
     }
 
@@ -96,6 +100,7 @@ impl QueryError {
             column: None,
             internal: false,
             limit: false,
+            forbidden: false,
         }
     }
 
@@ -115,6 +120,7 @@ impl From<grafeno::Error> for QueryError {
         );
         Self {
             internal,
+            forbidden: matches!(error, grafeno::Error::Forbidden(_)),
             ..Self::runtime(error.to_string())
         }
     }

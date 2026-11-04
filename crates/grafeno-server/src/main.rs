@@ -64,6 +64,19 @@ enum Command {
         /// Namespace used by tools that do not name one.
         #[arg(long, env = "GRAFENO_NAMESPACE", default_value = "default")]
         namespace: String,
+        /// Namespaces the agent may use, comma-separated (`vault,team-*`);
+        /// all by default.
+        #[arg(long, env = "GRAFENO_MCP_ALLOW", value_delimiter = ',')]
+        allow: Vec<String>,
+        /// Offer only the tools that read.
+        #[arg(long)]
+        read_only: bool,
+        /// Record the agent's writes under this name (`@recorded_by`).
+        #[arg(long = "as", env = "GRAFENO_MCP_AS")]
+        actor: Option<String>,
+        /// With --as: the agent may change only what it recorded.
+        #[arg(long, requires = "actor")]
+        own_only: bool,
     },
     /// An interactive console for GQ queries and administration, like psql.
     Shell {
@@ -99,6 +112,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// API keys: names with grants per namespace (read, write, admin).
+    #[command(subcommand)]
+    Keys(KeysCommand),
     /// List the namespaces with their node and edge counts.
     Namespaces {
         #[command(flatten)]
@@ -150,6 +166,60 @@ enum Command {
         #[arg(long)]
         bulk: bool,
     },
+}
+
+/// Where `grafeno keys` works: a database file (with no server using it),
+/// or the running server of a settings file.
+#[derive(Args)]
+struct KeysTarget {
+    /// The server of this settings file (its address and owner token).
+    #[arg(long, env = "GRAFENO_CONFIG", conflicts_with = "db")]
+    config: Option<PathBuf>,
+    /// A database file, opened directly.
+    #[arg(long, env = "GRAFENO_DB", default_value = "grafeno.redb")]
+    db: PathBuf,
+}
+
+#[derive(Subcommand)]
+enum KeysCommand {
+    /// List the keys and their grants (never their secrets).
+    List {
+        #[command(flatten)]
+        target: KeysTarget,
+    },
+    /// Create a key and print its secret, once.
+    Create {
+        #[command(flatten)]
+        target: KeysTarget,
+        /// A name for it: it is recorded on what it writes.
+        name: String,
+        /// `namespace:role`, repeatable: `vault:write`, `team-*:read`, `*:admin`.
+        #[arg(long = "grant", short = 'g')]
+        grants: Vec<String>,
+        /// Every right on every namespace, and managing keys.
+        #[arg(long)]
+        owner: bool,
+        /// It may change only nodes and facts it recorded itself.
+        #[arg(long)]
+        own_only: bool,
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Revoke a key: its secret stops working at once.
+    Revoke {
+        #[command(flatten)]
+        target: KeysTarget,
+        name: String,
+    },
+}
+
+impl KeysTarget {
+    fn resolve(&self) -> Result<grafeno_server::keys::Target<'_>, String> {
+        match &self.config {
+            Some(config) => grafeno_server::keys::Target::server(config),
+            None => Ok(grafeno_server::keys::Target::File(&self.db)),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -304,7 +374,24 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         Command::Service(command) => service_command(command)?,
-        Command::Mcp { db, namespace } => mcp::run(db.open()?, namespace)?,
+        Command::Mcp {
+            db,
+            namespace,
+            allow,
+            read_only,
+            actor,
+            own_only,
+        } => {
+            if let Some(name) = &actor {
+                grafeno::check_principal_name(name)?;
+            }
+            let access = mcp::McpAccess {
+                allow: allow.into_iter().filter(|a| !a.trim().is_empty()).collect(),
+                read_only,
+                actor: actor.map(|name| grafeno::Actor { name, own_only }),
+            };
+            mcp::run(db.open()?, namespace, access)?
+        }
         Command::Shell {
             config,
             db,
@@ -342,6 +429,34 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
             if shell.failed {
                 return Err("some statements failed".into());
+            }
+        }
+        Command::Keys(command) => {
+            use grafeno_server::keys;
+            match command {
+                KeysCommand::List { target } => keys::list(&target.resolve()?)?,
+                KeysCommand::Create {
+                    target,
+                    name,
+                    grants,
+                    owner,
+                    own_only,
+                    description,
+                } => {
+                    let grants = grants
+                        .iter()
+                        .map(|grant| keys::parse_grant(grant))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    keys::create(
+                        &target.resolve()?,
+                        &name,
+                        grants,
+                        owner,
+                        own_only,
+                        description,
+                    )?
+                }
+                KeysCommand::Revoke { target, name } => keys::revoke(&target.resolve()?, &name)?,
             }
         }
         Command::Namespaces { db } => {

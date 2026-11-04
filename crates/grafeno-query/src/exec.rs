@@ -123,7 +123,7 @@ pub fn execute_with(
         let mut tx = db.begin_write()?;
         let read = db.begin_read()?;
         let outcome = match &statement.schema {
-            Some(schema) => run_schema(&read, Some(&mut tx), ns, schema),
+            Some(schema) => run_schema(&read, Some(&mut tx), ns, schema, limits),
             None => Runner::new(&read, Some(&mut tx), ns, params, statement.mode, limits)?
                 .run(&statement),
         };
@@ -161,7 +161,7 @@ pub fn execute_in(
         return explain(&statement, &plan_info(read, ns)?);
     }
     match &statement.schema {
-        Some(schema) => run_schema(read, Some(tx), ns, schema),
+        Some(schema) => run_schema(read, Some(tx), ns, schema, limits),
         None => Runner::new(read, Some(tx), ns, params, statement.mode, limits)?.run(&statement),
     }
 }
@@ -195,7 +195,7 @@ pub fn execute_read_with(
         ));
     }
     if let Some(schema) = &statement.schema {
-        return run_schema(read, None, ns, schema);
+        return run_schema(read, None, ns, schema, limits);
     }
     Runner::new(read, None, ns, params, statement.mode, limits)?.run(&statement)
 }
@@ -225,6 +225,7 @@ fn run_schema(
     tx: Option<&mut WriteTx>,
     ns: &str,
     schema: &Schema,
+    limits: &Limits,
 ) -> Result<QueryResult, QueryError> {
     let table = |rows: Vec<Vec<Value>>| QueryResult {
         columns: INDEX_COLUMNS.iter().map(|c| (*c).to_owned()).collect(),
@@ -241,6 +242,12 @@ fn run_schema(
             rows: read
                 .namespaces()?
                 .into_iter()
+                .filter(|info| {
+                    limits
+                        .visible
+                        .as_ref()
+                        .is_none_or(|filter| filter.allows(&info.name))
+                })
                 .map(|info| {
                     vec![
                         Value::Str(info.name),
@@ -319,6 +326,28 @@ fn run_schema(
 pub fn is_write(query: &str) -> Result<bool, QueryError> {
     let statement = parse(query)?;
     Ok(statement.mode != Mode::Explain && statement.writes())
+}
+
+/// What a statement does, for deciding who may run it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatementKind {
+    /// Reads only (also `EXPLAIN` of anything, `SHOW …`).
+    Read,
+    /// Writes nodes and facts.
+    Write,
+    /// Creates or drops indexes and constraints.
+    Schema,
+}
+
+pub fn statement_kind(query: &str) -> Result<StatementKind, QueryError> {
+    let statement = parse(query)?;
+    Ok(if statement.mode == Mode::Explain || !statement.writes() {
+        StatementKind::Read
+    } else if statement.schema.is_some() {
+        StatementKind::Schema
+    } else {
+        StatementKind::Write
+    })
 }
 
 fn validate(statement: &Statement) -> Result<(), QueryError> {

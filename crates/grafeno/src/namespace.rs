@@ -18,6 +18,18 @@ use crate::store::{
 /// `ns -> NamespaceMeta` (JSON): every namespace, empty ones included.
 pub(crate) const NAMESPACES: TableDefinition<&str, &[u8]> = TableDefinition::new("namespaces");
 
+/// Namespace names that HTTP routes under `/v1` use.
+pub const RESERVED: &[&str] = &[
+    "namespaces",
+    "export",
+    "import",
+    "algorithms",
+    "whoami",
+    "keys",
+    "backup",
+    "metrics",
+];
+
 /// Names longer than this are refused when a namespace is created.
 pub const MAX_NAMESPACE_LENGTH: usize = 128;
 
@@ -61,6 +73,12 @@ pub fn check_new_namespace(ns: &str) -> Result<()> {
     if ns.chars().count() > MAX_NAMESPACE_LENGTH {
         return Err(Error::Invalid(format!(
             "a namespace name has at most {MAX_NAMESPACE_LENGTH} characters"
+        )));
+    }
+    // Names the HTTP API uses for its own routes under /v1.
+    if RESERVED.contains(&ns) {
+        return Err(Error::Invalid(format!(
+            "{ns:?} is reserved by the HTTP API; choose another name"
         )));
     }
     if ns.trim() != ns {

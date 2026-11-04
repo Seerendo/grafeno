@@ -98,6 +98,7 @@ impl QueryConfig {
                 None => standard.max_rows,
             },
             cancel: None,
+            visible: None,
         }
     }
 }

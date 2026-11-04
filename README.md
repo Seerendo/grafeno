@@ -87,6 +87,12 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
   Windows (`.exe`, `.msi`) and Linux (`.deb`, `.rpm`, `.AppImage`) with
   `.redb` files opening in it, every icon rendered from one source, and a
   Grafeno Studio menu entry with its icon in the server's Linux packages.
+- **Phase 10.1, isolation and authorization:** API keys with grants per
+  namespace (read, write, admin, prefixes), owners, and keys limited to
+  their own records; every write records who made it (`@recorded_by`);
+  every route checked by one policy and tested against leaks; `grafeno
+  keys`, MCP fences (`--allow`, `--read-only`, `--as`) and a keys panel in
+  the Studio.
 
 ## Installing
 

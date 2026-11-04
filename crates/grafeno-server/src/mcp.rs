@@ -39,14 +39,63 @@ const SNIPPET_CHARS: usize = 400;
 pub struct McpServer {
     db: Grafeno,
     namespace: String,
+    access: McpAccess,
 }
 
+/// What an agent connected over MCP may do. The process opens the database
+/// file itself, so this is a fence for agents, not a defense against the
+/// user who starts it.
+#[derive(Clone, Debug, Default)]
+pub struct McpAccess {
+    /// Namespaces it may use (`vault`, `team-*`, `*`); all when empty.
+    pub allow: Vec<String>,
+    /// Only the tools that read.
+    pub read_only: bool,
+    /// Who its writes are recorded as, and whether it may change only
+    /// what it recorded.
+    pub actor: Option<grafeno::Actor>,
+}
+
+impl McpAccess {
+    fn allows(&self, ns: &str) -> bool {
+        self.allow.is_empty()
+            || self.allow.iter().any(|pattern| {
+                grafeno::Grant {
+                    namespace: pattern.clone(),
+                    role: grafeno::Role::Read,
+                }
+                .covers(ns)
+            })
+    }
+}
+
+/// Tools that change the database.
+const WRITING_TOOLS: &[&str] = &[
+    "remember",
+    "relate",
+    "update",
+    "forget",
+    "merge",
+    "consolidate",
+];
+
 /// Serves MCP on stdin and stdout until stdin closes.
-pub fn run(db: Grafeno, namespace: String) -> io::Result<()> {
-    let server = McpServer::new(db, namespace);
+pub fn run(db: Grafeno, namespace: String, access: McpAccess) -> io::Result<()> {
+    let server = McpServer::new(db, namespace).with_access(access);
     eprintln!(
-        "grafeno MCP server ready (namespace {:?})",
-        server.namespace
+        "grafeno MCP server ready (namespace {:?}{}{})",
+        server.namespace,
+        if server.access.read_only {
+            ", read-only"
+        } else {
+            ""
+        },
+        server
+            .access
+            .actor
+            .as_ref()
+            .map(|actor| format!(", as {}", actor.name))
+            .unwrap_or_default()
     );
     let mut stdout = io::stdout().lock();
     for line in io::stdin().lock().lines() {
@@ -72,7 +121,27 @@ enum ToolOutput {
 
 impl McpServer {
     pub fn new(db: Grafeno, namespace: String) -> Self {
-        Self { db, namespace }
+        Self {
+            db,
+            namespace,
+            access: McpAccess::default(),
+        }
+    }
+
+    pub fn with_access(mut self, access: McpAccess) -> Self {
+        self.access = access;
+        self
+    }
+
+    /// A write transaction made by this agent.
+    fn write<T>(
+        &self,
+        work: impl FnOnce(&mut grafeno::WriteTx) -> grafeno::Result<T>,
+    ) -> grafeno::Result<T> {
+        self.db.write(|tx| {
+            tx.act_as(self.access.actor.clone());
+            work(tx)
+        })
     }
 
     /// Handles one line of input and returns the response, if any
@@ -107,7 +176,7 @@ impl McpServer {
         let result = match method.as_str() {
             "initialize" => Ok(self.initialize(&params)),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tools() })),
+            "tools/list" => Ok(json!({ "tools": self.tools() })),
             "tools/call" => self.call_tool(&params),
             _ => Err((-32601, format!("method not found: {method}"))),
         };
@@ -139,6 +208,22 @@ impl McpServer {
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| json!({}));
+        if self.access.read_only && WRITING_TOOLS.contains(&name) {
+            return Ok(json!({
+                "content": [{ "type": "text", "text": format!("{name} writes, and this MCP server is read-only") }],
+                "isError": true,
+            }));
+        }
+        let wanted = arguments
+            .get("namespace")
+            .and_then(Value::as_str)
+            .unwrap_or(&self.namespace);
+        if !self.access.allows(wanted) {
+            return Ok(json!({
+                "content": [{ "type": "text", "text": format!("the namespace {wanted:?} is not open to this agent") }],
+                "isError": true,
+            }));
+        }
         let outcome = match name {
             "remember" => self.remember(arguments),
             "recall" => self.recall(arguments),
@@ -234,7 +319,6 @@ impl McpServer {
         }
         let explicit_labels = new.labels != ["Memory"];
         let (id, edges, reused) = self
-            .db
             .write(|tx| {
                 // A named entity that already exists is updated instead of
                 // stored twice: same normalized name (or alias) and, when
@@ -356,11 +440,11 @@ impl McpServer {
 
     /// Records an access to recalled nodes, which slows their decay.
     fn touch(&self, ns: &str, ids: &[NodeId]) -> Result<(), String> {
-        if ids.is_empty() {
+        // A read-only agent leaves no trace, accesses included.
+        if ids.is_empty() || self.access.read_only {
             return Ok(());
         }
-        self.db
-            .write(|tx| tx.touch(ns, ids, grafeno::Timestamp::now()))
+        self.write(|tx| tx.touch(ns, ids, grafeno::Timestamp::now()))
             .map_err(describe)
     }
 
@@ -421,7 +505,6 @@ impl McpServer {
             .transpose()
             .map_err(describe)?;
         let id = self
-            .db
             .write(|tx| tx.create_edge(ns, edge))
             .map_err(describe)?;
         Ok(ToolOutput::Json(json!({ "id": id })))
@@ -454,27 +537,26 @@ impl McpServer {
         if let Some(name) = args.name {
             props.insert("name".into(), Value::String(name));
         }
-        self.db
-            .write(|tx| {
-                tx.node(ns, id)?.ok_or(Error::NodeNotFound(id))?;
-                if !props.is_empty() {
-                    tx.set_node_props(ns, id, props)?;
-                }
-                for label in &args.add_labels {
-                    tx.add_label(ns, id, label)?;
-                }
-                for label in &args.remove_labels {
-                    tx.remove_label(ns, id, label)?;
-                }
-                if let Some(text) = &args.text {
-                    tx.set_text(ns, id, text)?;
-                }
-                if let Some(importance) = args.importance {
-                    tx.set_importance(ns, id, importance)?;
-                }
-                Ok(())
-            })
-            .map_err(describe)?;
+        self.write(|tx| {
+            tx.node(ns, id)?.ok_or(Error::NodeNotFound(id))?;
+            if !props.is_empty() {
+                tx.set_node_props(ns, id, props)?;
+            }
+            for label in &args.add_labels {
+                tx.add_label(ns, id, label)?;
+            }
+            for label in &args.remove_labels {
+                tx.remove_label(ns, id, label)?;
+            }
+            if let Some(text) = &args.text {
+                tx.set_text(ns, id, text)?;
+            }
+            if let Some(importance) = args.importance {
+                tx.set_importance(ns, id, importance)?;
+            }
+            Ok(())
+        })
+        .map_err(describe)?;
         self.get_node(json!({ "id": id, "namespace": ns }))
     }
 
@@ -501,9 +583,7 @@ impl McpServer {
         let mode = args.mode.as_deref();
         let done = match (is_node, is_edge, mode) {
             (true, _, None | Some("delete")) => {
-                self.db
-                    .write(|tx| tx.delete_node(ns, id))
-                    .map_err(describe)?;
+                self.write(|tx| tx.delete_node(ns, id)).map_err(describe)?;
                 "deleted node and its edges"
             }
             (true, _, Some(other)) => {
@@ -518,22 +598,19 @@ impl McpServer {
                     .map(TimeInput::resolve)
                     .transpose()
                     .map_err(describe)?;
-                self.db
-                    .write(|tx| {
-                        tx.invalidate_edge(ns, edge_id, at.unwrap_or_else(grafeno::Timestamp::now))
-                    })
-                    .map_err(describe)?;
+                self.write(|tx| {
+                    tx.invalidate_edge(ns, edge_id, at.unwrap_or_else(grafeno::Timestamp::now))
+                })
+                .map_err(describe)?;
                 "invalidated fact (kept in history)"
             }
             (false, true, Some("retract")) => {
-                self.db
-                    .write(|tx| tx.retract_edge(ns, edge_id))
+                self.write(|tx| tx.retract_edge(ns, edge_id))
                     .map_err(describe)?;
                 "retracted fact (kept in history as a mistake)"
             }
             (false, true, Some("delete")) => {
-                self.db
-                    .write(|tx| tx.delete_edge(ns, edge_id))
+                self.write(|tx| tx.delete_edge(ns, edge_id))
                     .map_err(describe)?;
                 "deleted fact"
             }
@@ -646,7 +723,6 @@ impl McpServer {
         let keep = parse_id(&args.keep).map_err(describe)?;
         let merged = parse_id(&args.merge).map_err(describe)?;
         let report = self
-            .db
             .write(|tx| tx.merge_nodes(ns, keep, merged))
             .map_err(describe)?;
         Ok(ToolOutput::Json(json!({
@@ -773,7 +849,6 @@ impl McpServer {
         };
         let count = summary.sources.len();
         let id = self
-            .db
             .write(|tx| write_summary(tx, ns, summary))
             .map_err(describe)?;
         Ok(ToolOutput::Json(json!({
@@ -866,6 +941,24 @@ fn pretty(value: &Value) -> String {
 
 fn error_response(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+}
+
+impl McpServer {
+    /// The tools this agent may call.
+    fn tools(&self) -> Value {
+        let all = tools();
+        match all {
+            Value::Array(items) if self.access.read_only => Value::Array(
+                items
+                    .into_iter()
+                    .filter(|tool| {
+                        !WRITING_TOOLS.contains(&tool["name"].as_str().unwrap_or_default())
+                    })
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
 }
 
 fn tools() -> Value {

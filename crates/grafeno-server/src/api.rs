@@ -348,6 +348,8 @@ pub enum ErrorKind {
     Busy,
     /// What should be created exists already.
     Conflict,
+    /// The principal may not do this.
+    Forbidden,
 }
 
 pub fn error_kind(error: &Error) -> ErrorKind {
@@ -356,6 +358,7 @@ pub fn error_kind(error: &Error) -> ErrorKind {
             ErrorKind::NotFound
         }
         Error::Conflict(_) => ErrorKind::Conflict,
+        Error::Forbidden(_) => ErrorKind::Forbidden,
         Error::Invalid(_) => ErrorKind::BadRequest,
         Error::Storage(_) | Error::Serialization(_) => ErrorKind::Internal,
         Error::Busy(_) => ErrorKind::Busy,

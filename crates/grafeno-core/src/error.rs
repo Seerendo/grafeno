@@ -8,6 +8,9 @@ pub enum Error {
     EdgeNotFound(EdgeId),
     #[error("namespace {0:?} not found")]
     NamespaceNotFound(String),
+    /// The principal may not do this.
+    #[error("forbidden: {0}")]
+    Forbidden(String),
     /// What should be created exists already.
     #[error("conflict: {0}")]
     Conflict(String),

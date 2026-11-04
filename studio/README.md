@@ -35,8 +35,11 @@ terminal:
   budget.
 - **Memory**: duplicates to merge, weak memories to archive, groups to
   consolidate.
-- **Administration**: indexes, check, rebuild, export, import, and
-  deleting the namespace with everything in it (after a confirmation).
+- **Administration**: who the Studio is connected as and, for owners, the
+  access keys (create with grants per namespace, own-records-only and
+  owner options; the secret is shown once; revoke); indexes, check,
+  rebuild, export, import, and deleting the namespace with everything in
+  it (after a confirmation).
 
 Ctrl+K opens a command palette (views, actions, namespaces and nodes).
 

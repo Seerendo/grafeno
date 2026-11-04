@@ -1,4 +1,6 @@
-//! The HTTP API: JSON over `/v1/{namespace}/...`, with an optional bearer token.
+//! The HTTP API: JSON over `/v1/{namespace}/...`, with a bearer token: the
+//! server's own (the owner) or an API key with grants per namespace (see
+//! [`crate::auth`]).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -11,7 +13,10 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use grafeno::{Direction, EdgeFilter, EdgeId, Error, Grafeno, NodeId, Props, Timestamp, WriteTx};
+use grafeno::{
+    Direction, EdgeFilter, EdgeId, Error, Grafeno, Grant, NodeId, Principal, Props, Role,
+    Timestamp, WriteTx,
+};
 use grafeno_memory::{context_for, recall};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -21,6 +26,7 @@ use crate::api::{
     ContextInput, EdgeInput, ErrorKind, FilterInput, NodeInput, NodeOutput, NodeRef, RecallInput,
     TimeInput, error_kind, parse_id, resolve_ref,
 };
+use crate::auth::{self, Caller, Keyring, Need};
 
 const BODY_LIMIT: usize = 32 * 1024 * 1024;
 
@@ -30,6 +36,8 @@ pub struct AppState {
     /// Commits concurrent writes in groups.
     pub writer: Arc<grafeno::Writer>,
     pub token: Option<Arc<str>>,
+    /// API keys, loaded from the database.
+    pub keys: Arc<Keyring>,
     /// Limits for each GQ query.
     pub limits: grafeno_query::Limits,
     /// Requests being served under `/v1`; beyond its permits the server
@@ -49,6 +57,7 @@ impl AppState {
                 db.clone(),
                 grafeno::WriterOptions::default(),
             )),
+            keys: Arc::new(Keyring::load(&db).unwrap_or_default()),
             db,
             token: token.map(Arc::from),
             limits: grafeno_query::Limits::standard(),
@@ -168,6 +177,9 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/{ns}/batch", post(batch))
         .route("/{ns}/query", post(query))
         .route("/algorithms", get(algorithms))
+        .route("/whoami", get(whoami))
+        .route("/keys", get(list_keys).post(create_key))
+        .route("/keys/{name}", axum::routing::delete(revoke_key))
         .route("/{ns}/algo/{name}", post(algorithm))
         .route("/{ns}/resolve", get(resolve))
         .route("/{ns}/duplicates", get(duplicates))
@@ -228,6 +240,22 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: message.into(),
+        }
+    }
+
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code: "forbidden",
+            message: message.into(),
+        }
+    }
+
     fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
@@ -253,6 +281,7 @@ impl From<Error> for ApiError {
             ErrorKind::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
             ErrorKind::Busy => (StatusCode::SERVICE_UNAVAILABLE, "busy"),
             ErrorKind::Conflict => (StatusCode::CONFLICT, "conflict"),
+            ErrorKind::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
         };
         Self {
             status,
@@ -285,6 +314,14 @@ async fn write<T: Send + 'static>(
     work: impl Fn(&mut WriteTx) -> grafeno::Result<T> + Send + 'static,
 ) -> ApiResult<T> {
     let writer = state.writer.clone();
+    // Writes of a group share a transaction: each one acts as its caller.
+    let actor = auth::current().actor();
+    let work = move |tx: &mut WriteTx| {
+        tx.act_as(actor.clone());
+        let result = work(tx);
+        tx.act_as(None);
+        result
+    };
     tokio::task::spawn_blocking(move || writer.write(work))
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?
@@ -331,27 +368,77 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequestParts<S> for Params<T> {
     }
 }
 
+/// Finds the caller (the owner token or an API key), checks what the route
+/// needs, and serves the request as that caller.
 async fn auth(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    if let Some(token) = &state.token {
-        let given = request
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "));
-        if !given.is_some_and(|given| constant_time_eq(given.as_bytes(), token.as_bytes())) {
-            // Read (a bounded part of) the body first: closing the connection
-            // while the client still sends it makes some clients see a reset
-            // instead of this response.
-            let _ = axum::body::to_bytes(request.into_body(), 1024 * 1024).await;
-            return ApiError {
-                status: StatusCode::UNAUTHORIZED,
-                code: "unauthorized",
-                message: "missing or wrong bearer token".into(),
-            }
-            .into_response();
+    let given = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::to_owned);
+    let open = state.token.is_none() && state.keys.is_empty();
+    let caller = match given {
+        _ if open => Some(Caller::Owner),
+        Some(given)
+            if state
+                .token
+                .as_ref()
+                .is_some_and(|token| constant_time_eq(given.as_bytes(), token.as_bytes())) =>
+        {
+            Some(Caller::Owner)
         }
+        Some(given) => state.keys.find(&given).map(Caller::Key),
+        None => None,
+    };
+    let Some(caller) = caller else {
+        return refuse(
+            request,
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "missing or wrong bearer token or API key".into(),
+        )
+        .await;
+    };
+    let allowed = match auth::need(request.method().as_str(), request.uri().path()) {
+        Need::Caller => Ok(()),
+        Need::Owner if caller.is_owner() => Ok(()),
+        Need::Owner => Err(format!("the key {:?} is not an owner", caller.name())),
+        Need::Namespace(ns, role) if caller.may(&ns, role) => Ok(()),
+        Need::Namespace(ns, role) => Err(caller.refusal(&ns, role)),
+    };
+    if let Err(message) = allowed {
+        return refuse(request, StatusCode::FORBIDDEN, "forbidden", message).await;
     }
-    next.run(request).await
+    auth::CALLER.scope(caller, next.run(request)).await
+}
+
+async fn refuse(
+    request: Request,
+    status: StatusCode,
+    code: &'static str,
+    message: String,
+) -> Response {
+    // Read (a bounded part of) the body first: closing the connection while
+    // the client still sends it makes some clients see a reset instead of
+    // this response.
+    let _ = axum::body::to_bytes(request.into_body(), 1024 * 1024).await;
+    ApiError {
+        status,
+        code,
+        message,
+    }
+    .into_response()
+}
+
+/// 403 unless the caller of this request has `role` on `ns`.
+fn require(ns: &str, role: Role) -> ApiResult<()> {
+    let caller = auth::current();
+    if caller.may(ns, role) {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden(caller.refusal(ns, role)))
+    }
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -1073,8 +1160,14 @@ async fn batch(
 const IMPORT_LIMIT: usize = 1024 * 1024 * 1024;
 
 async fn namespaces(State(state): State<AppState>) -> ApiResult<Json<Vec<grafeno::NamespaceInfo>>> {
+    let caller = auth::current();
     let namespaces = blocking(&state, |db| db.begin_read()?.namespaces()).await?;
-    Ok(Json(namespaces))
+    Ok(Json(
+        namespaces
+            .into_iter()
+            .filter(|info| caller.may(&info.name, Role::Read))
+            .collect(),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1089,6 +1182,7 @@ async fn create_namespace(
     State(state): State<AppState>,
     Body(input): Body<NewNamespace>,
 ) -> ApiResult<(StatusCode, Json<grafeno::NamespaceInfo>)> {
+    require(&input.name, Role::Admin)?;
     let info = write(&state, move |tx| {
         tx.create_namespace(&input.name, input.description.as_deref())?;
         tx.namespace(&input.name)?
@@ -1183,9 +1277,32 @@ async fn export(
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
         .collect();
+    let caller = auth::current();
+    for ns in &namespaces {
+        require(ns, Role::Read)?;
+    }
     let body = blocking(&state, move |db| {
+        let read = db.begin_read()?;
+        // "Everything" is what the caller may read.
+        let namespaces = if namespaces.is_empty() && !caller.is_owner() {
+            let readable: Vec<String> = read
+                .namespaces()?
+                .into_iter()
+                .map(|info| info.name)
+                .filter(|ns| caller.may(ns, Role::Read))
+                .collect();
+            if readable.is_empty() {
+                return Err(Error::Forbidden(format!(
+                    "the key {:?} may read no namespace",
+                    caller.name()
+                )));
+            }
+            readable
+        } else {
+            namespaces
+        };
         let mut body = Vec::new();
-        db.begin_read()?.export(&namespaces, &mut body)?;
+        read.export(&namespaces, &mut body)?;
         Ok(body)
     })
     .await?;
@@ -1232,11 +1349,15 @@ impl From<grafeno_query::QueryError> for ApiError {
         Self {
             status: if error.internal {
                 StatusCode::INTERNAL_SERVER_ERROR
+            } else if error.forbidden {
+                StatusCode::FORBIDDEN
             } else {
                 StatusCode::BAD_REQUEST
             },
             code: if error.internal {
                 "internal"
+            } else if error.forbidden {
+                "forbidden"
             } else if error.limit {
                 "query_limit"
             } else {
@@ -1278,8 +1399,16 @@ async fn run_query(
     // tells the query to stop.
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let _guard = CancelOnDrop(cancel.clone());
+    let caller = auth::current();
+    match grafeno_query::statement_kind(&query)? {
+        grafeno_query::StatementKind::Read => require(&ns, Role::Read)?,
+        grafeno_query::StatementKind::Write => require(&ns, Role::Write)?,
+        grafeno_query::StatementKind::Schema => require(&ns, Role::Admin)?,
+    }
     let limits = grafeno_query::Limits {
         cancel: Some(cancel),
+        visible: (!caller.is_owner())
+            .then(|| grafeno_query::NamespaceFilter::new(move |ns| caller.may(ns, Role::Read))),
         ..state.limits.clone()
     };
     if !grafeno_query::is_write(&query)? {
@@ -1310,6 +1439,117 @@ async fn run_query(
             Some(query_error) => Err(query_error.into()),
             None => Err(error),
         },
+    }
+}
+
+// ---------------------------------------------------------------- keys
+
+/// What a key looks like over the API: never its secret or its hash.
+#[derive(Serialize)]
+struct KeyOutput {
+    name: String,
+    grants: Vec<Grant>,
+    owner: bool,
+    own_only: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    created_at: Timestamp,
+}
+
+impl From<&Principal> for KeyOutput {
+    fn from(principal: &Principal) -> Self {
+        Self {
+            name: principal.name.clone(),
+            grants: principal.grants.clone(),
+            owner: principal.owner,
+            own_only: principal.own_only,
+            description: principal.description.clone(),
+            created_at: principal.created_at,
+        }
+    }
+}
+
+/// Who the caller is and what it may do.
+async fn whoami() -> Json<Value> {
+    Json(match auth::current() {
+        Caller::Owner => json!({ "name": "owner", "owner": true, "grants": [], "own_only": false }),
+        Caller::Key(principal) => {
+            serde_json::to_value(KeyOutput::from(principal.as_ref())).unwrap_or(Value::Null)
+        }
+    })
+}
+
+async fn list_keys(State(state): State<AppState>) -> ApiResult<Json<Vec<KeyOutput>>> {
+    let principals = blocking(&state, |db| db.begin_read()?.principals()).await?;
+    Ok(Json(principals.iter().map(KeyOutput::from).collect()))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewKey {
+    name: String,
+    #[serde(default)]
+    grants: Vec<Grant>,
+    #[serde(default)]
+    owner: bool,
+    #[serde(default)]
+    own_only: bool,
+    description: Option<String>,
+}
+
+/// Creates a key and returns its secret, once: only its hash is kept.
+async fn create_key(
+    State(state): State<AppState>,
+    Body(input): Body<NewKey>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    if input.grants.is_empty() && !input.owner {
+        return Err(ApiError::bad_request(
+            "a key needs at least one grant ({namespace, role}) or owner: true",
+        ));
+    }
+    // Without a token, keys close the server: the first one must be an
+    // owner, or nobody could manage keys any more.
+    if state.token.is_none() && !input.owner {
+        let owners = blocking(&state, |db| {
+            Ok(db.begin_read()?.principals()?.iter().any(|p| p.owner))
+        })
+        .await?;
+        if !owners {
+            return Err(ApiError::bad_request(
+                "this server has no token: create an owner key first (owner: true), or the server would lock everyone out",
+            ));
+        }
+    }
+    let secret = auth::new_secret();
+    let principal = Principal {
+        name: input.name,
+        secret_hash: auth::hash_secret(&secret),
+        grants: input.grants,
+        owner: input.owner,
+        own_only: input.own_only,
+        description: input.description.filter(|d| !d.trim().is_empty()),
+        created_at: Timestamp::now(),
+    };
+    let stored = principal.clone();
+    write(&state, move |tx| tx.create_principal(&stored)).await?;
+    state.keys.reload(&state.db)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "key": KeyOutput::from(&principal), "secret": secret })),
+    ))
+}
+
+async fn revoke_key(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> ApiResult<StatusCode> {
+    let wanted = name.clone();
+    let removed = write(&state, move |tx| tx.delete_principal(&wanted)).await?;
+    state.keys.reload(&state.db)?;
+    if removed {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found(format!("no key named {name:?}")))
     }
 }
 

@@ -690,6 +690,12 @@ export function GraphView({ seed }: { seed?: string }) {
                 </dd>
                 <dt>recorded</dt>
                 <dd>{formatTime(edge.recorded_at)}</dd>
+                {edge.recorded_by && (
+                  <>
+                    <dt>recorded by</dt>
+                    <dd className="mono">{edge.recorded_by}</dd>
+                  </>
+                )}
               </dl>
               {Object.keys(edge.props).length > 0 && <pre>{JSON.stringify(edge.props, null, 2)}</pre>}
               <div className="stack tight">

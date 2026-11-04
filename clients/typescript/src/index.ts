@@ -25,6 +25,8 @@ export interface Node {
   sources: Id[];
   created_at: number;
   updated_at: number;
+  /** The API key (agent) that created it, when known. */
+  recorded_by?: string;
 }
 
 /** How much a node matters and how often it is used, for ranking and decay. */
@@ -53,6 +55,29 @@ export interface Edge {
   valid_to: number | null;
   recorded_at: number;
   expired_at: number | null;
+  /** The API key (agent) that recorded it, when known. */
+  recorded_by?: string;
+}
+
+export type Role = "read" | "write" | "admin";
+
+/** A role on a namespace, or on every name starting with a prefix (`team-*`, `*`). */
+export interface Grant {
+  namespace: string;
+  role: Role;
+}
+
+/** An API key, as the server shows it (never its secret). */
+export interface AccessKey {
+  name: string;
+  grants: Grant[];
+  /** Every right on every namespace, and managing keys. */
+  owner: boolean;
+  /** May change only nodes and facts it recorded itself. */
+  own_only: boolean;
+  description?: string;
+  /** Microseconds since the epoch; absent for the server's own token. */
+  created_at?: number;
 }
 
 export interface NodeInput {
@@ -432,6 +457,29 @@ export class Grafeno {
   /** Deletes a namespace and everything in it. It cannot be undone. */
   dropNamespace(name: string): Promise<{ nodes: number; edges: number }> {
     return this.request("DELETE", `/v1/namespaces/${encodeURIComponent(name)}`);
+  }
+
+  /** Who this client is: the owner token, or an API key with its grants. */
+  whoami(): Promise<AccessKey> {
+    return this.request("GET", "/v1/whoami");
+  }
+
+  /** The API keys (owners only). */
+  keys(): Promise<AccessKey[]> {
+    return this.request("GET", "/v1/keys");
+  }
+
+  /** Creates an API key; its secret is returned only here. */
+  createKey(key: { name: string; grants?: Grant[]; owner?: boolean; own_only?: boolean; description?: string }): Promise<{
+    key: AccessKey;
+    secret: string;
+  }> {
+    return this.request("POST", "/v1/keys", key);
+  }
+
+  /** Revokes an API key: its secret stops working at once. */
+  async revokeKey(name: string): Promise<void> {
+    await this.request("DELETE", `/v1/keys/${encodeURIComponent(name)}`);
   }
 
   /** The graph algorithms `CALL algo.*` and `algorithm()` can run. */

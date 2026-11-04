@@ -225,6 +225,7 @@ pub(crate) fn node_meta(ctx: &Context, node: &Node, name: &str) -> Result<Value,
         }),
         "sources" => ids(&node.sources),
         "created_at" => Value::Time(node.created_at),
+        "recorded_by" => node.recorded_by.clone().map_or(Value::Null, Value::Str),
         // Through the shortest decimal form, so 0.9 reads as 0.9 and not as the
         // f64 closest to the stored f32.
         "importance" => Value::Float(
@@ -254,6 +255,7 @@ fn edge_meta(edge: &Edge, name: &str) -> Result<Value, QueryError> {
         "valid_from" => time_or_null(edge.valid_from),
         "valid_to" => time_or_null(edge.valid_to),
         "recorded_at" => Value::Time(edge.recorded_at),
+        "recorded_by" => edge.recorded_by.clone().map_or(Value::Null, Value::Str),
         "expired_at" => time_or_null(edge.expired_at),
         "sources" => ids(&edge.sources),
         other => {
