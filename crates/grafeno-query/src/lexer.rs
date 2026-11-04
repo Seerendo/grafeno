@@ -30,6 +30,7 @@ pub(crate) enum Token {
     Minus,
     Slash,
     Percent,
+    Caret,
     Eq,
     Neq,
     Lt,
@@ -73,6 +74,7 @@ impl Token {
             Token::Minus => "-",
             Token::Slash => "/",
             Token::Percent => "%",
+            Token::Caret => "^",
             Token::Eq => "=",
             Token::Neq => "<>",
             Token::Lt => "<",
@@ -129,6 +131,7 @@ pub(crate) fn lex(source: &str) -> Result<Vec<Spanned>, QueryError> {
             '-' => single(Token::Minus, &mut i),
             '/' => single(Token::Slash, &mut i),
             '%' => single(Token::Percent, &mut i),
+            '^' => single(Token::Caret, &mut i),
             '=' => single(Token::Eq, &mut i),
             ';' => single(Token::Semicolon, &mut i),
             '.' if at(i + 1) == Some('.') => {

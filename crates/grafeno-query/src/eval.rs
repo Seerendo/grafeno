@@ -4,10 +4,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use grafeno::{Edge, Node, NodeId, ReadTx, Timestamp, WriteTx};
+use grafeno::{Direction, Edge, EdgeFilter, EdgeId, Node, NodeId, ReadTx, Timestamp, WriteTx};
 
 use crate::QueryError;
-use crate::ast::{AGGREGATES, BinOp, Expr, Key, UnOp};
+use crate::ast::{AGGREGATES, BinOp, Expr, Key, Quantifier, UnOp};
 use crate::value::{Value, compare, equals, sort_order};
 
 /// Variable bindings of one result row.
@@ -16,13 +16,17 @@ pub(crate) type Row = HashMap<String, Value>;
 /// Query parameters (`$name`).
 pub type Params = HashMap<String, Value>;
 
-/// What expressions can read: the snapshot the query matched on and, in a
-/// writing query, the write transaction (which sees the query's own writes).
+/// What expressions can read: the snapshot the query started on and, in a
+/// writing query, the write transaction, which sees the query's own writes
+/// and is read instead.
 pub(crate) struct Context<'a> {
     pub(crate) read: &'a ReadTx,
     pub(crate) write: Option<&'a WriteTx>,
     pub(crate) ns: &'a str,
     pub(crate) params: &'a Params,
+    /// The edges patterns may follow: the enclosing `MATCH`'s `VALID AT`
+    /// and `KNOWN AT`, for pattern predicates too.
+    pub(crate) edges: &'a EdgeFilter,
 }
 
 impl Context<'_> {
@@ -30,6 +34,33 @@ impl Context<'_> {
         Ok(match self.write {
             Some(tx) => tx.node(self.ns, id)?,
             None => self.read.node(self.ns, id)?,
+        })
+    }
+
+    pub(crate) fn edge(&self, id: EdgeId) -> Result<Option<Edge>, QueryError> {
+        Ok(match self.write {
+            Some(tx) => tx.edge(self.ns, id)?,
+            None => self.read.edge(self.ns, id)?,
+        })
+    }
+
+    /// Every node, or every node with `label`.
+    pub(crate) fn nodes(&self, label: Option<&str>) -> Result<Vec<Node>, QueryError> {
+        Ok(match self.write {
+            Some(tx) => tx.nodes_page(self.ns, label, None, usize::MAX)?,
+            None => self.read.nodes_page(self.ns, label, None, usize::MAX)?,
+        })
+    }
+
+    pub(crate) fn neighbor_ids(
+        &self,
+        from: NodeId,
+        direction: Direction,
+        filter: &EdgeFilter,
+    ) -> Result<Vec<(EdgeId, NodeId)>, QueryError> {
+        Ok(match self.write {
+            Some(tx) => tx.neighbor_ids(self.ns, from, direction, filter)?,
+            None => self.read.neighbor_ids(self.ns, from, direction, filter)?,
         })
     }
 
@@ -69,6 +100,26 @@ impl Scope<'_> {
             Scope::Row(row) => row.get(name),
             Scope::Group(rows) => rows.first().and_then(|row| row.get(name)),
         }
+    }
+
+    /// The row variables come from (a group's first row).
+    fn row(&self) -> Row {
+        match self {
+            Scope::Row(row) => (*row).clone(),
+            Scope::Group(rows) => rows.first().cloned().unwrap_or_default(),
+        }
+    }
+}
+
+/// The items of a list (`null` gives none; anything else is an error).
+fn items_of(value: Value, what: &str) -> Result<Vec<Value>, QueryError> {
+    match value {
+        Value::List(items) => Ok(items),
+        Value::Null => Ok(Vec::new()),
+        other => Err(error(format!(
+            "{what} needs a list, got a {}",
+            other.type_name()
+        ))),
     }
 }
 
@@ -309,8 +360,146 @@ pub(crate) fn eval(ctx: &Context, expr: &Expr, scope: Scope) -> Result<Value, Qu
         },
         Expr::CountStar => match scope {
             Scope::Group(rows) => Ok(Value::Int(rows.len() as i64)),
-            Scope::Row(_) => Err(error("count(*) is an aggregate: use it in RETURN")),
+            Scope::Row(_) => Err(error("count(*) is an aggregate: use it in RETURN or WITH")),
         },
+        Expr::Slice(target, from, to) => {
+            let target = eval(ctx, target, scope)?;
+            let from = from
+                .as_ref()
+                .map(|expr| eval(ctx, expr, scope))
+                .transpose()?;
+            let to = to.as_ref().map(|expr| eval(ctx, expr, scope)).transpose()?;
+            let items = match target {
+                Value::List(items) => items,
+                Value::Null => return Ok(Value::Null),
+                other => return Err(error(format!("cannot slice a {}", other.type_name()))),
+            };
+            let len = items.len() as i64;
+            let at = |value: Option<Value>, default: i64| -> Result<Option<i64>, QueryError> {
+                match value {
+                    None => Ok(Some(default)),
+                    Some(Value::Null) => Ok(None),
+                    Some(Value::Int(i)) if i < 0 => Ok(Some((len + i).max(0))),
+                    Some(Value::Int(i)) => Ok(Some(i.min(len))),
+                    Some(other) => Err(error(format!(
+                        "a slice needs integers, got a {}",
+                        other.type_name()
+                    ))),
+                }
+            };
+            Ok(match (at(from, 0)?, at(to, len)?) {
+                (Some(from), Some(to)) if from < to => {
+                    Value::List(items[from as usize..to as usize].to_vec())
+                }
+                (Some(_), Some(_)) => Value::List(Vec::new()),
+                _ => Value::Null,
+            })
+        }
+        Expr::Case {
+            subject,
+            branches,
+            otherwise,
+        } => {
+            let subject = subject
+                .as_ref()
+                .map(|subject| eval(ctx, subject, scope))
+                .transpose()?;
+            for (when, then) in branches {
+                let when = eval(ctx, when, scope)?;
+                let hit = match &subject {
+                    Some(subject) => equals(subject, &when) == Some(true),
+                    None => truth(&when)? == Some(true),
+                };
+                if hit {
+                    return eval(ctx, then, scope);
+                }
+            }
+            match otherwise {
+                Some(otherwise) => eval(ctx, otherwise, scope),
+                None => Ok(Value::Null),
+            }
+        }
+        Expr::Comprehension {
+            var,
+            list,
+            filter,
+            map,
+        } => {
+            let items = items_of(eval(ctx, list, scope)?, "a list comprehension")?;
+            let mut row = scope.row();
+            let mut out = Vec::new();
+            for item in items {
+                row.insert(var.clone(), item.clone());
+                if let Some(filter) = filter
+                    && truth(&eval(ctx, filter, Scope::Row(&row))?)? != Some(true)
+                {
+                    continue;
+                }
+                out.push(match map {
+                    Some(map) => eval(ctx, map, Scope::Row(&row))?,
+                    None => item,
+                });
+            }
+            Ok(Value::List(out))
+        }
+        Expr::Quantified {
+            quantifier,
+            var,
+            list,
+            predicate,
+        } => {
+            let value = eval(ctx, list, scope)?;
+            if value.is_null() {
+                return Ok(Value::Null);
+            }
+            let items = items_of(value, "a quantifier")?;
+            let mut row = scope.row();
+            let (mut yes, mut no, mut unknown) = (0usize, 0usize, 0usize);
+            for item in items {
+                row.insert(var.clone(), item);
+                match truth(&eval(ctx, predicate, Scope::Row(&row))?)? {
+                    Some(true) => yes += 1,
+                    Some(false) => no += 1,
+                    None => unknown += 1,
+                }
+            }
+            // Three-valued, as in Cypher: unknown items make the answer
+            // unknown unless the known ones already decide it.
+            Ok(match quantifier {
+                Quantifier::All if no > 0 => Value::Bool(false),
+                Quantifier::Any if yes > 0 => Value::Bool(true),
+                Quantifier::None if yes > 0 => Value::Bool(false),
+                Quantifier::Single if yes > 1 => Value::Bool(false),
+                _ if unknown > 0 => Value::Null,
+                Quantifier::All => Value::Bool(true),
+                Quantifier::Any => Value::Bool(false),
+                Quantifier::None => Value::Bool(true),
+                Quantifier::Single => Value::Bool(yes == 1),
+            })
+        }
+        Expr::Reduce {
+            acc,
+            init,
+            var,
+            list,
+            expr,
+        } => {
+            let mut value = eval(ctx, init, scope)?;
+            let items = items_of(eval(ctx, list, scope)?, "reduce()")?;
+            let mut row = scope.row();
+            for item in items {
+                row.insert(acc.clone(), value);
+                row.insert(var.clone(), item);
+                value = eval(ctx, expr, Scope::Row(&row))?;
+            }
+            Ok(value)
+        }
+        Expr::Exists { patterns, filter } => Ok(Value::Bool(crate::exec::exists(
+            ctx,
+            &scope.row(),
+            patterns,
+            filter.as_deref(),
+        )?)),
         Expr::Call {
             name,
             distinct,
@@ -386,6 +575,17 @@ fn binary(op: BinOp, left: &Value, right: &Value) -> Result<Value, QueryError> {
         BinOp::Mul => arithmetic(op, left, right, i64::checked_mul, |a, b| a * b)?,
         BinOp::Div => arithmetic(op, left, right, i64::checked_div, |a, b| a / b)?,
         BinOp::Mod => arithmetic(op, left, right, i64::checked_rem, |a, b| a % b)?,
+        // As in Cypher, `^` always gives a float.
+        BinOp::Pow => match (number(left), number(right)) {
+            (Some(a), Some(b)) => Value::Float(a.powf(b)),
+            _ => {
+                return Err(error(format!(
+                    "cannot raise a {} to a {}",
+                    left.type_name(),
+                    right.type_name()
+                )));
+            }
+        },
         BinOp::Contains | BinOp::StartsWith | BinOp::EndsWith => match (left, right) {
             (Value::Str(a), Value::Str(b)) => Value::Bool(match op {
                 BinOp::Contains => a.contains(b.as_str()),
@@ -435,7 +635,9 @@ fn aggregate(
     scope: Scope,
 ) -> Result<Value, QueryError> {
     let Scope::Group(rows) = scope else {
-        return Err(error(format!("{name}() is an aggregate: use it in RETURN")));
+        return Err(error(format!(
+            "{name}() is an aggregate: use it in RETURN or WITH"
+        )));
     };
     let [arg] = args else {
         return Err(error(format!("{name}() takes one argument")));

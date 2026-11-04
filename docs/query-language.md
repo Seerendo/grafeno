@@ -45,6 +45,15 @@ labels, property names and variables are not. `//` starts a comment.
   at its shortest distance (Cypher returns every path).
 - Several `MATCH` clauses can follow each other; each extends the rows of
   the previous one.
+- `OPTIONAL MATCH` keeps each row even when its patterns do not match: the
+  new variables are then `null`. Its `WHERE` filters the optional part
+  only.
+
+```text
+MATCH (p:Person)
+OPTIONAL MATCH (p)-[:works_at]->(c)
+RETURN p.name, c.name;     // people without a company get null
+```
 
 ### Time: `VALID AT` and `KNOWN AT`
 
@@ -72,6 +81,20 @@ label tests (`n:Admin`). Logic is three-valued as in SQL and Cypher: a
 comparison with `null` is unknown, and `WHERE` keeps only rows where the
 condition is true.
 
+**Pattern predicates** test whether a pattern matches from the row, with
+the `MATCH`'s `VALID AT` and `KNOWN AT`:
+
+```text
+MATCH (p:Person) WHERE (p)-[:knows]->()            RETURN p;  // knows someone
+MATCH (p:Person) WHERE NOT (p)<-[:knows]-()        RETURN p;  // nobody knows p
+MATCH (p:Person) WHERE exists((p)-[:works_at]->()) RETURN p;
+MATCH (p:Person)
+WHERE EXISTS { MATCH (p)-[:knows]->(f) WHERE f.age > 40 }
+RETURN p;
+```
+
+`exists(n.key)` is true when the property is set.
+
 ### `RETURN`
 
 ```text
@@ -88,12 +111,94 @@ RETURN [DISTINCT] expression [AS name], …  |  RETURN *
   in `ORDER BY` must also be returned.
 - `null` sorts last; values of different types sort by type.
 
+### `WITH`: steps between clauses
+
+`WITH` is a `RETURN` in the middle of a query: it projects, groups and
+sorts the rows, and only its names stay in scope. A `WHERE` after it
+filters the projected rows, so it can filter aggregates (SQL's `HAVING`).
+Expressions other than variables need a name (`AS`). `WITH *` keeps every
+variable.
+
+```text
+// Companies with more than one person
+MATCH (p:Person)-[:works_at]->(c)
+WITH c, count(p) AS people
+WHERE people > 1
+RETURN c.name, people ORDER BY people DESC;
+
+// The two oldest people, then their companies
+MATCH (p:Person) WITH p ORDER BY p.age DESC LIMIT 2
+MATCH (p)-[:works_at]->(c) RETURN p.name, c.name;
+
+// An aggregate of aggregates
+MATCH (p:Person) OPTIONAL MATCH (p)-[:knows]->(f)
+WITH p, count(f) AS friends
+RETURN avg(friends), max(friends);
+```
+
+### `UNWIND`
+
+One row per item of a list (`null` gives no rows):
+
+```text
+UNWIND [1, 2, 3] AS x RETURN x * 10;
+MATCH (p:Person) UNWIND p.langs AS lang RETURN lang, count(*) AS people;
+```
+
+### `UNION`
+
+Joins the rows of several queries with the same column names. `UNION`
+drops duplicate rows; `UNION ALL` keeps them (one statement uses one or
+the other).
+
+```text
+MATCH (p:Person) RETURN p.name AS name
+UNION
+MATCH (c:Company) RETURN c.name AS name;
+```
+
+### `CALL`: procedures
+
+```text
+CALL db.labels();                                     // label, count
+CALL db.edgeLabels() YIELD label, count AS edges WHERE edges > 10 RETURN label;
+CALL db.search('borrow checker', 5) YIELD node, score RETURN node.title, score;
+```
+
+| Procedure | Yields | |
+| --- | --- | --- |
+| `db.labels()` | `label`, `count` | node labels and their counts |
+| `db.edgeLabels()` (`db.relationshipTypes()`) | `label`, `count` | edge labels and their counts |
+| `db.propertyKeys()` | `key` | property names of nodes and edges (reads every record) |
+| `db.stats()` | `nodes`, `edges`, `texts`, `vectors`, `dimension` | counts of the namespace |
+| `db.search(text, limit = 10)` | `node`, `score` | full-text search (BM25), best first |
+| `db.searchVector(embedding, limit = 10)` | `node`, `score` | nearest nodes by embedding |
+| `dbms.procedures()` | `name`, `arguments`, `columns`, `description` | this list |
+
+`YIELD` picks and renames columns (`YIELD label AS l`); without it, every
+column. Arguments can use the row's variables, so a `CALL` in the middle of
+a query runs once per row. A query may end with `CALL`: it returns what the
+procedure yields.
+
+### `EXPLAIN` and `PROFILE`
+
+`EXPLAIN` before a statement returns its plan as a table (step, operation,
+details: where each pattern starts and how it expands) without running it.
+`PROFILE` runs the statement and adds, per step, the rows it produced and
+the milliseconds it took (`profile` in the JSON result, a second table in
+the shell, the *Profile* view in the Studio).
+
+```text
+EXPLAIN MATCH (a:Person {name: 'Ana'})-[:knows]->(f) RETURN f.name;
+PROFILE MATCH (p:Person) WHERE p.age > 30 RETURN count(p);
+```
+
 ## Writing
 
 A statement with any write runs in one transaction: all of its changes or
-none. Writes come after the `MATCH` clauses (a `MATCH` after a write is not
-supported). Without `RETURN`, a writing statement reports only what
-changed.
+none. Clauses after a write see what it wrote (a `MATCH` after a `CREATE`
+finds the new nodes). Without `RETURN`, a writing statement reports only
+what changed.
 
 | Clause                                   | Effect                                                    |
 | ---------------------------------------- | --------------------------------------------------------- |
@@ -109,10 +214,44 @@ changed.
 | `REMOVE n.key, n:Label, n.@text`         | removes properties, labels, the text or the embedding    |
 | `DELETE n` (`DETACH DELETE n`)           | deletes nodes with their edges, or edges                  |
 | `RETRACT r`                              | the fact was a mistake: hidden from current knowledge, visible to `KNOWN AT` earlier |
+| `MERGE (n:Tag {name: 'rust'})`           | matches the pattern, or creates it when nothing matches  |
+| `FOREACH (x IN list \| CREATE …)`         | runs writes once per item                                 |
 
 `CREATE` accepts `@text`, `@embedding` and `@sources` (a list of ids) for
 nodes, and `@valid_from`, `@valid_to` and `@sources` for edges. After a
 write, `RETURN` sees the written values.
+
+### `MERGE`
+
+`MERGE pattern` matches the whole pattern from the row; when nothing
+matches, it creates the parts that are not bound. `ON CREATE SET` and
+`ON MATCH SET` run in each case. Rows of the same statement see what
+earlier rows merged, so `UNWIND ['a', 'a'] AS x MERGE (:Tag {name: x})`
+creates one node. Only facts true now count as existing: if a `knows` edge
+was ended, `MERGE (a)-[:knows]->(b)` records the fact again. An undirected
+edge in `MERGE` is created from left to right.
+
+```text
+MERGE (t:Tag {name: $name})
+ON CREATE SET t.created = datetime()
+ON MATCH SET t.uses = coalesce(t.uses, 0) + 1
+RETURN t;
+
+MATCH (a:Person {name: 'Ana'}), (b:Person {name: 'Bob'})
+MERGE (a)-[:knows]->(b);
+```
+
+### `FOREACH`
+
+Runs write clauses (`CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`,
+`RETRACT`, `FOREACH`) once per item; what it binds stays inside.
+
+```text
+MATCH (a:Person {name: 'Ana'})
+FOREACH (topic IN ['graphs', 'rust'] |
+  MERGE (t:Topic {name: topic})
+  CREATE (a)-[:likes]->(t));
+```
 
 ## Pseudo-properties
 
@@ -138,8 +277,21 @@ recall ranking and decay (see the memory section of
 Literals: `1`, `2.5`, `1e3`, `'text'` or `"text"` (with `\n`, `\t`,
 `\uXXXX`), `true`, `false`, `null`, lists `[1, 2]`, maps `{a: 1}`.
 Parameters: `$name`. Operators: `+ - * / %` (integer division for
-integers; `+` also joins strings and lists), `list[i]` (negative from the
-end), `map.key`.
+integers; `+` also joins strings and lists), `^` (power, a float),
+`list[i]` (negative from the end), `list[from..to]` (either end may be
+left out), `map.key`.
+
+```text
+RETURN CASE WHEN p.age < 30 THEN 'young' ELSE 'experienced' END;  // searched
+RETURN CASE p.status WHEN 'a' THEN 1 WHEN 'b' THEN 2 ELSE 0 END;  // simple
+RETURN [x IN range(1, 10) WHERE x % 2 = 0 | x * x];               // comprehension
+RETURN all(x IN p.scores WHERE x > 50), any(…), none(…), single(…);
+RETURN reduce(total = 0, x IN [1, 2, 3] | total + x);             // 6
+```
+
+`CASE` without a matching `WHEN` and no `ELSE` gives `null`. Quantifiers
+are three-valued: unknown items make the answer unknown unless the known
+ones decide it.
 
 | Function | |
 | --- | --- |
@@ -150,11 +302,14 @@ end), `map.key`.
 | `coalesce(…)`, `toString`, `toInteger`, `toFloat` | |
 | `abs`, `round`, `floor`, `ceil`, `sqrt` | |
 | `datetime([x])` / `time([x])`, `date(t)` (`YYYY-MM-DD`), `now()` | |
+| `exists(pattern)`, `exists(n.key)` | pattern predicate; whether a property is set |
 
 ## Not supported (yet)
 
-`OPTIONAL MATCH`, `MERGE`, `WITH`, `UNWIND`, `CALL`, `UNION`, `FOREACH`,
-`CASE`, list comprehensions, pattern predicates in `WHERE`, and indexes on
-property values (a `MATCH` by property scans the nodes of its label, or of
-the namespace without a label). For full-text, vector and hybrid search,
-use the shell's `\search`, `\recall` and `\context`, or the HTTP API.
+- `CALL { … }` subqueries, pattern comprehensions (`[(a)-->(b) | b.name]`),
+  map projections (`n {.name}`) and `=~` regular expressions.
+- Indexes on property values: a `MATCH` by property scans the nodes of its
+  label, or of the namespace without a label (phase 8.3).
+- Statistical aggregates and durations (phase 8.2), and graph algorithms as
+  procedures (phase 8.5). Hybrid recall is in the shell's `\recall` and
+  `\context`, and in the HTTP API.

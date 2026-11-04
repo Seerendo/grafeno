@@ -59,6 +59,15 @@ const SNIPPETS: { name: string; text: string }[] = [
   { name: "Change properties", text: "MATCH (n {name: 'Ana'})\nSET n.city = 'Lima', n.@importance = 0.9\nRETURN n;" },
   { name: "Important memories", text: "MATCH (n)\nWHERE n.@importance >= 0.7\nRETURN n, n.@importance AS importance, n.@accesses AS accesses\nORDER BY importance DESC;" },
   { name: "Delete", text: "MATCH (n:Note {title: 'Hello'})\nDETACH DELETE n;" },
+  { name: "Optional match", text: "MATCH (p:Person)\nOPTIONAL MATCH (p)-[:works_at]->(c)\nRETURN p.name, c.name;" },
+  { name: "Group and filter (WITH)", text: "MATCH (p:Person)-[:works_at]->(c)\nWITH c, count(p) AS people\nWHERE people > 1\nRETURN c.name, people\nORDER BY people DESC;" },
+  { name: "Create if missing (MERGE)", text: "MERGE (t:Tag {name: 'rust'})\nON CREATE SET t.created = true\nON MATCH SET t.seen = true\nRETURN t;" },
+  { name: "Rows from a list (UNWIND)", text: "UNWIND ['rust', 'graphs'] AS name\nMERGE (:Tag {name: name});" },
+  { name: "Classify (CASE)", text: "MATCH (p:Person)\nRETURN p.name,\n  CASE WHEN p.age < 30 THEN 'young' ELSE 'experienced' END AS band;" },
+  { name: "Labels (CALL)", text: "CALL db.labels() YIELD label, count\nRETURN label, count ORDER BY count DESC;" },
+  { name: "Full-text search (CALL)", text: "CALL db.search('rust', 10) YIELD node, score\nRETURN node, score;" },
+  { name: "Query plan (EXPLAIN)", text: "EXPLAIN MATCH (p:Person)-[:works_at]->(c)\nRETURN p.name, c.name;" },
+  { name: "Cost per step (PROFILE)", text: "PROFILE MATCH (p:Person)-[:works_at]->(c)\nRETURN c.name, count(p);" },
 ];
 
 function newId(): string {
@@ -120,7 +129,7 @@ export function ScriptsView() {
   const [running, setRunning] = useState(false);
   const [stopOnError, setStopOnError] = useState(true);
   const [tab, setTab] = useState<"messages" | number>("messages");
-  const [mode, setMode] = useState<"table" | "json" | "graph">("table");
+  const [mode, setMode] = useState<"table" | "json" | "graph" | "profile">("table");
   const [renaming, setRenaming] = useState<string | null>(null);
   const [split, setSplit] = useState(() => Number(localStorage.getItem(LAYOUT_KEY)) || 52);
   const [showSchema, setShowSchema] = useState(true);
@@ -431,6 +440,11 @@ export function ScriptsView() {
                   <button className={mode === "graph" ? "active" : ""} onClick={() => setMode("graph")} disabled={!hasGraph(current.rows)}>
                     <Icon name="graph" size={14} /> Graph
                   </button>
+                  {current.profile && (
+                    <button className={mode === "profile" ? "active" : ""} onClick={() => setMode("profile")}>
+                      <Icon name="clock" size={14} /> Profile
+                    </button>
+                  )}
                 </div>
                 <button
                   className="ghost small-button"
@@ -484,7 +498,12 @@ export function ScriptsView() {
                 </div>
               )
             ) : current ? (
-              mode === "json" ? (
+              mode === "profile" && current.profile ? (
+                <ResultTable
+                  columns={["step", "operation", "rows", "ms", "details"]}
+                  rows={current.profile.map((step) => [step.step, step.operation, step.rows ?? null, (step.time_ms ?? 0).toFixed(2), step.details])}
+                />
+              ) : mode === "json" ? (
                 <pre className="json-view">{JSON.stringify(current.rows, null, 2)}</pre>
               ) : mode === "graph" && hasGraph(current.rows) ? (
                 <MiniGraph rows={current.rows} onOpen={openNode} />

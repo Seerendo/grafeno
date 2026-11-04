@@ -482,6 +482,28 @@ impl WriteTx {
         read_record(&table, ns, id.as_u128())
     }
 
+    /// [`ReadTx::nodes_page`] as written so far in this transaction.
+    pub fn nodes_page(
+        &self,
+        ns: &str,
+        label: Option<&str>,
+        after: Option<NodeId>,
+        limit: usize,
+    ) -> Result<Vec<Node>> {
+        let after = after.map(NodeId::as_u128);
+        let nodes = self.tx.open_table(NODES).map_err(storage)?;
+        match label {
+            None => scan_page(&nodes, ns, after, limit, |_: &Node| true),
+            Some(label) => {
+                let labels = self.tx.open_table(NODE_LABELS).map_err(storage)?;
+                label_page(&labels, ns, label, after, limit)?
+                    .into_iter()
+                    .map(|id| read_record(&nodes, ns, id.as_u128())?.ok_or(Error::NodeNotFound(id)))
+                    .collect()
+            }
+        }
+    }
+
     /// The indexed text of a node, as written so far in this transaction.
     pub fn text(&self, ns: &str, id: NodeId) -> Result<Option<String>> {
         let table = self.tx.open_table(TEXTS).map_err(storage)?;

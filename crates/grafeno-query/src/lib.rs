@@ -9,13 +9,19 @@
 //! ORDER BY c.name LIMIT 10
 //! ```
 //!
-//! - **Reading**: `MATCH` patterns (`(n:Label {key: value})`, `-[r:a|b]->`,
-//!   `<-`, `-`, `*min..max`), `VALID AT` / `KNOWN AT`, `WHERE`, and `RETURN`
-//!   with `DISTINCT`, aggregates (`count`, `sum`, `avg`, `min`, `max`,
+//! - **Reading**: `MATCH` and `OPTIONAL MATCH` patterns
+//!   (`(n:Label {key: value})`, `-[r:a|b]->`, `<-`, `-`, `*min..max`),
+//!   `VALID AT` / `KNOWN AT`, `WHERE` (with pattern predicates), `WITH`,
+//!   `UNWIND`, `UNION [ALL]`, `CALL procedure() YIELD …`, and `RETURN` with
+//!   `DISTINCT`, aggregates (`count`, `sum`, `avg`, `min`, `max`,
 //!   `collect`), `ORDER BY`, `SKIP` and `LIMIT`.
-//! - **Writing**: `CREATE`, `SET`, `REMOVE`, `DELETE` (deletes a node with
-//!   its edges) and `RETRACT` (marks an edge as a mistake, keeping its
-//!   history). A statement with writes runs in one transaction.
+//! - **Writing**: `CREATE`, `MERGE` (with `ON CREATE` / `ON MATCH`), `SET`,
+//!   `REMOVE`, `DELETE` (deletes a node with its edges), `RETRACT` (marks an
+//!   edge as a mistake, keeping its history) and `FOREACH`. A statement with
+//!   writes runs in one transaction, and its later clauses see its writes.
+//! - **Expressions**: `CASE`, list comprehensions, `all`/`any`/`none`/
+//!   `single`, `reduce`, slices, `^`.
+//! - `EXPLAIN` returns the plan; `PROFILE` adds rows and time per step.
 //! - **Pseudo-properties** (`@name`) expose what is not a property: `@id`,
 //!   `@labels`, `@text`, `@embedding`, `@sources`, `@created_at` on nodes;
 //!   `@id`, `@label`, `@from`, `@to`, `@valid_from`, `@valid_to`,
@@ -28,12 +34,15 @@ mod eval;
 mod exec;
 mod lexer;
 mod parser;
+mod procedures;
 mod value;
 
 use std::fmt;
 
 pub use eval::Params;
-pub use exec::{MAX_PATH_LENGTH, QueryResult, WriteStats, execute, execute_read, is_write};
+pub use exec::{
+    MAX_PATH_LENGTH, PlanStep, QueryResult, WriteStats, execute, execute_read, is_write,
+};
 pub use value::Value;
 
 /// A query that could not be parsed or run. Syntax errors carry the line

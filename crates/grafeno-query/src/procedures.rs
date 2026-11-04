@@ -1,0 +1,192 @@
+//! Built-in procedures for `CALL name(args) YIELD …`.
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use crate::QueryError;
+use crate::eval::Context;
+use crate::value::Value;
+
+/// A procedure: its name, arguments, the columns it yields, and what it does.
+pub(crate) struct Procedure {
+    pub(crate) name: &'static str,
+    pub(crate) args: &'static str,
+    pub(crate) columns: &'static [&'static str],
+    pub(crate) description: &'static str,
+}
+
+pub(crate) const PROCEDURES: &[Procedure] = &[
+    Procedure {
+        name: "db.labels",
+        args: "",
+        columns: &["label", "count"],
+        description: "Node labels of the namespace and how many nodes have each.",
+    },
+    Procedure {
+        name: "db.edgeLabels",
+        args: "",
+        columns: &["label", "count"],
+        description: "Edge labels of the namespace and how many edges have each (also db.relationshipTypes).",
+    },
+    Procedure {
+        name: "db.propertyKeys",
+        args: "",
+        columns: &["key"],
+        description: "Property names used by nodes and edges (reads every record).",
+    },
+    Procedure {
+        name: "db.stats",
+        args: "",
+        columns: &["nodes", "edges", "texts", "vectors", "dimension"],
+        description: "Counts of the namespace.",
+    },
+    Procedure {
+        name: "db.search",
+        args: "text, limit = 10",
+        columns: &["node", "score"],
+        description: "Full-text search (BM25), best first.",
+    },
+    Procedure {
+        name: "db.searchVector",
+        args: "embedding, limit = 10",
+        columns: &["node", "score"],
+        description: "Nearest nodes by embedding (cosine similarity), best first.",
+    },
+    Procedure {
+        name: "dbms.procedures",
+        args: "",
+        columns: &["name", "arguments", "columns", "description"],
+        description: "The procedures CALL can run.",
+    },
+];
+
+/// Accepted alternative names, from Cypher.
+fn canonical(name: &str) -> &str {
+    match name {
+        "db.relationshiptypes" => "db.edgelabels",
+        other => other,
+    }
+}
+
+pub(crate) fn find(name: &str) -> Result<&'static Procedure, QueryError> {
+    let name = canonical(name);
+    PROCEDURES
+        .iter()
+        .find(|procedure| procedure.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| {
+            QueryError::runtime(format!(
+                "unknown procedure {name}() (CALL dbms.procedures() lists them)"
+            ))
+        })
+}
+
+fn limit_arg(args: &[Value], at: usize) -> Result<usize, QueryError> {
+    match args.get(at) {
+        None | Some(Value::Null) => Ok(10),
+        Some(Value::Int(n)) if *n > 0 => Ok(*n as usize),
+        Some(other) => Err(QueryError::runtime(format!(
+            "the limit must be a positive integer, got {}",
+            other.to_json()
+        ))),
+    }
+}
+
+/// Runs a procedure: one row per result, in the order of its columns.
+pub(crate) fn call(
+    ctx: &Context,
+    name: &str,
+    args: &[Value],
+) -> Result<Vec<Vec<Value>>, QueryError> {
+    let procedure = find(name)?;
+    let read = ctx.read;
+    let ns = ctx.ns;
+    let counted = |counts: std::collections::BTreeMap<String, u64>| -> Vec<Vec<Value>> {
+        counts
+            .into_iter()
+            .map(|(label, count)| vec![Value::Str(label), Value::Int(count as i64)])
+            .collect()
+    };
+    Ok(match procedure.name {
+        "db.labels" => counted(read.stats(ns)?.node_labels),
+        "db.edgeLabels" => counted(read.stats(ns)?.edge_labels),
+        "db.propertyKeys" => {
+            let mut keys = BTreeSet::new();
+            for node in ctx.nodes(None)? {
+                keys.extend(node.props.keys().cloned());
+            }
+            for edge in read.edges(ns)? {
+                keys.extend(edge.props.keys().cloned());
+            }
+            keys.into_iter().map(|key| vec![Value::Str(key)]).collect()
+        }
+        "db.stats" => {
+            let stats = read.stats(ns)?;
+            vec![vec![
+                Value::Int(stats.nodes as i64),
+                Value::Int(stats.edges as i64),
+                Value::Int(stats.texts as i64),
+                Value::Int(stats.vectors as i64),
+                stats
+                    .vector_dimension
+                    .map_or(Value::Null, |dimension| Value::Int(dimension as i64)),
+            ]]
+        }
+        "db.search" | "db.searchVector" => {
+            let limit = limit_arg(args, 1)?;
+            let hits = if procedure.name == "db.search" {
+                let Some(Value::Str(text)) = args.first() else {
+                    return Err(QueryError::runtime("db.search() needs the text to search"));
+                };
+                read.search_text(ns, text, limit)?
+            } else {
+                let Some(Value::List(items)) = args.first() else {
+                    return Err(QueryError::runtime(
+                        "db.searchVector() needs an embedding (a list of numbers)",
+                    ));
+                };
+                let mut embedding = Vec::with_capacity(items.len());
+                for item in items {
+                    embedding.push(match item {
+                        Value::Int(i) => *i as f32,
+                        Value::Float(f) => *f as f32,
+                        other => {
+                            return Err(QueryError::runtime(format!(
+                                "an embedding holds numbers, not a {}",
+                                other.type_name()
+                            )));
+                        }
+                    });
+                }
+                read.search_vector(ns, &embedding, limit)?
+            };
+            let mut rows = Vec::new();
+            for hit in hits {
+                if let Some(node) = ctx.node(hit.node)? {
+                    rows.push(vec![
+                        Value::Node(Arc::new(node)),
+                        Value::Float(f64::from(hit.score)),
+                    ]);
+                }
+            }
+            rows
+        }
+        "dbms.procedures" => PROCEDURES
+            .iter()
+            .map(|procedure| {
+                vec![
+                    Value::Str(procedure.name.into()),
+                    Value::Str(procedure.args.into()),
+                    Value::List(
+                        procedure
+                            .columns
+                            .iter()
+                            .map(|column| Value::Str((*column).into()))
+                            .collect(),
+                    ),
+                    Value::Str(procedure.description.into()),
+                ]
+            })
+            .collect(),
+        other => unreachable!("procedure {other} without a body"),
+    })
+}

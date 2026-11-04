@@ -271,10 +271,21 @@ export interface WriteStats {
 }
 
 /** The result of a GQ query. Nodes and edges come as their records, times as ISO strings. */
+export interface PlanStep {
+  step: number;
+  operation: string;
+  details: string;
+  /** Rows after the step. */
+  rows?: number;
+  time_ms?: number;
+}
+
 export interface QueryResult {
   columns: string[];
   rows: unknown[][];
   stats: WriteStats;
+  /** What each step did, for statements that start with PROFILE. */
+  profile?: PlanStep[];
 }
 
 export interface BatchResult {

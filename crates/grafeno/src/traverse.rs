@@ -4,11 +4,11 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use grafeno_core::{Edge, EdgeId, Error, Node, NodeId, Result, Timestamp};
-use redb::ReadOnlyTable;
+use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
 
-use crate::ReadTx;
-use crate::store::{AdjKey, AdjValue, Adjacent, adjacency};
+use crate::store::{ADJ_IN, ADJ_OUT, AdjKey, AdjValue, Adjacent, adjacency, storage};
+use crate::{ReadTx, WriteTx};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -145,31 +145,7 @@ impl ReadTx {
         direction: Direction,
         filter: &EdgeFilter,
     ) -> Result<Vec<Adjacent>> {
-        let tables: Vec<&ReadOnlyTable<AdjKey, AdjValue>> = match direction {
-            Direction::Out => vec![&self.out],
-            Direction::In => vec![&self.inn],
-            Direction::Both => vec![&self.out, &self.inn],
-        };
-        let mut seen = HashSet::new();
-        let mut out = Vec::new();
-        for table in tables {
-            let entries = if filter.labels.is_empty() {
-                adjacency(table, ns, node, None)?
-            } else {
-                let mut entries = Vec::new();
-                for label in &filter.labels {
-                    entries.extend(adjacency(table, ns, node, Some(label))?);
-                }
-                entries
-            };
-            for entry in entries {
-                // With `Both`, a self-loop shows up in both tables.
-                if filter.accepts_entry(&entry) && seen.insert(entry.edge) {
-                    out.push(entry);
-                }
-            }
-        }
-        Ok(out)
+        adjacent(&self.out, &self.inn, ns, node, direction, filter)
     }
 
     /// Nodes `1..=depth` hops away from `start`, with their distance, in BFS order.
@@ -289,4 +265,61 @@ fn rebuild(parent: &HashMap<NodeId, (NodeId, EdgeId)>, from: NodeId, to: NodeId)
     nodes.reverse();
     edges.reverse();
     Path { nodes, edges }
+}
+
+impl WriteTx {
+    /// [`ReadTx::neighbor_ids`] as written so far in this transaction.
+    pub fn neighbor_ids(
+        &self,
+        ns: &str,
+        node: NodeId,
+        direction: Direction,
+        filter: &EdgeFilter,
+    ) -> Result<Vec<(EdgeId, NodeId)>> {
+        let out = self.tx.open_table(ADJ_OUT).map_err(storage)?;
+        let inn = self.tx.open_table(ADJ_IN).map_err(storage)?;
+        Ok(adjacent(&out, &inn, ns, node, direction, filter)?
+            .into_iter()
+            .map(|entry| (entry.edge, entry.other))
+            .collect())
+    }
+}
+
+/// The adjacency entries of `node` that pass `filter`, each edge once.
+fn adjacent(
+    out: &impl ReadableTable<AdjKey, AdjValue>,
+    inn: &impl ReadableTable<AdjKey, AdjValue>,
+    ns: &str,
+    node: NodeId,
+    direction: Direction,
+    filter: &EdgeFilter,
+) -> Result<Vec<Adjacent>> {
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+    let mut collect = |entries: Vec<Adjacent>| {
+        for entry in entries {
+            // With `Both`, a self-loop shows up in both tables.
+            if filter.accepts_entry(&entry) && seen.insert(entry.edge) {
+                result.push(entry);
+            }
+        }
+    };
+    let read = |table: &dyn Fn(Option<&str>) -> Result<Vec<Adjacent>>| -> Result<Vec<Adjacent>> {
+        if filter.labels.is_empty() {
+            table(None)
+        } else {
+            let mut entries = Vec::new();
+            for label in &filter.labels {
+                entries.extend(table(Some(label))?);
+            }
+            Ok(entries)
+        }
+    };
+    if matches!(direction, Direction::Out | Direction::Both) {
+        collect(read(&|label| adjacency(out, ns, node, label))?);
+    }
+    if matches!(direction, Direction::In | Direction::Both) {
+        collect(read(&|label| adjacency(inn, ns, node, label))?);
+    }
+    Ok(result)
 }

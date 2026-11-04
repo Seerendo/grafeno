@@ -8,9 +8,12 @@ export const KEYWORDS = [
   "MATCH", "OPTIONAL", "WHERE", "RETURN", "WITH", "UNWIND", "AS", "DISTINCT", "ORDER", "BY", "ASC", "DESC",
   "SKIP", "LIMIT", "CREATE", "SET", "REMOVE", "DELETE", "DETACH", "RETRACT", "VALID", "KNOWN", "AT", "AND",
   "OR", "XOR", "NOT", "IN", "IS", "NULL", "TRUE", "FALSE", "STARTS", "ENDS", "CONTAINS",
+  "MERGE", "ON", "UNWIND", "UNION", "ALL", "CALL", "YIELD", "FOREACH", "CASE", "WHEN", "THEN",
+  "ELSE", "END", "EXISTS", "EXPLAIN", "PROFILE",
 ];
 
 export const FUNCTIONS = [
+  "all", "any", "none", "single", "reduce", "exists", "head", "size",
   "abs", "avg", "ceil", "coalesce", "collect", "count", "date", "endNode", "floor", "id", "keys", "labels",
   "last", "length", "max", "min", "now", "properties", "range", "replace", "round", "split", "sqrt",
   "startNode", "substring", "sum", "time", "toFloat", "toInteger", "toLower", "toString", "toUpper", "trim",

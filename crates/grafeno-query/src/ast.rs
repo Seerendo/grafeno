@@ -4,6 +4,35 @@ use grafeno::Direction;
 
 use crate::Value;
 
+/// One statement: query parts joined by `UNION`, maybe under `EXPLAIN` or
+/// `PROFILE`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Statement {
+    pub(crate) mode: Mode,
+    pub(crate) parts: Vec<Query>,
+    /// `UNION ALL` (keep duplicates) or `UNION`; one entry per join.
+    pub(crate) union_all: Vec<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Mode {
+    #[default]
+    Run,
+    /// Describe the plan without running it.
+    Explain,
+    /// Run, and report rows and time per step.
+    Profile,
+}
+
+impl Statement {
+    pub(crate) fn writes(&self) -> bool {
+        self.parts
+            .iter()
+            .any(|part| part.clauses.iter().any(Clause::writes))
+    }
+}
+
+/// A sequence of clauses: rows flow from each clause into the next.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Query {
     pub(crate) clauses: Vec<Clause>,
@@ -12,17 +41,38 @@ pub(crate) struct Query {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Clause {
     Match {
+        optional: bool,
         patterns: Vec<Pattern>,
         valid_at: Option<Expr>,
         known_at: Option<Expr>,
         filter: Option<Expr>,
     },
+    /// `UNWIND list AS x`
+    Unwind {
+        list: Expr,
+        var: String,
+    },
+    /// `WITH …`: a projection between steps.
+    With(Projection),
+    /// `CALL name(args) YIELD …`
+    Call(ProcedureCall),
     Create(Vec<Pattern>),
+    Merge {
+        pattern: Pattern,
+        on_create: Vec<SetItem>,
+        on_match: Vec<SetItem>,
+    },
     Set(Vec<SetItem>),
     Remove(Vec<RemoveItem>),
     Delete(Vec<Expr>),
     Retract(Vec<Expr>),
-    Return(Return),
+    /// `FOREACH (x IN list | clauses)`: writes once per item.
+    Foreach {
+        var: String,
+        list: Expr,
+        body: Vec<Clause>,
+    },
+    Return(Projection),
 }
 
 impl Clause {
@@ -30,12 +80,43 @@ impl Clause {
         matches!(
             self,
             Clause::Create(_)
+                | Clause::Merge { .. }
                 | Clause::Set(_)
                 | Clause::Remove(_)
                 | Clause::Delete(_)
                 | Clause::Retract(_)
+                | Clause::Foreach { .. }
         )
     }
+
+    /// The keyword, for plans and error messages.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Clause::Match { optional: true, .. } => "OPTIONAL MATCH",
+            Clause::Match { .. } => "MATCH",
+            Clause::Unwind { .. } => "UNWIND",
+            Clause::With(_) => "WITH",
+            Clause::Call(_) => "CALL",
+            Clause::Create(_) => "CREATE",
+            Clause::Merge { .. } => "MERGE",
+            Clause::Set(_) => "SET",
+            Clause::Remove(_) => "REMOVE",
+            Clause::Delete(_) => "DELETE",
+            Clause::Retract(_) => "RETRACT",
+            Clause::Foreach { .. } => "FOREACH",
+            Clause::Return(_) => "RETURN",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ProcedureCall {
+    /// Lowercase, with dots: `db.labels`.
+    pub(crate) name: String,
+    pub(crate) args: Vec<Expr>,
+    /// `YIELD a, b AS c` (`None`: every column; `YIELD *` too).
+    pub(crate) yields: Option<Vec<(String, String)>>,
+    pub(crate) filter: Option<Expr>,
 }
 
 /// `(a)-[r]->(b)-[s]-(c)`: a start node and the steps after it.
@@ -49,6 +130,18 @@ impl Pattern {
     pub(crate) fn nodes(&self) -> Vec<&NodePattern> {
         std::iter::once(&self.start)
             .chain(self.steps.iter().map(|(_, node)| node))
+            .collect()
+    }
+
+    /// Every variable the pattern names, in order.
+    pub(crate) fn variables(&self) -> Vec<&str> {
+        std::iter::once(self.start.var.as_deref())
+            .chain(
+                self.steps
+                    .iter()
+                    .flat_map(|(rel, node)| [rel.var.as_deref(), node.var.as_deref()]),
+            )
+            .flatten()
             .collect()
     }
 }
@@ -97,14 +190,18 @@ pub(crate) enum RemoveItem {
     Labels { var: String, labels: Vec<String> },
 }
 
+/// What `RETURN` and `WITH` share.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Return {
+pub(crate) struct Projection {
     pub(crate) distinct: bool,
-    /// `None` for `RETURN *`.
-    pub(crate) items: Option<Vec<ReturnItem>>,
+    /// `*`: every variable in scope, then `items`.
+    pub(crate) star: bool,
+    pub(crate) items: Vec<ReturnItem>,
     pub(crate) order: Vec<(Expr, bool)>,
     pub(crate) skip: Option<Expr>,
     pub(crate) limit: Option<Expr>,
+    /// `WITH … WHERE`: filters the projected rows.
+    pub(crate) filter: Option<Expr>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -112,6 +209,8 @@ pub(crate) struct ReturnItem {
     pub(crate) expr: Expr,
     /// The column name: the `AS` alias, or the expression as written.
     pub(crate) alias: String,
+    /// Whether the alias was written with `AS`.
+    pub(crate) aliased: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,6 +229,7 @@ pub(crate) enum BinOp {
     Mul,
     Div,
     Mod,
+    Pow,
     Contains,
     StartsWith,
     EndsWith,
@@ -142,6 +242,15 @@ pub(crate) enum UnOp {
     Neg,
 }
 
+/// `all`, `any`, `none` and `single`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Quantifier {
+    All,
+    Any,
+    None,
+    Single,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Expr {
     Literal(Value),
@@ -149,6 +258,8 @@ pub(crate) enum Expr {
     Var(String),
     Property(Box<Expr>, Key),
     Index(Box<Expr>, Box<Expr>),
+    /// `list[from..to]` (either end may be missing).
+    Slice(Box<Expr>, Option<Box<Expr>>, Option<Box<Expr>>),
     List(Vec<Expr>),
     Map(Vec<(String, Expr)>),
     Unary(UnOp, Box<Expr>),
@@ -168,25 +279,121 @@ pub(crate) enum Expr {
     },
     /// `count(*)`
     CountStar,
+    /// `CASE [subject] WHEN … THEN … [ELSE …] END`
+    Case {
+        subject: Option<Box<Expr>>,
+        branches: Vec<(Expr, Expr)>,
+        otherwise: Option<Box<Expr>>,
+    },
+    /// `[x IN list WHERE filter | map]`
+    Comprehension {
+        var: String,
+        list: Box<Expr>,
+        filter: Option<Box<Expr>>,
+        map: Option<Box<Expr>>,
+    },
+    /// `all(x IN list WHERE predicate)` and the like.
+    Quantified {
+        quantifier: Quantifier,
+        var: String,
+        list: Box<Expr>,
+        predicate: Box<Expr>,
+    },
+    /// `reduce(acc = init, x IN list | expr)`
+    Reduce {
+        acc: String,
+        init: Box<Expr>,
+        var: String,
+        list: Box<Expr>,
+        expr: Box<Expr>,
+    },
+    /// A pattern used as a condition: `(a)-[:knows]->(b)`, `exists(…)`,
+    /// `EXISTS { MATCH … WHERE … }`. True when it matches at least once.
+    Exists {
+        patterns: Vec<Pattern>,
+        filter: Option<Box<Expr>>,
+    },
 }
 
 pub(crate) const AGGREGATES: &[&str] = &["count", "sum", "avg", "min", "max", "collect"];
 
 impl Expr {
     pub(crate) fn has_aggregate(&self) -> bool {
+        let mut found = false;
+        self.visit(&mut |expr| {
+            if matches!(expr, Expr::CountStar)
+                || matches!(expr, Expr::Call { name, .. } if AGGREGATES.contains(&name.as_str()))
+            {
+                found = true;
+            }
+        });
+        found
+    }
+
+    /// Calls `f` on this expression and every expression inside it (not
+    /// inside pattern predicates, whose expressions run per match).
+    pub(crate) fn visit(&self, f: &mut impl FnMut(&Expr)) {
+        f(self);
         match self {
-            Expr::CountStar => true,
-            Expr::Call { name, args, .. } => {
-                AGGREGATES.contains(&name.as_str()) || args.iter().any(Expr::has_aggregate)
-            }
+            Expr::Literal(_)
+            | Expr::Param(_)
+            | Expr::Var(_)
+            | Expr::CountStar
+            | Expr::Exists { .. } => {}
             Expr::Property(inner, _) | Expr::Unary(_, inner) | Expr::HasLabels(inner, _) => {
-                inner.has_aggregate()
+                inner.visit(f)
             }
-            Expr::IsNull { expr, .. } => expr.has_aggregate(),
-            Expr::Index(a, b) | Expr::Binary(_, a, b) => a.has_aggregate() || b.has_aggregate(),
-            Expr::List(items) => items.iter().any(Expr::has_aggregate),
-            Expr::Map(entries) => entries.iter().any(|(_, value)| value.has_aggregate()),
-            Expr::Literal(_) | Expr::Param(_) | Expr::Var(_) => false,
+            Expr::IsNull { expr, .. } => expr.visit(f),
+            Expr::Index(a, b) | Expr::Binary(_, a, b) => {
+                a.visit(f);
+                b.visit(f);
+            }
+            Expr::Slice(list, from, to) => {
+                list.visit(f);
+                for bound in [from, to].into_iter().flatten() {
+                    bound.visit(f);
+                }
+            }
+            Expr::List(items) => items.iter().for_each(|item| item.visit(f)),
+            Expr::Map(entries) => entries.iter().for_each(|(_, value)| value.visit(f)),
+            Expr::Call { args, .. } => args.iter().for_each(|arg| arg.visit(f)),
+            Expr::Case {
+                subject,
+                branches,
+                otherwise,
+            } => {
+                if let Some(subject) = subject {
+                    subject.visit(f);
+                }
+                for (when, then) in branches {
+                    when.visit(f);
+                    then.visit(f);
+                }
+                if let Some(otherwise) = otherwise {
+                    otherwise.visit(f);
+                }
+            }
+            Expr::Comprehension {
+                list, filter, map, ..
+            } => {
+                list.visit(f);
+                for inner in [filter, map].into_iter().flatten() {
+                    inner.visit(f);
+                }
+            }
+            Expr::Quantified {
+                list, predicate, ..
+            } => {
+                list.visit(f);
+                predicate.visit(f);
+            }
+            Expr::Reduce {
+                init, list, expr, ..
+            } => {
+                init.visit(f);
+                list.visit(f);
+                expr.visit(f);
+            }
         }
     }
 }

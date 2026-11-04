@@ -661,6 +661,23 @@ fn print_result(output: &Value) {
     } else if columns.is_empty() {
         println!("No changes.");
     }
+    // PROFILE: what each step did.
+    if let Some(profile) = output["profile"].as_array() {
+        println!();
+        let rows: Vec<Vec<Value>> = profile
+            .iter()
+            .map(|step| {
+                vec![
+                    step["step"].clone(),
+                    step["operation"].clone(),
+                    step["rows"].clone(),
+                    Value::String(format!("{:.2}", step["time_ms"].as_f64().unwrap_or(0.0))),
+                    step["details"].clone(),
+                ]
+            })
+            .collect();
+        print_table(&["step", "operation", "rows", "ms", "details"], &rows);
+    }
 }
 
 fn print_table(columns: &[&str], rows: &[Vec<Value>]) {

@@ -431,8 +431,28 @@ fn helpful_errors() {
     for (query, expected) in [
         ("MATCH (n) RETURN m", "unknown variable `m`"),
         ("MATCH (n) WHERE count(*) > 1 RETURN n", "aggregate"),
-        ("MATCH (n)", "needs RETURN"),
-        ("CREATE (n:X) MATCH (m) RETURN m", "MATCH after a write"),
+        ("MATCH (n)", "add RETURN"),
+        (
+            "MATCH (n) WITH n.name RETURN 1",
+            "WITH needs a name for `n.name`",
+        ),
+        ("MATCH (n) WITH n", "cannot end with WITH"),
+        ("RETURN 1 AS a UNION RETURN 2 AS b", "same columns"),
+        (
+            "RETURN 1 AS a UNION RETURN 2 AS a UNION ALL RETURN 3 AS a",
+            "mix UNION",
+        ),
+        ("MATCH (n) UNION RETURN 1 AS a", "must end with RETURN"),
+        ("CALL db.nothing()", "unknown procedure db.nothing()"),
+        (
+            "CALL db.labels() YIELD nope",
+            "yields label, count, not nope",
+        ),
+        ("RETURN 1 AS a, 2 AS a", "appears twice"),
+        (
+            "UNWIND 5 AS x FOREACH (y IN x | CREATE (:N))",
+            "FOREACH needs a list",
+        ),
         ("CREATE (n)", "at least one label"),
         ("MATCH (a), (b) CREATE (a)-[:x]-(b)", "direction"),
         ("MATCH (n) RETURN n.@nope", "no pseudo-property @nope"),

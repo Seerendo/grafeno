@@ -349,8 +349,8 @@ without a current user. They remain possible for embedded use.
 7. **Memory** (done): entity resolution by normalized names and aliases,
    importance, accesses and decay in ranking, duplicates and merging,
    archiving, consolidation into summaries.
-8. **Performance, query language and analysis** (planned, in five steps;
-   see below).
+8. **Performance, query language and analysis** (in progress, in five
+   steps; see below). 8.1 is done.
 9. **Desktop application**: from the browser to a desktop app (guidelines
    to come after phase 8).
 10. **Integrations**: Grafito first, Python bindings, read replicas.
@@ -360,8 +360,10 @@ without a current user. They remain possible for embedded use.
 Each step ends with tests, benchmarks where they apply, documentation and
 its own commit.
 
-**8.1 GQ completeness.** The executor becomes a pipeline of clauses (rows
-flow from one clause to the next), which the remaining Cypher clauses need:
+**8.1 GQ completeness** (done). The executor became a pipeline of clauses
+(rows flow from one clause to the next), which the remaining Cypher clauses
+need. Reads in a writing statement go through its write transaction, so
+later clauses (and `MERGE` on later rows) see earlier writes.
 
 - `OPTIONAL MATCH` (missing parts are `null`), `WITH` (projection and
   aggregation between steps; `WITH … WHERE` filters aggregates, like SQL's
@@ -374,6 +376,9 @@ flow from one clause to the next), which the remaining Cypher clauses need:
 - `CALL procedure(…) YIELD …`: built-in procedures (`db.labels()`,
   `db.relationshipTypes()`, `db.propertyKeys()`, later the algorithms).
 - `EXPLAIN` and `PROFILE`: the plan, and rows and time per step.
+- Also: `all`, `any`, `none`, `single`, `reduce`, list slices, `^`,
+  and `db.search` / `db.searchVector` procedures. Left for later:
+  `CALL { … }` subqueries, pattern comprehensions, map projections.
 
 **8.2 Statistics and time.**
 
