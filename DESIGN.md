@@ -361,7 +361,17 @@ without a current user. They remain possible for embedded use.
 9. **Desktop application** (done, in five steps; see below): Grafeno
    as a desktop app with its own installers, a new design and a graph you
    can handle directly.
-10. **Integrations**: Grafito first, Python bindings, read replicas.
+10. **Hardening** (planned, in seven steps; see below): the priority
+    technical risks, measured and closed before more features build on
+    them.
+11. **Memory that keeps itself** (planned, in four steps): incremental
+    extraction and reconciliation of entities, automatic invalidation of
+    contradicting facts, hierarchical community summaries, continuous
+    ingestion and events.
+12. **Compatibility and speed** (planned, in three steps): wider Cypher
+    and tool compatibility, query optimization under concurrency,
+    vectorized storage and execution.
+13. **Integrations**: Grafito first, Python bindings, read replicas.
 
 ### Phase 8 plan
 
@@ -657,6 +667,191 @@ The release workflow gained `desktop-windows` and `desktop-linux` jobs
 (Ubuntu 22.04, so the AppImage runs on older systems).
 
 Phase 9 is complete.
+
+### Phases 10 to 12 plan
+
+The guidelines (2026-11-04): agent-agnostic and independent of any LLM,
+local, and efficient without a GPU. Nothing here calls a model: extraction,
+reconciliation, contradiction checks and summaries are rules, statistics
+and graph algorithms on the CPU. An agent that has an LLM can still bring
+its own results through the API (extracted entities, a summary), and they
+are stored with their provenance like any other write.
+
+The risks come first: isolation, integrity and memory correctness are what
+the later features (automatic merging, automatic invalidation, continuous
+ingestion) would otherwise multiply. Each step ends with tests, a
+benchmark where it measures something, documentation and its own commit.
+
+#### Phase 10: hardening
+
+**10.1 Isolation and authorization.** One static token today gives full
+access to every namespace.
+
+- Principals: named API keys (stored hashed), each with grants per
+  namespace (or a namespace prefix such as `team-*`): `read`, `write`,
+  `admin` (indexes, drop, import), plus a global `owner`. The static token
+  of `grafeno.toml` stays as the owner.
+- Identity in provenance: every write records the principal that made it
+  (`recorded_by` on nodes and edges), queryable as `@recorded_by`.
+- Provenance rules: a principal may retract, invalidate or merge only
+  what it may write; an optional rule restricts that to records it made
+  (agents that must not rewrite each other's memory).
+- Every surface checks the same grants: HTTP, MCP, shell, GQ (a query
+  only sees its namespace; procedures and algorithms too), export and
+  import, the desktop app's bridge.
+- Tests: a leak matrix, every endpoint and procedure called with keys of
+  the wrong namespace and the wrong role, plus property tests that random
+  queries never return another namespace's ids.
+- Studio and `grafeno keys create | list | revoke`.
+
+**10.2 Data integrity under failure.**
+
+- Crash tests extended to bulk imports, migrations, index rebuilds and
+  namespace drops (a child process killed at random moments; every
+  reported commit survives, nothing is half-done, the check passes).
+- Migration fixtures: a committed database file for every layout version,
+  opened and upgraded in tests, compared with a fresh build of the same
+  data.
+- Corruption: flipped bytes and truncated files are detected (open fails
+  with a clear error, or the check names what is wrong), never a panic or
+  silent wrong answers; `grafeno check --all` for every namespace.
+- Online backup: `grafeno backup` and `POST /v1/backup` write a consistent
+  copy from a read snapshot while writes go on; restore is opening it.
+
+**10.3 HNSW quality after deletions.** Deleting a vector reconnects its
+neighbors today, but quality after many changes is not measured.
+
+- A benchmark of recall@10 (against exact search) after deleting and
+  reinserting 10%, 30% and 50% of the vectors, and after a churn of
+  updates; results in `docs/benchmarks.md`.
+- What it shows decides the fix: better repair on delete (reconnecting
+  through the deleted node's two-hop neighborhood), and a `compact`
+  command that rebuilds a namespace's graph when quality drops below a
+  threshold (the check can report an estimated recall from a sample).
+
+**10.4 Costly GQ.**
+
+- Adversarial tests: cartesian products, long variable-length paths,
+  large UNWINDs, deep nesting, huge literals and parameters, sorts and
+  collects of millions of rows; each must stop within its limits with a
+  `query_limit` error and bounded memory.
+- A memory budget for intermediate results (sorts, `collect`, `DISTINCT`,
+  aggregates), not only a row count.
+- A cost estimate in `EXPLAIN` from the planner's statistics, and an
+  optional limit that refuses plans estimated above it before running.
+- Fuzzing the parser and planner (random queries from the grammar):
+  errors, never panics.
+
+**10.5 Correct memory merges.** Merging today joins two nodes when asked.
+
+- Identity rules: strong keys (declared unique properties such as email
+  or an external id) decide; names and aliases only suggest; conflicting
+  strong keys or labels block a merge.
+- Contradiction rules: merging two nodes with conflicting functional
+  facts (two different `born_on`) reports the conflict instead of keeping
+  both silently.
+- Provenance: a merge keeps where every fact came from and records itself
+  (`merged_from`, by whom, when), and can be undone.
+- Tests with tricky cases: namesakes, people and companies with the same
+  name, nicknames, typos, translations.
+
+**10.6 RAM under large graphs.**
+
+- Benchmarks with 10 million edges and 1 million vectors, in containers
+  with 512 MB and 2 GB of memory: peak and steady memory per operation.
+- Caps by bytes, not entries, for the projection cache and the vector
+  cache; cheaper projections (u32 positions, no edge ids unless asked).
+- Measures decide the next steps (vector quantization lands in 12.3).
+
+**10.7 One writer.**
+
+- Measure saturation: write latency (p50, p99, p999) against offered
+  load, queue depth and group sizes, with immediate and eventual
+  durability, on disk.
+- Metrics at `GET /metrics` (Prometheus text): queue depth, commit time,
+  group size, rejected writes, query times and limits hit.
+- Tuning from the numbers (group size, flush interval, separate queues for
+  bulk and interactive writes so an import cannot starve an agent).
+
+#### Phase 11: memory that keeps itself
+
+**11.1 Incremental extraction and reconciliation of entities.**
+
+- Extractors without a model: a gazetteer of the namespace's known names
+  and aliases (Aho-Corasick over the names index), patterns (emails, URLs,
+  dates, amounts, mentions, hashtags, identifiers), and capitalized
+  phrases with statistics of how often they recur.
+- Incremental: only new or changed text is read, from the change log of
+  11.4; each mention becomes a `mentions` edge with its provenance and
+  position.
+- Reconciliation with the rules of 10.5: a mention links to an existing
+  entity when a strong key or an unambiguous name matches, creates a new
+  one when nothing does, and is queued for review when it is ambiguous.
+- Extractions sent by an agent (from its own LLM) go through the same
+  reconciliation.
+
+**11.2 Automatic invalidation of contradicting facts.**
+
+- Edge cardinality constraints: `CREATE CONSTRAINT FOR ()-[r:works_at]->()
+  REQUIRE ONE PER SOURCE` (one current fact per source), also per target
+  and per pair.
+- A new fact that breaks a constraint ends the old one in valid time
+  (its `valid_to` becomes the new fact's `valid_from`) instead of failing
+  or keeping both; record time keeps the history, so `KNOWN AT` still
+  shows what was believed.
+- The same for functional properties; a report of what was invalidated,
+  and an option to only flag instead of invalidating.
+
+**11.3 Hierarchical community summaries.**
+
+- Louvain levels kept as a hierarchy (communities of communities).
+- A summary per community without a model: its most central nodes, its
+  distinctive terms (TF-IDF against the namespace), label mix, key facts
+  and time span; stored as `Summary` nodes linked to their members and
+  parent summaries, refreshed incrementally when the community changes.
+- Recall and context use them for broad questions (global search over
+  summaries, then drill down); an agent may replace a summary's text with
+  its own.
+
+**11.4 Continuous ingestion and events.**
+
+- A change log: every commit appends its changes with a sequence number
+  (layout change), kept for a configurable window.
+- `GET /v1/{ns}/changes?since=` as a stream (server-sent events) and
+  webhooks, so agents and services react to writes.
+- Streaming ingestion: NDJSON posted continuously, with idempotency keys
+  so a retried event is not written twice.
+- Extraction (11.1), invalidation (11.2) and summaries (11.3) run from the
+  log, in the background, at their own pace.
+
+#### Phase 12: compatibility and speed
+
+**12.1 Wider Cypher and tool compatibility.**
+
+- The rest of common Cypher: path variables (`p = (…)`, `nodes(p)`,
+  `relationships(p)`, `shortestPath`), `CALL { … }` subqueries, `EXISTS
+  { … }` and `COUNT { … }`, pattern comprehensions, map projections, `=~`,
+  more list, string and math functions; a subset of the openCypher TCK
+  run in CI.
+- Tools: import and export in CSV and GraphML; a Bolt protocol endpoint
+  (a subset) so Neo4j drivers and tools can connect, if the TCK subset is
+  far enough along.
+
+**12.2 Query optimization and performance under concurrency.**
+
+- Statistics for the planner (value histograms per index, label and edge
+  label counts by direction) and join ordering for patterns with several
+  parts; plan caching for repeated queries with parameters.
+- Parallel scans for large read queries, and read throughput measured
+  with many concurrent readers and a busy writer.
+
+**12.3 Vectorized storage and execution.**
+
+- Execution in batches of rows with column vectors instead of one row at
+  a time, for scans, filters and aggregates.
+- Vector quantization (int8, with exact rescoring of the best
+  candidates), compressed postings and adjacency lists; memory and speed
+  compared with 10.6's numbers.
 
 ## Open decisions
 
