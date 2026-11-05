@@ -435,6 +435,7 @@ export function App() {
           setNodeForm(null);
           setEdgeForm(null);
           setPalette(false);
+          setToasts([]);
           setNamespaces([]);
           setNamespaceState("");
           setSchema({ labels: {}, edgeLabels: {} });

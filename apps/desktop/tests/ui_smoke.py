@@ -98,6 +98,16 @@ class Window:
         return json.loads(reply["body"])["rows"]
 
     def capture(self, directory, name):
+        # Esperar fuentes, animaciones de entrada y dos repintados. El DOM
+        # puede estar actualizado antes de que WebKit componga la imagen.
+        result = self.promise("""
+            await document.fonts.ready;
+            await Promise.all(document.getAnimations()
+                .filter(animation => Number.isFinite(animation.effect?.getComputedTiming().iterations))
+                .map(animation => animation.finished.catch(() => {})));
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        """)
+        assert result["ok"], result
         png = self.call("GET", "/screenshot")
         (directory / f"{name}.png").write_bytes(base64.b64decode(png, validate=True))
 
@@ -135,6 +145,7 @@ def scenario(window, files, artifacts):
     window.click(".modal footer button.primary")
     window.wait(lambda: not window.exists(".modal"), "guardar nodo desde la interfaz")
     assert window.query("MATCH (p:Person) RETURN p.name") == [["Ana de prueba"]]
+    window.wait(lambda: "Ana de prueba" in window.text("main .detail h2"), "mostrar el nodo guardado")
     window.capture(artifacts, "02-nodo-creado")
     first_session = window.invoke("session")
     checks.append("Crear una base con espacios y guardar un nodo desde el formulario.")
@@ -155,6 +166,8 @@ def scenario(window, files, artifacts):
     window.open_file(second)
     assert not window.exists(".modal"), "el borrador anterior quedó abierto en otra base"
     assert window.script("return window.location.hash;") == "#/overview"
+    window.wait(lambda: window.text("main .cards .card:first-child .value") == "0", "mostrar la base vacía")
+    assert not window.exists(".toast.error"), "quedó un aviso de la base anterior"
     window.capture(artifacts, "04-otra-base-sin-borradores")
     assert window.query("MATCH (p:Person) RETURN count(p)") == [[0]]
     stale = window.promise("return await window.__TAURI__.core.invoke('request', arguments[0]);", {
@@ -174,6 +187,7 @@ def scenario(window, files, artifacts):
     window.wait(lambda: first.name in window.text(".server-pill")
                 and window.exists('.app[aria-busy="false"]'), "reabrir desde recientes")
     assert window.query("MATCH (p:Person) RETURN p.name") == [["Ana de prueba"]]
+    window.wait(lambda: window.text("main .cards .card:first-child .value") == "1", "mostrar los datos restaurados")
     window.capture(artifacts, "05-base-reabierta")
     checks.append("Cerrar y reabrir desde recientes conservando los datos confirmados.")
     for check in checks:
