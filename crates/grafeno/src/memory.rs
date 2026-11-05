@@ -3,20 +3,20 @@
 
 use std::collections::BTreeSet;
 
-use grafeno_core::{Edge, EdgeId, Error, Node, NodeId, Result, Timestamp, Value};
+use grafeno_core::{Error, Node, NodeId, Result, Timestamp, Value};
 use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::is_combining_mark;
 
 use crate::db::{ReadTx, WriteTx};
-use crate::store::{ADJ_IN, ADJ_OUT, LabelKey, MEMORY, NAMES, RecordKey, adjacency, storage};
+use crate::store::{LabelKey, MEMORY, NAMES, RecordKey, storage};
 
 /// The importance of a node that never got one.
 pub const DEFAULT_IMPORTANCE: f32 = 0.5;
 
 /// Properties that name a node, besides the `aliases` list.
-const NAME_KEYS: [&str; 3] = ["name", "title", "label"];
+pub(crate) const NAME_KEYS: [&str; 3] = ["name", "title", "label"];
 
 /// A name in the form used to compare names: lowercase, without accents,
 /// with any run of non-alphanumeric characters as one space
@@ -144,18 +144,6 @@ impl ReadTx {
     }
 }
 
-/// What [`WriteTx::merge_nodes`] did.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
-pub struct MergeReport {
-    pub kept: NodeId,
-    pub merged: NodeId,
-    /// Edges of the merged node now attached to the kept one.
-    pub edges_moved: u64,
-    /// Edges dropped: between the two nodes, or the same as one the kept
-    /// node already had.
-    pub edges_dropped: u64,
-}
-
 impl WriteTx {
     pub fn memory(&self, ns: &str, node: &Node) -> Result<MemoryState> {
         let table = self.tx.open_table(MEMORY).map_err(storage)?;
@@ -222,159 +210,6 @@ impl WriteTx {
     pub fn restore_memory(&mut self, ns: &str, id: NodeId, state: MemoryState) -> Result<()> {
         self.node(ns, id)?.ok_or(Error::NodeNotFound(id))?;
         self.put_memory(ns, id, state)
-    }
-
-    /// Merges node `merged` into node `kept` and deletes `merged`:
-    ///
-    /// - its edges move to `kept` (edges between the two, and edges `kept`
-    ///   already has with the same label, other end and times, are dropped);
-    /// - labels and sources are joined; properties of `kept` win, the others
-    ///   are added; the names of `merged` become `aliases` of `kept`;
-    /// - texts are joined; `kept`'s embedding stays (or `merged`'s, if
-    ///   `kept` had none);
-    /// - importance and last access take the higher value, accesses add up.
-    pub fn merge_nodes(&mut self, ns: &str, kept: NodeId, merged: NodeId) -> Result<MergeReport> {
-        if kept == merged {
-            return Err(Error::Invalid("cannot merge a node into itself".into()));
-        }
-        let keep = self.node(ns, kept)?.ok_or(Error::NodeNotFound(kept))?;
-        let gone = self.node(ns, merged)?.ok_or(Error::NodeNotFound(merged))?;
-        self.guard_node(&keep)?;
-        self.guard_node(&gone)?;
-        let mut report = MergeReport {
-            kept,
-            merged,
-            ..MergeReport::default()
-        };
-
-        // Move the edges first, while both nodes exist.
-        let mut edge_ids: Vec<EdgeId> = Vec::new();
-        for definition in [ADJ_OUT, ADJ_IN] {
-            let table = self.tx.open_table(definition).map_err(storage)?;
-            edge_ids.extend(
-                adjacency(&table, ns, merged, None)?
-                    .into_iter()
-                    .map(|entry| entry.edge),
-            );
-        }
-        edge_ids.sort();
-        edge_ids.dedup();
-        let same = |a: &Edge, b: &Edge| {
-            a.label == b.label
-                && a.from == b.from
-                && a.to == b.to
-                && a.valid_from == b.valid_from
-                && a.valid_to == b.valid_to
-                && a.is_retracted() == b.is_retracted()
-        };
-        let mut kept_edges: Vec<Edge> = Vec::new();
-        for definition in [ADJ_OUT, ADJ_IN] {
-            let entries = {
-                let table = self.tx.open_table(definition).map_err(storage)?;
-                adjacency(&table, ns, kept, None)?
-            };
-            for entry in entries {
-                if let Some(edge) = self.edge(ns, entry.edge)? {
-                    kept_edges.push(edge);
-                }
-            }
-        }
-        for edge_id in edge_ids {
-            let Some(mut edge) = self.edge(ns, edge_id)? else {
-                continue;
-            };
-            let between = (edge.from == kept && edge.to == merged)
-                || (edge.from == merged && edge.to == kept);
-            if edge.from == merged {
-                edge.from = kept;
-            }
-            if edge.to == merged {
-                edge.to = kept;
-            }
-            if between || kept_edges.iter().any(|existing| same(existing, &edge)) {
-                self.delete_edge(ns, edge_id)?;
-                report.edges_dropped += 1;
-            } else {
-                self.restore_edge(ns, edge.clone())?;
-                kept_edges.push(edge);
-                report.edges_moved += 1;
-            }
-        }
-
-        // Then the node itself.
-        let mut node = keep.clone();
-        for label in &gone.labels {
-            if !node.labels.contains(label) {
-                node.labels.push(label.clone());
-            }
-        }
-        node.labels.sort();
-        for (key, value) in &gone.props {
-            if key != "aliases" && !NAME_KEYS.contains(&key.as_str()) {
-                node.props
-                    .entry(key.clone())
-                    .or_insert_with(|| value.clone());
-            }
-        }
-        let own_names = names_of(&keep);
-        let mut aliases: Vec<Value> = match keep.props.get("aliases") {
-            Some(Value::Array(items)) => items.clone(),
-            _ => Vec::new(),
-        };
-        let mut alias_candidates: Vec<String> = NAME_KEYS
-            .iter()
-            .filter_map(|key| {
-                gone.props
-                    .get(*key)
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .collect();
-        if let Some(Value::Array(items)) = gone.props.get("aliases") {
-            alias_candidates.extend(items.iter().filter_map(Value::as_str).map(str::to_owned));
-        }
-        let mut seen: BTreeSet<String> = aliases
-            .iter()
-            .filter_map(Value::as_str)
-            .map(normalize_name)
-            .chain(own_names.iter().cloned())
-            .collect();
-        for alias in alias_candidates {
-            if seen.insert(normalize_name(&alias)) {
-                aliases.push(Value::String(alias));
-            }
-        }
-        if !aliases.is_empty() {
-            node.props.insert("aliases".into(), Value::Array(aliases));
-        }
-        for source in &gone.sources {
-            if !node.sources.contains(source) && *source != kept {
-                node.sources.push(*source);
-            }
-        }
-        node.created_at = node.created_at.min(gone.created_at);
-        node.updated_at = Timestamp::now();
-
-        let text = match (self.text(ns, kept)?, self.text(ns, merged)?) {
-            (Some(a), Some(b)) if a.trim() == b.trim() || a.contains(b.trim()) => Some(a),
-            (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
-            (a, b) => a.or(b),
-        };
-        let embedding = match self.embedding(ns, kept)? {
-            Some(vector) => Some(vector),
-            None => self.embedding(ns, merged)?,
-        };
-        let (keep_state, gone_state) = (self.memory(ns, &keep)?, self.memory(ns, &gone)?);
-        let state = MemoryState {
-            importance: keep_state.importance.max(gone_state.importance),
-            accesses: keep_state.accesses.saturating_add(gone_state.accesses),
-            last_access: keep_state.last_access.max(gone_state.last_access),
-        };
-
-        self.delete_node(ns, merged)?;
-        self.restore_node(ns, node, text.as_deref(), embedding.as_deref())?;
-        self.put_memory(ns, kept, state)?;
-        Ok(report)
     }
 }
 

@@ -291,3 +291,94 @@ fn consolidation_groups_and_summaries() {
     );
     assert!(read.check(NS).unwrap().is_ok());
 }
+
+#[test]
+fn duplicates_follow_identity_rules_in_tricky_cases() {
+    let db = Grafeno::in_memory().unwrap();
+    let node = |labels: &[&str], name: &str, props: &[(&str, &str)], aliases: &[&str]| {
+        let mut new = NewNode::new(labels[0]).prop("name", name);
+        for label in &labels[1..] {
+            new = new.label(*label);
+        }
+        for (key, value) in props {
+            new = new.prop(*key, *value);
+        }
+        if !aliases.is_empty() {
+            new = new.prop("aliases", aliases.to_vec());
+        }
+        db.write(|tx| tx.create_node(NS, new)).unwrap()
+    };
+    // Namesakes: the same name, different emails.
+    let ana_a = node(&["Person"], "Ana García", &[("email", "ana@a.com")], &[]);
+    let ana_b = node(&["Person"], "Ana Garcia", &[("email", "ana@b.org")], &[]);
+    // The same email under another name: the same person.
+    let ana_c = node(&["Person"], "A. G. Ruiz", &[("email", "ANA@a.com")], &[]);
+    // A company with a person's name, both entities.
+    node(&["Entity", "Company"], "Ana García", &[], &[]);
+    // Typos.
+    let jonh = node(&["Person"], "Jonh Smith", &[], &[]);
+    let john = node(&["Person"], "John Smith", &[], &[]);
+    let grafneo = node(&["Project"], "Grafneo", &[], &[]);
+    let grafeno = node(&["Project"], "Grafeno", &[], &[]);
+    // Not typos: other names.
+    node(&["Person"], "Mario Rossi", &[], &[]);
+    node(&["Person"], "Maria Rossi", &[], &[]);
+    node(&["Person"], "Daniel", &[], &[]);
+    node(&["Person"], "Daniela", &[], &[]);
+    // A nickname and a translation, known as aliases.
+    let robert = node(&["Person"], "Robert Brown", &[], &["Bobby"]);
+    let bobby = node(&["Person"], "Bobby", &[], &[]);
+    let germany = node(&["Country"], "Germany", &[], &["Alemania", "Deutschland"]);
+    let alemania = node(&["Country"], "Alemania", &[], &[]);
+    node(&["Team"], "Germany", &[], &[]);
+    // Two birth dates: still proposed, less likely, and the conflict said.
+    let luis_a = node(&["Person"], "Luis Pérez", &[("born_on", "1990-02-01")], &[]);
+    let luis_b = node(&["Person"], "luis perez", &[("born_on", "1991-07-12")], &[]);
+
+    let read = db.begin_read().unwrap();
+    let found = find_duplicates(&read, NS, &DuplicateOptions::default()).unwrap();
+    let pair = |x: NodeId, y: NodeId| {
+        found
+            .iter()
+            .find(|d| (d.a.id == x && d.b.id == y) || (d.a.id == y && d.b.id == x))
+    };
+    let listed: Vec<String> = found
+        .iter()
+        .map(|d| {
+            format!(
+                "{} / {}: {:.2} {:?}",
+                d.a.display_name(),
+                d.b.display_name(),
+                d.score,
+                d.reasons
+            )
+        })
+        .collect();
+    assert!(pair(ana_a, ana_b).is_none(), "namesakes: {listed:#?}");
+    let same = pair(ana_a, ana_c).expect("same email");
+    assert_eq!(same.score, 1.0);
+    assert!(
+        same.reasons[0].starts_with("same email"),
+        "{:?}",
+        same.reasons
+    );
+    assert!(pair(ana_b, ana_c).is_none(), "different emails");
+    assert!(
+        pair(jonh, john).is_some_and(|d| d.score >= 0.8),
+        "{listed:#?}"
+    );
+    assert!(pair(grafneo, grafeno).is_some_and(|d| d.reasons[0].contains("typo")));
+    assert!(pair(robert, bobby).is_some_and(|d| d.score == 1.0));
+    assert!(pair(germany, alemania).is_some_and(|d| d.score == 1.0));
+    let luis = pair(luis_a, luis_b).expect("proposed");
+    assert!((luis.score - 0.85).abs() < 1e-6, "{}", luis.score);
+    assert_eq!(luis.conflicts.len(), 1);
+    assert!(
+        luis.reasons
+            .iter()
+            .any(|r| r.contains("conflicting born_on"))
+    );
+    // Nothing else: no person and company, no country and team, no
+    // Mario/Maria, no Daniel/Daniela.
+    assert_eq!(found.len(), 6, "{listed:#?}");
+}

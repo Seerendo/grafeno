@@ -107,6 +107,10 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
   memory limit for values and held rows, time checked inside computing
   loops, a nesting limit, cost estimates in `EXPLAIN` with an optional
   `max_cost`, and a fuzz test that the parser and planner never panic.
+- **Phase 10.5, correct merges:** merges refuse nodes that disagree (two
+  emails, a person and a company, two birth dates) unless forced; duplicate
+  detection follows the same identity rules and catches typos; every merge
+  is recorded (who, when, both nodes as they were) and can be undone.
 
 ## Installing
 

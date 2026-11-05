@@ -2871,3 +2871,7 @@ td .badge {
     transition-duration: 0.01ms !important;
   }
 }
+
+.warn {
+  color: var(--warning);
+}

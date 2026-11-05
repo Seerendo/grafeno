@@ -76,6 +76,7 @@ const WRITING_TOOLS: &[&str] = &[
     "update",
     "forget",
     "merge",
+    "undo_merge",
     "consolidate",
 ];
 
@@ -234,6 +235,7 @@ impl McpServer {
             "get_node" => self.get_node(arguments),
             "query" => self.query(arguments),
             "merge" => self.merge(arguments),
+            "undo_merge" => self.undo_merge(arguments),
             "maintain" => self.maintain(arguments),
             "consolidate" => self.consolidate(arguments),
             _ => return Err((-32602, format!("unknown tool: {name}"))),
@@ -716,20 +718,63 @@ impl McpServer {
             keep: String,
             merge: String,
             #[serde(default)]
+            force: bool,
+            #[serde(default)]
+            functional: Vec<String>,
+            #[serde(default)]
             namespace: Option<String>,
         }
         let args: Args = parse_args(arguments)?;
         let ns = self.ns(&args.namespace);
         let keep = parse_id(&args.keep).map_err(describe)?;
         let merged = parse_id(&args.merge).map_err(describe)?;
+        let options = grafeno::MergeOptions {
+            force: args.force,
+            functional: args.functional,
+            ..grafeno::MergeOptions::default()
+        };
         let report = self
-            .write(|tx| tx.merge_nodes(ns, keep, merged))
+            .write(|tx| tx.merge_nodes_with(ns, keep, merged, &options))
             .map_err(describe)?;
+        let conflicts: Vec<String> = report
+            .conflicts
+            .iter()
+            .map(grafeno::Conflict::describe)
+            .collect();
         Ok(ToolOutput::Json(json!({
             "id": report.kept,
             "merged": report.merged,
+            "merge_id": report.id,
             "facts_moved": report.edges_moved,
             "facts_dropped": report.edges_dropped,
+            "conflicts_overridden": conflicts,
+        })))
+    }
+
+    fn undo_merge(&self, arguments: Value) -> ToolResult {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            merge_id: String,
+            #[serde(default)]
+            force: bool,
+            #[serde(default)]
+            namespace: Option<String>,
+        }
+        let args: Args = parse_args(arguments)?;
+        let ns = self.ns(&args.namespace);
+        let id: grafeno::MergeId = args
+            .merge_id
+            .parse::<uuid::Uuid>()
+            .map(grafeno::MergeId::from)
+            .map_err(|_| format!("not a merge id: {:?}", args.merge_id))?;
+        let record = self
+            .write(|tx| tx.undo_merge(ns, id, args.force))
+            .map_err(describe)?;
+        Ok(ToolOutput::Json(json!({
+            "restored": record.merged,
+            "kept": record.kept,
+            "merge_id": record.id,
         })))
     }
 
@@ -1148,15 +1193,37 @@ fn tools() -> Value {
             "title": "Merge",
             "description": "Merge two nodes that are the same thing: `merge` is folded into `keep`. \
                 Facts move to the kept node, labels and missing properties are joined, the merged \
-                node's name becomes an alias, and the merged node is deleted.",
+                node's name becomes an alias, and the merged node is deleted. Refused when they \
+                disagree (different emails or labels, two values of one property): check, then \
+                retry with force to keep `keep`'s values. Returns a merge_id for undo_merge.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "keep": id("Id of the node that stays."),
                     "merge": id("Id of the duplicate, which is deleted."),
+                    "force": { "type": "boolean", "description": "Merge in spite of conflicts." },
+                    "functional": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Fact labels a thing has one of at a time (born_in): different targets conflict."
+                    },
                     "namespace": namespace
                 },
                 "required": ["keep", "merge"]
+            }
+        },
+        {
+            "name": "undo_merge",
+            "title": "Undo merge",
+            "description": "Undo a merge by its merge_id: the merged node and its facts come back as they were.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "merge_id": { "type": "string", "description": "The merge_id merge returned." },
+                    "force": { "type": "boolean", "description": "Undo even if the kept node changed since (those changes are lost)." },
+                    "namespace": namespace
+                },
+                "required": ["merge_id"]
             }
         },
         {

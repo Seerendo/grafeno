@@ -99,6 +99,10 @@ id_type!(
     /// Identifier of an edge.
     EdgeId
 );
+id_type!(
+    /// Identifier of a recorded merge of two nodes.
+    MergeId
+);
 
 #[cfg(test)]
 mod tests {

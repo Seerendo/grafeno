@@ -1,8 +1,8 @@
 //! Memory primitives: names, importance and accesses, merging.
 
 use grafeno::{
-    DEFAULT_IMPORTANCE, Direction, EdgeFilter, Error, Grafeno, NewEdge, NewNode, NodeId, Props,
-    Timestamp, Value,
+    DEFAULT_IMPORTANCE, Direction, EdgeFilter, Error, Grafeno, MergeOptions, NewEdge, NewNode,
+    NodeId, Props, Timestamp, Value,
 };
 
 const NS: &str = "mem";
@@ -122,8 +122,22 @@ fn merging_moves_edges_and_joins_everything() {
         })
         .unwrap();
 
-    let report = db.write(|tx| tx.merge_nodes(NS, keep, dup)).unwrap();
+    // They disagree on the city: a plain merge refuses and says why.
+    let refused = db.write(|tx| tx.merge_nodes(NS, keep, dup)).unwrap_err();
+    assert!(
+        matches!(&refused, Error::Conflict(message) if message.contains("conflicting city")),
+        "{refused}"
+    );
+    let force = MergeOptions {
+        force: true,
+        ..MergeOptions::default()
+    };
+    let report = db
+        .write(|tx| tx.merge_nodes_with(NS, keep, dup, &force))
+        .unwrap();
     assert_eq!((report.edges_moved, report.edges_dropped), (1, 2));
+    assert_eq!(report.conflicts.len(), 1);
+    assert_eq!(report.conflicts[0].key, "city");
 
     let read = db.begin_read().unwrap();
     assert!(read.node(NS, dup).unwrap().is_none());

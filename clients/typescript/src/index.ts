@@ -351,16 +351,61 @@ export interface BatchResult {
 export interface Duplicate {
   a: Node;
   b: Node;
-  /** From 0 to 1; 1 is the same normalized name. */
+  /** From 0 to 1; 1 is the same normalized name or the same email. */
   score: number;
   reasons: string[];
+  /** Facts the two disagree on; a merge needs `force` to override them. */
+  conflicts: Conflict[];
+}
+
+/** A disagreement between two nodes. */
+export interface Conflict {
+  /** `strong_key` and `labels` say they are different entities. */
+  kind: "strong_key" | "labels" | "property" | "edge";
+  /** The property or edge label (`labels` for labels). */
+  key: string;
+  kept: unknown;
+  merged: unknown;
+}
+
+export interface MergeOptions {
+  /** Merge in spite of conflicts: the kept node's values win. */
+  force?: boolean;
+  /** Only list the conflicts. */
+  dry_run?: boolean;
+  /** Edge labels a node has one of at a time (`born_in`). */
+  functional?: string[];
+  /** Identifying properties (default `email` and `external_id`, plus unique constraints). */
+  strong_keys?: string[];
 }
 
 export interface MergeReport {
+  /** The merge's record, for `undoMerge`. */
+  id: Id;
   kept: Id;
   merged: Id;
   edges_moved: number;
   edges_dropped: number;
+  /** Conflicts merged over with `force`. */
+  conflicts: Conflict[];
+}
+
+/** A recorded merge (the snapshots it keeps for undo are left loosely typed). */
+export interface MergeRecord {
+  id: Id;
+  kept: Id;
+  merged: Id;
+  /** Microseconds since the epoch. */
+  at: number;
+  by: string | null;
+  forced: boolean;
+  conflicts: Conflict[];
+  kept_before: { node: Node; text: string | null };
+  merged_before: { node: Node; text: string | null };
+  moved: Edge[];
+  dropped: Edge[];
+  undone_at: number | null;
+  undone_by: string | null;
 }
 
 export interface WeakMemory {
@@ -403,12 +448,15 @@ export interface GrafenoOptions {
 export class GrafenoError extends Error {
   readonly status: number;
   readonly code: string;
+  /** Other fields of the error (`conflicts` of a refused merge). */
+  readonly details: Record<string, unknown>;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, details: Record<string, unknown> = {}) {
     super(message);
     this.name = "GrafenoError";
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -534,13 +582,14 @@ export class Grafeno {
     }
     if (!response.ok) {
       const text = await response.text();
-      let error: { code?: string; message?: string } | undefined;
+      let error: ({ code?: string; message?: string } & Record<string, unknown>) | undefined;
       try {
-        error = (JSON.parse(text) as { error?: { code?: string; message?: string } }).error;
+        error = (JSON.parse(text) as { error?: { code?: string; message?: string } & Record<string, unknown> }).error;
       } catch {
         error = undefined;
       }
-      throw new GrafenoError(response.status, error?.code ?? "http", error?.message ?? (text || response.statusText));
+      const { code, message, ...details } = error ?? {};
+      throw new GrafenoError(response.status, code ?? "http", message ?? (text || response.statusText), details);
     }
     return response;
   }
@@ -744,9 +793,29 @@ export class Namespace {
     return this.#call("GET", `/duplicates${queryString(options)}`);
   }
 
-  /** Folds `merge` into `keep`: edges move, labels and missing properties join, `merge` is deleted. */
-  merge(keep: Id, merge: Id): Promise<MergeReport> {
-    return this.#call("POST", "/merge", { keep, merge });
+  /**
+   * Folds `merge` into `keep`: edges move, labels and missing properties join, `merge` is deleted.
+   * Fails with status 409 (`conflict`, the list in `error.details.conflicts`) when they disagree,
+   * unless `force`.
+   */
+  merge(keep: Id, merge: Id, options: Omit<MergeOptions, "dry_run"> = {}): Promise<MergeReport> {
+    return this.#call("POST", "/merge", { keep, merge, ...options });
+  }
+
+  /** What two nodes disagree on, without merging. */
+  async mergeConflicts(keep: Id, merge: Id, options: Omit<MergeOptions, "dry_run" | "force"> = {}): Promise<Conflict[]> {
+    const result: { conflicts: Conflict[] } = await this.#call("POST", "/merge", { keep, merge, ...options, dry_run: true });
+    return result.conflicts;
+  }
+
+  /** Recorded merges, newest first; with `node`, those that kept or merged it. */
+  merges(options: { node?: Id; limit?: number } = {}): Promise<MergeRecord[]> {
+    return this.#call("GET", `/merges${queryString(options)}`);
+  }
+
+  /** Undoes a merge: the merged node and its facts come back. `force` if the kept node changed since. */
+  undoMerge(id: Id, force = false): Promise<MergeRecord> {
+    return this.#call("POST", `/merges/${encodeURIComponent(id)}/undo`, { force });
   }
 
   /** Records an access to each node now. */

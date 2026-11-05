@@ -96,11 +96,17 @@ fn verify(db: &Grafeno, version: u64) {
         assert_eq!(indexes.len(), 1);
         assert_eq!(indexes[0].entries, 40);
     }
+    if version >= 7 {
+        let principals = read.principals().unwrap();
+        assert_eq!(principals.len(), 1, "v{version}");
+        assert_eq!(principals[0].name, "reader");
+    }
+    assert!(read.merges(NS, None).unwrap().is_empty());
 }
 
 #[test]
 fn every_past_layout_upgrades() {
-    for version in 1..=6 {
+    for version in 1..=7 {
         let path = fixture(version);
         {
             let db = Grafeno::open(&path).unwrap_or_else(|e| panic!("v{version}: {e}"));

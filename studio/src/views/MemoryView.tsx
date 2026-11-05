@@ -2,7 +2,22 @@ import { useCallback, useEffect, useState } from "react";
 
 import { describeError, displayName, formatTime } from "../api.ts";
 import { useStudio } from "../context.ts";
-import type { ConsolidationGroup, Duplicate, Node, WeakMemory } from "../../../clients/typescript/src/index.ts";
+import { GrafenoError } from "../../../clients/typescript/src/index.ts";
+import type { Conflict, ConsolidationGroup, Duplicate, MergeRecord, Node, WeakMemory } from "../../../clients/typescript/src/index.ts";
+
+function describeConflict(conflict: Conflict): string {
+  const show = (value: unknown) => (typeof value === "string" ? value : JSON.stringify(value));
+  switch (conflict.kind) {
+    case "strong_key":
+      return `different ${conflict.key}: ${show(conflict.kept)} and ${show(conflict.merged)}`;
+    case "labels":
+      return `different labels: ${show(conflict.kept)} and ${show(conflict.merged)}`;
+    case "edge":
+      return `conflicting ${conflict.key} facts`;
+    default:
+      return `${conflict.key}: ${show(conflict.kept)} and ${show(conflict.merged)}`;
+  }
+}
 
 function NodeLink({ node }: { node: Node }) {
   return (
@@ -22,6 +37,7 @@ export function MemoryView() {
   const [duplicates, setDuplicates] = useState<Duplicate[] | null>(null);
   const [weak, setWeak] = useState<WeakMemory[] | null>(null);
   const [groups, setGroups] = useState<ConsolidationGroup[] | null>(null);
+  const [merges, setMerges] = useState<MergeRecord[] | null>(null);
   const [threshold, setThreshold] = useState(0.1);
   const [olderThan, setOlderThan] = useState(7);
   const [error, setError] = useState<string | null>(null);
@@ -30,12 +46,14 @@ export function MemoryView() {
 
   const load = useCallback(async () => {
     try {
-      const [found, fading, grouped] = await Promise.all([
+      const [found, fading, grouped, recent] = await Promise.all([
         graph.duplicates({ limit: 50 }),
         graph.weak({ threshold, limit: 50 }),
         graph.consolidation({ older_than_days: olderThan, limit: 20 }),
+        graph.merges({ limit: 10 }),
       ]);
       setDuplicates(found);
+      setMerges(recent);
       setWeak(fading);
       setGroups(grouped);
       setError(null);
@@ -70,10 +88,45 @@ export function MemoryView() {
     });
     if (!ok) return;
     void act(async () => {
-      const report = await graph.merge(keep.id, other.id);
+      let force = false;
+      try {
+        await graph.mergeConflicts(keep.id, other.id).then(async (conflicts) => {
+          if (conflicts.length === 0) return;
+          const identity = conflicts.some((c) => c.kind === "strong_key" || c.kind === "labels");
+          force = await confirm({
+            title: identity ? "They look like different things" : "They disagree on some facts",
+            message: `${conflicts.map(describeConflict).join("; ")}. Merge anyway? “${displayName(keep)}” keeps its values; the merge can be undone.`,
+            confirm: "Merge anyway",
+            danger: identity,
+          });
+          if (!force) throw new GrafenoError(0, "cancelled", "Merge cancelled.");
+        });
+      } catch (problem) {
+        if (problem instanceof GrafenoError && problem.code === "cancelled") return problem.message;
+        throw problem;
+      }
+      const report = await graph.merge(keep.id, other.id, { force });
       return `Merged: ${report.edges_moved} facts moved, ${report.edges_dropped} dropped.`;
     });
   };
+
+  const undo = (record: MergeRecord) =>
+    void act(async () => {
+      try {
+        await graph.undoMerge(record.id);
+      } catch (problem) {
+        if (!(problem instanceof GrafenoError && problem.status === 409 && problem.message.includes("changed after"))) throw problem;
+        const ok = await confirm({
+          title: "The kept node changed since",
+          message: `Undoing restores “${displayName(record.kept_before.node)}” as it was before the merge and loses those changes.`,
+          confirm: "Undo anyway",
+          danger: true,
+        });
+        if (!ok) return "Undo cancelled.";
+        await graph.undoMerge(record.id, true);
+      }
+      return `“${displayName(record.merged_before.node)}” is back.`;
+    });
 
   const distinct = (pair: Duplicate) =>
     void act(async () => {
@@ -104,6 +157,9 @@ export function MemoryView() {
                 <div className="muted small">
                   {pair.score.toFixed(2)} · {pair.reasons.join("; ")}
                 </div>
+                {pair.conflicts.length > 0 && (
+                  <div className="small warn">Disagree: {pair.conflicts.map(describeConflict).join("; ")}</div>
+                )}
               </div>
               <div className="row">
                 <button disabled={busy} onClick={() => merge(pair.a, pair.b)} title={`Keep ${displayName(pair.a)}`}>
@@ -118,6 +174,32 @@ export function MemoryView() {
           ))}
         </div>
       </div>
+
+      {merges && merges.length > 0 && (
+        <div className="panel stack">
+          <h2>Recent merges</h2>
+          <div className="list">
+            {merges.map((record) => (
+              <div key={record.id} className="memory-row">
+                <div className="stack" style={{ gap: 2 }}>
+                  <div>
+                    “{displayName(record.merged_before.node)}” into “{displayName(record.kept_before.node)}”
+                  </div>
+                  <div className="muted small">
+                    {formatTime(record.at)}
+                    {record.by && ` · by ${record.by}`}
+                    {record.forced && ` · forced over ${record.conflicts.map(describeConflict).join("; ")}`}
+                    {record.undone_at !== null && ` · undone ${formatTime(record.undone_at)}`}
+                  </div>
+                </div>
+                {record.undone_at === null && (
+                  <button disabled={busy} onClick={() => undo(record)}>Undo</button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="panel stack">
         <div className="row">

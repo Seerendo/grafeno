@@ -664,6 +664,74 @@ async fn memory_endpoints() {
     let (_, pairs) = call(&app, "GET", "/v1/agent/duplicates", None).await;
     assert!(pairs.as_array().unwrap().is_empty());
 
+    // Recorded, and undone.
+    let (status, merges) = call(&app, "GET", &format!("/v1/agent/merges?node={dup}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{merges}");
+    assert_eq!(merges[0]["id"], report["id"]);
+    let (status, undone) = call(
+        &app,
+        "POST",
+        &format!("/v1/agent/merges/{}/undo", report["id"].as_str().unwrap()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{undone}");
+    assert!(!undone["undone_at"].is_null(), "{undone}");
+    let (status, _) = call(&app, "GET", &format!("/v1/agent/nodes/{dup}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Two emails: refused with the conflicts, listed by a dry run, merged
+    // with force.
+    let (_, made) = call(
+        &app,
+        "POST",
+        "/v1/agent/batch",
+        Some(json!({ "ops": [
+            { "op": "create_node", "ref": "$x", "node": { "labels": ["Person"], "props": { "name": "Eva", "email": "eva@a.com" } } },
+            { "op": "create_node", "ref": "$y", "node": { "labels": ["Person"], "props": { "name": "Eva", "email": "eva@b.com" } } }
+        ]})),
+    )
+    .await;
+    let (x, y) = (made["refs"]["$x"].clone(), made["refs"]["$y"].clone());
+    let (status, refused) = call(
+        &app,
+        "POST",
+        "/v1/agent/merge",
+        Some(json!({ "keep": x, "merge": y })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"]["code"], "conflict");
+    assert_eq!(refused["error"]["conflicts"][0]["kind"], "strong_key");
+    assert_eq!(refused["error"]["conflicts"][0]["key"], "email");
+    let (status, dry) = call(
+        &app,
+        "POST",
+        "/v1/agent/merge",
+        Some(json!({ "keep": x, "merge": y, "dry_run": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(dry["conflicts"].as_array().unwrap().len(), 1);
+    let (status, forced) = call(
+        &app,
+        "POST",
+        "/v1/agent/merge",
+        Some(json!({ "keep": x, "merge": y, "force": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{forced}");
+    assert_eq!(forced["conflicts"][0]["key"], "email");
+    // Back to the first merge, for what follows.
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/agent/merge",
+        Some(json!({ "keep": ana, "merge": dup })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
     // Importance through PATCH, accesses through touch and recall.
     let (status, node) = call(
         &app,

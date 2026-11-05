@@ -233,6 +233,7 @@ impl WriteTx {
         clear!(TEXTS, (ns, 0u128), (end.as_str(), 0u128));
         clear!(TEXT_LENGTHS, (ns, 0u128), (end.as_str(), 0u128));
         clear!(VECTORS, (ns, 0u128), (end.as_str(), 0u128));
+        clear!(crate::merge::MERGES, (ns, 0u128), (end.as_str(), 0u128));
         clear!(MEMORY, (ns, 0u128), (end.as_str(), 0u128));
         clear!(
             ADJ_OUT,

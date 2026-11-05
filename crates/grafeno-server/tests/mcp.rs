@@ -77,6 +77,7 @@ fn handshake_and_tool_list() {
             "get_node",
             "query",
             "merge",
+            "undo_merge",
             "maintain",
             "consolidate"
         ]
@@ -387,6 +388,15 @@ fn maintain_merge_and_consolidate() {
     assert_eq!(structured(&merged)["id"], bob.as_str());
     let gone = call(&server, "get_node", json!({ "id": robert }));
     assert_eq!(gone["isError"], true);
+    // Undone, and merged again.
+    let merge_id = structured(&merged)["merge_id"].as_str().unwrap().to_owned();
+    let undone = call(&server, "undo_merge", json!({ "merge_id": merge_id }));
+    assert_eq!(structured(&undone)["restored"], robert.as_str(), "{undone}");
+    assert_ne!(
+        call(&server, "get_node", json!({ "id": robert }))["isError"],
+        true
+    );
+    call(&server, "merge", json!({ "keep": bob, "merge": robert }));
     let report = call(&server, "maintain", json!({}));
     assert!(
         structured(&report)["duplicates"]

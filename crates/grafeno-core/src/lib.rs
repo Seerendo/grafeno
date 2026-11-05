@@ -8,7 +8,7 @@ mod model;
 mod time;
 
 pub use error::{Error, Result};
-pub use id::{EdgeId, NodeId};
+pub use id::{EdgeId, MergeId, NodeId};
 pub use model::{Edge, NewEdge, NewNode, Node, Props};
 pub use serde_json::Value;
 pub use time::{Timestamp, days_in_month};

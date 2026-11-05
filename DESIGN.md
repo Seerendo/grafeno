@@ -87,7 +87,7 @@ short-lived agents.
 | `index_entries` | `(ns, index, sortable value, node_id)` | `()`              |
 | `namespaces`   | `ns`                          | creation time, description (JSON) |
 
-- The layout has a version (`SCHEMA_VERSION`, now 6) in `meta`. Opening an
+- The layout has a version (`SCHEMA_VERSION`, now 8) in `meta`. Opening an
   older file upgrades it in one transaction: version 1 gets its counters
   computed, version 2 gets the new adjacency and posting tables (built from
   the records) and loses the old ones, version 3 gets the names index,
@@ -302,14 +302,17 @@ without a current user. They remain possible for embedded use.
   leaves out unless `include_archived`.
 - **Duplicates**: pairs with the same label and a similar normalized name (1
   for equal names, at least 0.7 when one contains the other, word Jaccard
-  otherwise) or a cosine similarity of at least 0.92 between embeddings.
-  Pairs joined by a `distinct_from` edge are not proposed again.
+  otherwise, typos counted at 0.8 of a word), the same value of a strong key
+  (1), or a cosine similarity of at least 0.92 between embeddings. Pairs
+  joined by a `distinct_from` edge, or that the identity rules rule out,
+  are not proposed (see 10.5).
 - **Merging**: `merge_nodes(keep, merge)` moves the edges to the kept node
   (dropping edges between the two and identical ones), joins labels and
   sources, keeps the kept node's properties and adds the missing ones, turns
   the other names into `aliases`, joins the texts, keeps one embedding,
   combines memory states (highest importance, sum of accesses) and deletes
-  the merged node, all in one transaction.
+  the merged node, all in one transaction. It refuses nodes that disagree
+  unless forced, and records itself so that it can be undone (see 10.5).
 - **Consolidation**: `consolidation_groups` finds entities with at least 3
   memories (`Memory`, `Episode`, `Note`) older than 7 days pointing at them.
   The summary is written by the agent (the engine calls no model):
@@ -856,7 +859,8 @@ and executor: errors, never panics. Parameters need no limit of their own:
 the HTTP body limit bounds them, `serde_json` refuses nesting deeper than
 128, and their use is checked like any value's.
 
-**10.5 Correct memory merges.** Merging today joins two nodes when asked.
+**10.5 Correct memory merges** (done). Merging joined two nodes when
+asked.
 
 - Identity rules: strong keys (declared unique properties such as email
   or an external id) decide; names and aliases only suggest; conflicting
@@ -868,6 +872,55 @@ the HTTP body limit bounds them, `serde_json` refuses nesting deeper than
   (`merged_from`, by whom, when), and can be undone.
 - Tests with tricky cases: namesakes, people and companies with the same
   name, nicknames, typos, translations.
+
+As built (`crates/grafeno/src/merge.rs`): before merging, the engine lists
+where the two nodes disagree, as `Conflict`s of four kinds.
+
+- *Strong keys*: `email` and `external_id` by default (`MergeOptions.
+  strong_keys`), and the key of every unique constraint on either node's
+  labels. Values compare trimmed and lowercased.
+- *Labels*: each node has a label the other lacks (`Person` and `Company`
+  sharing `Entity`); one label more (`Person` and `Person:Engineer`) is
+  fine. `Archived` is left out.
+- *Properties*: the same property with different values (two `born_on`),
+  names and aliases aside, as those are how duplicates differ.
+- *Functional edges*: for labels declared one-at-a-time
+  (`MergeOptions.functional`, such as `born_in`), different current
+  targets. Ended or retracted facts do not count.
+
+Any conflict refuses the merge with `Error::Conflict` (409 over HTTP, with
+the list in `error.conflicts`); `force` merges anyway with the kept node's
+values, and the report lists what it overrode. Names never decide alone: in
+`find_duplicates`, strong-key and label conflicts take a pair out (two Ana
+Garcías with two emails are namesakes), the same strong key proposes one
+whatever the names (score 1), and each conflicting fact lowers a pair's
+score by 15% and is listed in its reasons and `conflicts`. Typos are found
+by filing every name word under itself and its one-letter deletions (two
+words one edit apart share a key) and confirmed with an edit distance (one
+edit, two from eight letters on). A changed or added last letter is not a
+typo but another name (Mario and Maria, Daniel and Daniela). Nicknames and
+translations are not guessed: they match through `aliases` or embeddings.
+
+Every merge writes a `MergeRecord` to a `merges` table (layout version 8):
+id, kept and merged ids, when, by whom (the transaction's actor), the
+conflicts forced over, both nodes as they were (record, text, embedding,
+memory state), and the edges moved and dropped. That is the provenance of
+every fact the kept node gained. `merges(ns, node)` lists them (`GET
+/v1/{ns}/merges?node=`), and `undo_merge` puts everything back: the merged
+node with its id, text, embedding and memory, the kept node as it was, the
+moved edges on the merged node, the dropped ones restored; edges added to
+the kept node since stay. It refuses if the kept node changed after the
+merge (those changes would be lost) unless forced, and a merge undoes once.
+The record stays, marked undone. Records are not exported (they hold
+copies of nodes that an import would duplicate) and go with their
+namespace.
+
+`tests/merges.rs` (engine) and `duplicates_follow_identity_rules_in_tricky_cases`
+(memory) cover namesakes, the same email written differently, a person and
+a company with one name, two birth dates, functional edges, typos in one
+word and in a full name, gendered and suffixed names that are not typos,
+a nickname and a translation through aliases, and a merge undone exactly
+(names index, text index, vectors, counters and the check all agree).
 
 **10.6 RAM under large graphs.**
 

@@ -237,8 +237,10 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `GET`    | `/v1/algorithms`                      |                                                         | `[{name, arguments, columns, description}]` |
 | `POST`   | `/v1/{ns}/algo/{name}`                | `{args?, settings?, write?, column?}`                   | `{columns, rows, stats}`      |
 | `GET`    | `/v1/{ns}/resolve`                    | `?name=&label=`                                         | nodes with that name or alias |
-| `GET`    | `/v1/{ns}/duplicates`                 | `?label=&min_score=&vectors=&limit=`                    | `[{a, b, score, reasons}]`    |
-| `POST`   | `/v1/{ns}/merge`                      | `{keep, merge}`                                         | `{kept, merged, edges_moved, edges_dropped}` |
+| `GET`    | `/v1/{ns}/duplicates`                 | `?label=&min_score=&vectors=&limit=`                    | `[{a, b, score, reasons, conflicts}]` |
+| `POST`   | `/v1/{ns}/merge`                      | `{keep, merge, force?, dry_run?, functional?, strong_keys?}` | `{id, kept, merged, edges_moved, edges_dropped, conflicts}`; 409 with `error.conflicts` when they disagree; `{conflicts}` with `dry_run` |
+| `GET`    | `/v1/{ns}/merges`                     | `?node=&limit=`                                         | merge records, newest first   |
+| `POST`   | `/v1/{ns}/merges/{id}/undo`           | `{force?}` (optional)                                   | the record, marked undone     |
 | `POST`   | `/v1/{ns}/touch`                      | `{ids}`                                                 | 204                           |
 | `GET`    | `/v1/{ns}/weak`                       | `?half_life_days=&threshold=&label=&limit=`             | `[{node, strength, memory}]`  |
 | `POST`   | `/v1/{ns}/archive`                    | `{ids}`                                                 | `{archived}`                  |
@@ -310,7 +312,8 @@ Syncing a note and replacing its links in one request:
 | `forget`   | Invalidates (default), retracts or deletes a fact; deletes a node.            |
 | `get_node` | A node with its text, properties and connecting facts.                        |
 | `query`    | A read-only [GQ](../../docs/query-language.md) statement; at most 200 rows.   |
-| `merge`    | Folds a duplicate node into another one.                                       |
+| `merge`    | Folds a duplicate node into another one; refused when they disagree unless `force`. Returns a `merge_id`. |
+| `undo_merge` | Undoes a merge by its `merge_id`: the merged node and its facts come back.   |
 | `maintain` | Lists likely duplicates, weak memories and groups ready to consolidate.        |
 | `consolidate` | Stores a summary of several memories and archives them.                     |
 

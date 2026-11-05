@@ -13,6 +13,7 @@ use crate::access::PRINCIPALS;
 use crate::algo::Shared;
 use crate::index::{INDEX_ENTRIES, INDEXES, IndexKey};
 use crate::memory::names_of;
+use crate::merge::MERGES;
 use crate::namespace::{NAMESPACES, NamespaceMeta};
 use crate::stats::{
     NamespaceInfo, NamespaceStats, bump_edge_label, bump_namespace, bump_node_label, label_counts,
@@ -40,7 +41,8 @@ use crate::{Hit, text, vector};
 ///    is declared.
 /// 6. Adds the `namespaces` registry, so that empty namespaces exist.
 /// 7. Adds `principals` (API keys), empty until one is created.
-pub const SCHEMA_VERSION: u64 = 7;
+/// 8. Adds `merges` (merge records, for undo), empty until a merge.
+pub const SCHEMA_VERSION: u64 = 8;
 
 /// The tables replaced in version 3, by name (their types no longer matter).
 const OLD_ADJ_OUT: TableDefinition<AdjKey, u128> = TableDefinition::new("adj_out");
@@ -146,6 +148,7 @@ impl Grafeno {
         tx.open_table(INDEX_ENTRIES).map_err(storage)?;
         tx.open_table(NAMESPACES).map_err(storage)?;
         tx.open_table(PRINCIPALS).map_err(storage)?;
+        tx.open_table(MERGES).map_err(storage)?;
 
         let stored = tx
             .open_table(META)
@@ -250,6 +253,7 @@ impl Grafeno {
             index_entries: tx.open_table(INDEX_ENTRIES).map_err(storage)?,
             registry: tx.open_table(NAMESPACES).map_err(storage)?,
             principals: tx.open_table(PRINCIPALS).map_err(storage)?,
+            merges: tx.open_table(MERGES).map_err(storage)?,
             tx,
         })
     }
@@ -472,6 +476,7 @@ pub struct ReadTx {
     pub(crate) index_entries: ReadOnlyTable<IndexKey, ()>,
     pub(crate) registry: ReadOnlyTable<&'static str, &'static [u8]>,
     pub(crate) principals: ReadOnlyTable<&'static str, &'static [u8]>,
+    pub(crate) merges: ReadOnlyTable<RecordKey, &'static [u8]>,
     pub(crate) shared: Arc<Shared>,
     /// The commit this snapshot sees, when known (for the projection cache).
     pub(crate) generation: Option<u64>,

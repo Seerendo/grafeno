@@ -29,6 +29,7 @@ mod db;
 mod dump;
 mod index;
 mod memory;
+mod merge;
 mod namespace;
 mod stats;
 mod store;
@@ -44,7 +45,11 @@ pub use db::{Actor, Durability, FileIntegrity, Grafeno, ReadTx, SCHEMA_VERSION, 
 pub use dump::{DumpStats, EXPORT_FORMAT, EXPORT_VERSION, ImportOptions, Record};
 pub use grafeno_core::*;
 pub use index::{IndexDef, IndexInfo, IndexRange};
-pub use memory::{DEFAULT_IMPORTANCE, MemoryState, MergeReport, names_of, normalize_name};
+pub use memory::{DEFAULT_IMPORTANCE, MemoryState, names_of, normalize_name};
+pub use merge::{
+    Conflict, ConflictKind, DEFAULT_STRONG_KEYS, MergeOptions, MergeRecord, MergeReport,
+    NodeSnapshot, node_conflicts,
+};
 pub use namespace::{DropStats, MAX_NAMESPACE_LENGTH, check_new_namespace};
 pub use stats::{NamespaceInfo, NamespaceStats};
 pub use text::tokenize;

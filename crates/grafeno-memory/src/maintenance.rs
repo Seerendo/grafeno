@@ -8,8 +8,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use grafeno::{
-    Direction, EdgeFilter, MemoryState, NewEdge, NewNode, Node, NodeId, ReadTx, Result, Timestamp,
-    WriteTx, names_of,
+    Conflict, DEFAULT_STRONG_KEYS, Direction, EdgeFilter, MemoryState, NewEdge, NewNode, Node,
+    NodeId, ReadTx, Result, Timestamp, Value, WriteTx, names_of, node_conflicts,
 };
 use serde::Serialize;
 
@@ -31,6 +31,10 @@ pub struct DuplicateOptions {
     /// Also compare embeddings, with this cosine similarity at least.
     pub vector_threshold: Option<f32>,
     pub limit: usize,
+    /// Properties that identify an entity, besides the keys of unique
+    /// constraints: equal values make a duplicate, different values rule
+    /// one out (namesakes).
+    pub strong_keys: Vec<String>,
 }
 
 impl Default for DuplicateOptions {
@@ -40,6 +44,7 @@ impl Default for DuplicateOptions {
             min_score: 0.6,
             vector_threshold: Some(0.92),
             limit: 50,
+            strong_keys: DEFAULT_STRONG_KEYS.map(String::from).to_vec(),
         }
     }
 }
@@ -52,10 +57,95 @@ pub struct Duplicate {
     /// From 0 to 1: 1 for the same name.
     pub score: f32,
     pub reasons: Vec<String>,
+    /// Facts the two disagree on (a merge needs `force` to override them).
+    pub conflicts: Vec<Conflict>,
 }
 
 fn words(name: &str) -> BTreeSet<&str> {
     name.split(' ').filter(|word| !word.is_empty()).collect()
+}
+
+/// Edits between two words (insertions, deletions, substitutions and
+/// swaps of neighbors), up to `max` (more is `max + 1`).
+fn edits(a: &str, b: &str, max: usize) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a.len().abs_diff(b.len()) > max {
+        return max + 1;
+    }
+    let mut rows = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+    for (i, row) in rows.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for (j, cell) in rows[0].iter_mut().enumerate() {
+        *cell = j;
+    }
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut best = (rows[i - 1][j] + 1)
+                .min(rows[i][j - 1] + 1)
+                .min(rows[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                best = best.min(rows[i - 2][j - 2] + 1);
+            }
+            rows[i][j] = best;
+        }
+    }
+    rows[a.len()][b.len()].min(max + 1)
+}
+
+/// Whether two different words are likely one with a typo: letters only,
+/// at least four, one edit apart (two from eight letters on). A different
+/// or added last letter is not a typo but another name ("mario" and
+/// "maria", "luis" and "luisa").
+fn typo(a: &str, b: &str) -> bool {
+    let letters = |w: &str| w.chars().count() >= 4 && w.chars().all(char::is_alphabetic);
+    if a == b || !letters(a) || !letters(b) {
+        return false;
+    }
+    let (ca, cb): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let (short, long) = if ca.len() <= cb.len() {
+        (&ca, &cb)
+    } else {
+        (&cb, &ca)
+    };
+    if short.len() < 8 {
+        let ending = if short.len() == long.len() {
+            short[..short.len() - 1] == long[..long.len() - 1]
+        } else {
+            long.starts_with(short)
+        };
+        if ending {
+            return false;
+        }
+    }
+    let max = if a.chars().count().min(b.chars().count()) >= 8 {
+        2
+    } else {
+        1
+    };
+    edits(a, b, max) <= max
+}
+
+/// The keys under which a word is filed to find typos of it: the word, and
+/// the word without each one of its letters (two words one edit apart share
+/// one of these).
+fn typo_keys(word: &str) -> Vec<String> {
+    let chars: Vec<char> = word.chars().collect();
+    let mut keys = vec![word.to_owned()];
+    if chars.len() >= 4 && chars.iter().all(|c| c.is_alphabetic()) {
+        for skip in 0..chars.len() {
+            keys.push(
+                chars
+                    .iter()
+                    .enumerate()
+                    .filter(|(at, _)| *at != skip)
+                    .map(|(_, c)| *c)
+                    .collect(),
+            );
+        }
+    }
+    keys
 }
 
 /// How alike two sets of normalized names are, and why.
@@ -68,15 +158,23 @@ fn name_similarity(a: &BTreeSet<String>, b: &BTreeSet<String>) -> Option<(f32, S
         for y in b {
             let (wx, wy) = (words(x), words(y));
             let shared = wx.intersection(&wy).count();
-            if shared == 0 {
+            // Words of one name that are a typo of a word of the other.
+            let typos = wx
+                .difference(&wy)
+                .filter(|w| wy.difference(&wx).any(|v| typo(w, v)))
+                .count();
+            if shared == 0 && typos == 0 {
                 continue;
             }
-            let jaccard = shared as f32 / wx.union(&wy).count() as f32;
+            let union = wx.union(&wy).count() - typos;
+            let jaccard = (shared as f32 + 0.8 * typos as f32) / union as f32;
             // "ana garcia" and "ana garcia lopez": one name inside the other.
-            let contained = wx.is_subset(&wy) || wy.is_subset(&wx);
+            let contained = typos == 0 && (wx.is_subset(&wy) || wy.is_subset(&wx));
             let score = if contained { jaccard.max(0.7) } else { jaccard };
             let reason = if contained {
                 format!("\"{x}\" and \"{y}\": one name contains the other")
+            } else if typos > 0 {
+                format!("\"{x}\" and \"{y}\": alike but for a typo")
             } else {
                 format!("\"{x}\" and \"{y}\" share {shared} word(s)")
             };
@@ -94,9 +192,15 @@ fn shares_label(a: &Node, b: &Node) -> bool {
         .any(|label| label != ARCHIVED && b.has_label(label))
 }
 
-/// Pairs of nodes that may be the same entity, best first: by name (equal,
-/// one inside the other, shared words) and, with `vector_threshold`, by
-/// meaning. Pairs joined by a [`DISTINCT_FROM`] edge are skipped.
+/// Pairs of nodes that may be the same entity, best first: by a strong key
+/// (the same email), by name (equal, one inside the other, shared words,
+/// typos) and, with `vector_threshold`, by meaning.
+///
+/// Names only suggest; identity rules decide against: pairs with
+/// different values of a strong key (namesakes), with labels that do not
+/// fit (each has one the other lacks, as a person and a company), or joined
+/// by a [`DISTINCT_FROM`] edge are left out. Facts they disagree on lower
+/// the score and are listed in `conflicts`.
 pub fn find_duplicates(
     read: &ReadTx,
     ns: &str,
@@ -111,14 +215,24 @@ pub fn find_duplicates(
     let names: HashMap<NodeId, BTreeSet<String>> =
         nodes.iter().map(|node| (node.id, names_of(node))).collect();
 
-    // Nodes per name word, to compare only nodes that share one.
-    let mut by_word: HashMap<&str, Vec<NodeId>> = HashMap::new();
+    let mut strong_keys = options.strong_keys.clone();
+    for def in read.index_defs(ns)? {
+        if def.unique && !strong_keys.contains(&def.key) {
+            strong_keys.push(def.key);
+        }
+    }
+
+    // Nodes per name word (and per typo key of it), to compare only nodes
+    // that share one.
+    let mut by_word: HashMap<String, Vec<NodeId>> = HashMap::new();
     for (id, node_names) in &names {
         let mut seen = HashSet::new();
         for name in node_names {
             for word in words(name) {
-                if seen.insert(word) {
-                    by_word.entry(word).or_default().push(*id);
+                for key in typo_keys(word) {
+                    if seen.insert(key.clone()) {
+                        by_word.entry(key).or_default().push(*id);
+                    }
                 }
             }
         }
@@ -126,17 +240,53 @@ pub fn find_duplicates(
 
     let mut pairs: HashMap<(NodeId, NodeId), (f32, Vec<String>)> = HashMap::new();
     let key = |a: NodeId, b: NodeId| if a < b { (a, b) } else { (b, a) };
+
+    // The same value of a strong key: the same entity, whatever the name.
+    let mut by_strong: HashMap<(String, String), Vec<NodeId>> = HashMap::new();
+    for node in &nodes {
+        for strong in &strong_keys {
+            if let Some(value) = node.props.get(strong).filter(|value| !value.is_null()) {
+                let value = match value {
+                    Value::String(s) => s.trim().to_lowercase(),
+                    other => other.to_string(),
+                };
+                by_strong
+                    .entry((strong.clone(), value))
+                    .or_default()
+                    .push(node.id);
+            }
+        }
+    }
+    for ((strong, value), ids) in &by_strong {
+        for (index, &a) in ids.iter().enumerate() {
+            for &b in &ids[index + 1..] {
+                let entry = pairs.entry(key(a, b)).or_insert((0.0, Vec::new()));
+                entry.0 = 1.0;
+                entry.1.push(format!("same {strong} \"{value}\""));
+            }
+        }
+    }
     for ids in by_word
         .values()
         .filter(|ids| ids.len() > 1 && ids.len() <= COMMON_WORD)
     {
         for (index, &a) in ids.iter().enumerate() {
             for &b in &ids[index + 1..] {
-                if pairs.contains_key(&key(a, b)) || !shares_label(by_id[&a], by_id[&b]) {
+                if a == b || !shares_label(by_id[&a], by_id[&b]) {
+                    continue;
+                }
+                let entry = pairs.get(&key(a, b));
+                if entry.is_some_and(|(_, reasons)| {
+                    reasons
+                        .iter()
+                        .any(|r| r.starts_with('"') || r.starts_with("same name"))
+                }) {
                     continue;
                 }
                 if let Some((score, reason)) = name_similarity(&names[&a], &names[&b]) {
-                    pairs.insert(key(a, b), (score, vec![reason]));
+                    let entry = pairs.entry(key(a, b)).or_insert((0.0, Vec::new()));
+                    entry.0 = entry.0.max(score);
+                    entry.1.push(reason);
                 }
             }
         }
@@ -166,8 +316,16 @@ pub fn find_duplicates(
         }
     }
 
+    let ignored = vec![ARCHIVED.to_owned()];
     let mut out = Vec::new();
-    for ((a, b), (score, reasons)) in pairs {
+    for ((a, b), (score, mut reasons)) in pairs {
+        let conflicts = node_conflicts(by_id[&a], by_id[&b], &strong_keys, &ignored);
+        if conflicts.iter().any(Conflict::is_identity) {
+            continue;
+        }
+        // Each fact they disagree on makes them less likely the same.
+        let score = score * 0.85f32.powi(conflicts.len() as i32);
+        reasons.extend(conflicts.iter().map(Conflict::describe));
         if score < options.min_score {
             continue;
         }
@@ -186,6 +344,7 @@ pub fn find_duplicates(
                 b: by_id[&b].clone(),
                 score,
                 reasons,
+                conflicts,
             });
         }
     }

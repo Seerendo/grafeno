@@ -187,6 +187,8 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/{ns}/resolve", get(resolve))
         .route("/{ns}/duplicates", get(duplicates))
         .route("/{ns}/merge", post(merge))
+        .route("/{ns}/merges", get(merges))
+        .route("/{ns}/merges/{id}/undo", post(undo_merge))
         .route("/{ns}/touch", post(touch))
         .route("/{ns}/weak", get(weak))
         .route("/{ns}/archive", post(archive_nodes))
@@ -256,6 +258,8 @@ pub struct ApiError {
     status: StatusCode,
     code: &'static str,
     message: String,
+    /// More fields of the error object (the conflicts of a refused merge).
+    details: Option<serde_json::Map<String, Value>>,
 }
 
 impl ApiError {
@@ -264,6 +268,7 @@ impl ApiError {
             status: StatusCode::NOT_FOUND,
             code: "not_found",
             message: message.into(),
+            details: None,
         }
     }
 
@@ -272,6 +277,7 @@ impl ApiError {
             status: StatusCode::FORBIDDEN,
             code: "forbidden",
             message: message.into(),
+            details: None,
         }
     }
 
@@ -280,6 +286,7 @@ impl ApiError {
             status: StatusCode::BAD_REQUEST,
             code: "bad_request",
             message: message.into(),
+            details: None,
         }
     }
 
@@ -288,6 +295,7 @@ impl ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "internal",
             message: message.into(),
+            details: None,
         }
     }
 }
@@ -306,13 +314,18 @@ impl From<Error> for ApiError {
             status,
             code,
             message: error.to_string(),
+            details: None,
         }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let body = json!({ "error": { "code": self.code, "message": self.message } });
+        let mut error = serde_json::Map::new();
+        error.insert("code".into(), Value::from(self.code));
+        error.insert("message".into(), Value::from(self.message));
+        error.extend(self.details.unwrap_or_default());
+        let body = json!({ "error": error });
         let mut response = (self.status, Json(body)).into_response();
         if self.status == StatusCode::SERVICE_UNAVAILABLE {
             response
@@ -446,6 +459,7 @@ async fn refuse(
         status,
         code,
         message,
+        details: None,
     }
     .into_response()
 }
@@ -496,6 +510,7 @@ async fn admit(State(state): State<AppState>, request: Request, next: Next) -> R
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "busy",
             message: "the server is busy: retry in a moment".into(),
+            details: None,
         }
         .into_response(),
     }
@@ -1454,6 +1469,7 @@ impl From<grafeno_query::QueryError> for ApiError {
                 "invalid_query"
             },
             message: error.to_string(),
+            details: None,
         }
     }
 }
@@ -1827,6 +1843,7 @@ async fn duplicates(
             None
         },
         limit: params.limit.unwrap_or(base.limit).min(MAX_PAGE),
+        ..base
     };
     let found = blocking(&state, move |db| {
         grafeno_memory::find_duplicates(&db.begin_read()?, &ns, &options)
@@ -1842,18 +1859,107 @@ struct MergeInput {
     keep: NodeId,
     /// The node merged into it, then deleted.
     merge: NodeId,
+    /// Merge in spite of conflicts (the kept node's values win).
+    #[serde(default)]
+    force: bool,
+    /// Only report the conflicts; merge nothing.
+    #[serde(default)]
+    dry_run: bool,
+    /// Edge labels a node has one of at a time (`born_in`).
+    #[serde(default)]
+    functional: Vec<String>,
+    /// Identifying properties; `email` and `external_id` when missing.
+    #[serde(default)]
+    strong_keys: Option<Vec<String>>,
 }
 
+/// Merges two nodes. Conflicts (different emails or labels, two birth
+/// dates) refuse the merge with 409 and the list of `conflicts`, unless
+/// `force`; `dry_run` only lists them.
 async fn merge(
     State(state): State<AppState>,
     Path(ns): Path<String>,
     Body(input): Body<MergeInput>,
-) -> ApiResult<Json<grafeno::MergeReport>> {
-    let report = write(&state, move |tx| {
-        tx.merge_nodes(&ns, input.keep, input.merge)
+) -> ApiResult<Json<Value>> {
+    let base = grafeno::MergeOptions::default();
+    let options = grafeno::MergeOptions {
+        force: input.force,
+        functional: input.functional,
+        strong_keys: input.strong_keys.unwrap_or(base.strong_keys.clone()),
+        ..base
+    };
+    let (keep, merged, dry_run) = (input.keep, input.merge, input.dry_run);
+    let outcome = write(&state, move |tx| {
+        let conflicts = tx.merge_conflicts(&ns, keep, merged, &options)?;
+        if dry_run || (!conflicts.is_empty() && !options.force) {
+            return Ok(Err(conflicts));
+        }
+        tx.merge_nodes_with(&ns, keep, merged, &options).map(Ok)
     })
     .await?;
-    Ok(Json(report))
+    match outcome {
+        Ok(report) => Ok(Json(
+            serde_json::to_value(report).map_err(|e| ApiError::internal(e.to_string()))?,
+        )),
+        Err(conflicts) if dry_run => Ok(Json(json!({ "conflicts": conflicts }))),
+        Err(conflicts) => {
+            let listed: Vec<String> = conflicts.iter().map(grafeno::Conflict::describe).collect();
+            let mut details = serde_json::Map::new();
+            details.insert("conflicts".into(), json!(conflicts));
+            Err(ApiError {
+                status: StatusCode::CONFLICT,
+                code: "conflict",
+                message: format!(
+                    "the nodes disagree, so they may not be the same: {}; send force: true to merge anyway",
+                    listed.join("; ")
+                ),
+                details: Some(details),
+            })
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct MergesParams {
+    node: Option<NodeId>,
+    limit: Option<usize>,
+}
+
+/// Merges recorded in the namespace, newest first (`?node=` for one node's).
+async fn merges(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Params(params): Params<MergesParams>,
+) -> ApiResult<Json<Vec<grafeno::MergeRecord>>> {
+    let limit = params.limit.unwrap_or(50).min(MAX_PAGE);
+    let mut records = blocking(&state, move |db| db.begin_read()?.merges(&ns, params.node)).await?;
+    records.truncate(limit);
+    Ok(Json(records))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct UndoInput {
+    /// Undo even if the kept node changed since (its changes are lost).
+    #[serde(default)]
+    force: bool,
+}
+
+/// Undoes a merge: the merged node and its facts come back.
+async fn undo_merge(
+    State(state): State<AppState>,
+    Path((ns, id)): Path<(String, grafeno::MergeId)>,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<grafeno::MergeRecord>> {
+    // The body is optional: none is `{}`.
+    let input: UndoInput = if body.iter().all(u8::is_ascii_whitespace) {
+        UndoInput::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?
+    };
+    let force = input.force;
+    let record = write(&state, move |tx| tx.undo_merge(&ns, id, force)).await?;
+    Ok(Json(record))
 }
 
 #[derive(Deserialize)]

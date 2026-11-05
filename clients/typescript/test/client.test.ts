@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 
-import { Grafeno, GrafenoError } from "../src/index.ts";
+import { type Conflict, Grafeno, GrafenoError } from "../src/index.ts";
 
 const binary =
   process.env.GRAFENO_BIN ??
@@ -194,6 +194,21 @@ test("memory: names, importance, duplicates, merge and summaries", async () => {
   const report = await memory.merge(refs.$ana, refs.$dup);
   assert.equal(report.merged, refs.$dup);
   assert.deepEqual(await memory.duplicates(), []);
+  const [record] = await memory.merges({ node: refs.$dup });
+  assert.equal(record.id, report.id);
+  await memory.undoMerge(report.id);
+  await memory.merge(refs.$ana, refs.$dup);
+
+  const two = await memory.batch([
+    { op: "create_node", ref: "$x", node: { labels: ["Person"], props: { name: "Eva", email: "eva@a.com" } } },
+    { op: "create_node", ref: "$y", node: { labels: ["Person"], props: { name: "Eva", email: "eva@b.com" } } },
+  ]);
+  assert.equal((await memory.mergeConflicts(two.refs.$x, two.refs.$y))[0].key, "email");
+  await assert.rejects(memory.merge(two.refs.$x, two.refs.$y), (error: GrafenoError) => {
+    assert.equal(error.status, 409);
+    assert.equal((error.details.conflicts as Conflict[])[0].kind, "strong_key");
+    return true;
+  });
 
   const node = await memory.patchNode(refs.$m0, { importance: 0.9 });
   assert.ok(Math.abs(node.memory.importance - 0.9) < 1e-6);
