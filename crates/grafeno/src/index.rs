@@ -7,6 +7,12 @@
 //! maps and `null` are not). Numbers are compared as `f64`, so an index can
 //! return a few extra nodes for integers beyond 2^53; callers check the
 //! property itself, and the index only narrows the search.
+//!
+//! A fuzzy index (`fuzzy: true`) keeps, instead of the value, the
+//! trigrams of the normalized text (of a string, or of each string of a
+//! list): it finds the nodes whose text looks like a query
+//! ([`ReadTx::fuzzy_search`]), typos and word order included, without
+//! comparing with every node. Its entries share the table, tagged apart.
 
 use std::collections::HashMap;
 use std::ops::Bound;
@@ -38,6 +44,10 @@ pub struct IndexDef {
     /// No two nodes with the label may share a value.
     #[serde(default)]
     pub unique: bool,
+    /// Trigrams of the text, for [`ReadTx::fuzzy_search`], instead of the
+    /// value (not for lookups by value; never unique).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fuzzy: bool,
 }
 
 impl IndexDef {
@@ -50,7 +60,68 @@ impl IndexDef {
             format!("{label}_{key}")
         }
     }
+
+    /// `Person_name_fuzzy`.
+    pub fn default_fuzzy_name(label: &str, key: &str) -> String {
+        format!("{label}_{key}_fuzzy")
+    }
+
+    /// An index (not unique, not fuzzy) under its default name.
+    pub fn new(label: &str, key: &str) -> Self {
+        Self {
+            name: Self::default_name(label, key, false),
+            label: label.into(),
+            key: key.into(),
+            unique: false,
+            fuzzy: false,
+        }
+    }
+
+    /// A fuzzy index under its default name.
+    pub fn fuzzy(label: &str, key: &str) -> Self {
+        Self {
+            name: Self::default_fuzzy_name(label, key),
+            fuzzy: true,
+            ..Self::new(label, key)
+        }
+    }
 }
+
+/// The tag of fuzzy-index entries: a trigram follows.
+const GRAM: u8 = 4;
+
+/// The trigrams a fuzzy index keeps for a value: of the normalized text of
+/// a string, or of each string in a list.
+pub(crate) fn grams_of(value: &Json) -> Vec<String> {
+    let mut grams = std::collections::BTreeSet::new();
+    let mut add = |text: &str| {
+        grams.extend(crate::textsim::ngrams(&crate::normalize_name(text), 3));
+    };
+    match value {
+        Json::String(s) => add(s),
+        Json::Array(items) => items.iter().filter_map(Json::as_str).for_each(&mut add),
+        _ => {}
+    }
+    grams.into_iter().collect()
+}
+
+fn gram_bytes(gram: &str) -> Vec<u8> {
+    let mut out = vec![GRAM];
+    out.extend_from_slice(gram.as_bytes());
+    out
+}
+
+/// A node that looks like a fuzzy search's text.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct FuzzyHit {
+    pub node: NodeId,
+    /// From 0 to 1 (see [`ReadTx::fuzzy_search`]).
+    pub score: f64,
+}
+
+/// A trigram shared by more nodes than this says little about a query
+/// and costs a long read: its entries are left out of the candidate count.
+const COMMON_GRAM: usize = 20_000;
 
 /// An index and how many nodes it holds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -161,10 +232,91 @@ fn byte_range(range: &IndexRange) -> Option<(Vec<u8>, Vec<u8>)> {
 
 /// The index entries a node should have under these definitions.
 pub(crate) fn entries_of<'a>(defs: &'a [IndexDef], node: &Node) -> Vec<(&'a IndexDef, Vec<u8>)> {
-    defs.iter()
-        .filter(|def| node.has_label(&def.label))
-        .filter_map(|def| Some((def, encode_value(node.props.get(&def.key)?)?)))
-        .collect()
+    let mut out = Vec::new();
+    for def in defs.iter().filter(|def| node.has_label(&def.label)) {
+        let Some(value) = node.props.get(&def.key) else {
+            continue;
+        };
+        if def.fuzzy {
+            out.extend(grams_of(value).iter().map(|gram| (def, gram_bytes(gram))));
+        } else if let Some(bytes) = encode_value(value) {
+            out.push((def, bytes));
+        }
+    }
+    out
+}
+
+/// Nodes of fuzzy index `name` that share trigrams with `text`, best first:
+/// candidates by trigrams in common, then scored with `measure` against
+/// the node's value (the best of a list). Reads `node` for each candidate.
+fn fuzzy(
+    entries: &impl ReadableTable<IndexKey, ()>,
+    node: impl Fn(NodeId) -> Result<Option<Node>>,
+    def: &IndexDef,
+    ns: &str,
+    text: &str,
+    measure: crate::textsim::Measure,
+    limit: usize,
+) -> Result<Vec<FuzzyHit>> {
+    let query = crate::normalize_name(text);
+    let grams = crate::textsim::ngrams(&query, 3);
+    let mut shared: HashMap<u128, u32> = HashMap::new();
+    for gram in &grams {
+        let bytes = gram_bytes(gram);
+        let mut seen = Vec::new();
+        for item in entries
+            .range(
+                (ns, def.name.as_str(), bytes.as_slice(), 0u128)
+                    ..=(ns, def.name.as_str(), bytes.as_slice(), u128::MAX),
+            )
+            .map_err(storage)?
+        {
+            seen.push(item.map_err(storage)?.0.value().3);
+            if seen.len() > COMMON_GRAM {
+                break;
+            }
+        }
+        if seen.len() > COMMON_GRAM {
+            continue;
+        }
+        for id in seen {
+            *shared.entry(id).or_default() += 1;
+        }
+    }
+    // The candidates sharing the most trigrams, then the measure on them.
+    let mut candidates: Vec<(u128, u32)> = shared.into_iter().collect();
+    candidates.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    candidates.truncate(limit.saturating_mul(10).max(50));
+    let mut hits = Vec::new();
+    for (id, _) in candidates {
+        let id = NodeId::from_u128(id);
+        let Some(found) = node(id)? else {
+            continue;
+        };
+        let texts: Vec<&str> = match found.props.get(&def.key) {
+            Some(Json::String(s)) => vec![s.as_str()],
+            Some(Json::Array(items)) => items.iter().filter_map(Json::as_str).collect(),
+            _ => Vec::new(),
+        };
+        let score = texts
+            .iter()
+            .map(|value| measure.compare(text, value))
+            .fold(0.0, f64::max);
+        hits.push(FuzzyHit { node: id, score });
+    }
+    hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.node.cmp(&b.node)));
+    hits.truncate(limit);
+    Ok(hits)
+}
+
+fn fuzzy_def(defs: Vec<IndexDef>, label: &str, key: &str) -> Result<IndexDef> {
+    defs.into_iter()
+        .find(|def| def.fuzzy && def.label == label && def.key == key)
+        .ok_or_else(|| {
+            Error::Invalid(format!(
+                "no fuzzy index on :{label}({key}); create one with CREATE FUZZY INDEX FOR (n:{label}) ON (n.{key})"
+            ))
+        })
 }
 
 fn defs_in(
@@ -237,6 +389,33 @@ impl ReadTx {
             .collect()
     }
 
+    /// Up to `limit` nodes with `label` whose property `key` looks like
+    /// `text`, through the fuzzy index on them, best first. Candidates are
+    /// the nodes sharing the most trigrams with the normalized text; each
+    /// is scored with `measure` (Dice over trigrams, Jaro-Winkler, …)
+    /// against its value. Fails if there is no fuzzy index on `(label,
+    /// key)`.
+    pub fn fuzzy_search(
+        &self,
+        ns: &str,
+        label: &str,
+        key: &str,
+        text: &str,
+        measure: crate::textsim::Measure,
+        limit: usize,
+    ) -> Result<Vec<FuzzyHit>> {
+        let def = fuzzy_def(self.index_defs(ns)?, label, key)?;
+        fuzzy(
+            &self.index_entries,
+            |id| self.node(ns, id),
+            &def,
+            ns,
+            text,
+            measure,
+            limit,
+        )
+    }
+
     /// Up to `limit` nodes in index `name` whose value is in `range`, in
     /// value order. An unknown index gives none.
     pub fn index_lookup(
@@ -253,6 +432,29 @@ impl ReadTx {
 impl WriteTx {
     pub fn index_defs(&self, ns: &str) -> Result<Vec<IndexDef>> {
         defs_in(&self.tx.open_table(INDEXES).map_err(storage)?, ns)
+    }
+
+    /// [`ReadTx::fuzzy_search`] as written so far in this transaction.
+    pub fn fuzzy_search(
+        &self,
+        ns: &str,
+        label: &str,
+        key: &str,
+        text: &str,
+        measure: crate::textsim::Measure,
+        limit: usize,
+    ) -> Result<Vec<FuzzyHit>> {
+        let def = fuzzy_def(self.index_defs(ns)?, label, key)?;
+        let table = self.tx.open_table(INDEX_ENTRIES).map_err(storage)?;
+        fuzzy(
+            &table,
+            |id| self.node(ns, id),
+            &def,
+            ns,
+            text,
+            measure,
+            limit,
+        )
     }
 
     /// [`ReadTx::index_lookup`] as written so far in this transaction.
@@ -295,8 +497,14 @@ impl WriteTx {
                 def.name
             )));
         }
+        if def.fuzzy && def.unique {
+            return Err(Error::Invalid("a fuzzy index cannot be unique".into()));
+        }
         if let Some(other) = existing.iter().find(|other| {
-            other.label == def.label && other.key == def.key && other.unique == def.unique
+            other.label == def.label
+                && other.key == def.key
+                && other.unique == def.unique
+                && other.fuzzy == def.fuzzy
         }) {
             return Err(Error::Invalid(format!(
                 "index {:?} already covers :{}({})",
@@ -318,6 +526,12 @@ impl WriteTx {
             let Some(value) = node.props.get(&def.key) else {
                 continue;
             };
+            if def.fuzzy {
+                for (_, bytes) in entries_of(std::slice::from_ref(&def), &node) {
+                    entries.push((bytes, id));
+                }
+                continue;
+            }
             let Some(bytes) = encode_value(value) else {
                 continue;
             };

@@ -1,0 +1,4 @@
+search,people,p50_ms,p99_ms
+fuzzy index (trigrams),100000,20.43,38.69
+compare with every node,100000,469,542
+"find_matches (rule, 4 fields)",100000,50.83,91.33

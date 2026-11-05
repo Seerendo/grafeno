@@ -171,7 +171,9 @@ CALL db.search('borrow checker', 5) YIELD node, score RETURN node.title, score;
 | `db.edgeLabels()` (`db.relationshipTypes()`) | `label`, `count` | edge labels and their counts |
 | `db.propertyKeys()` | `key` | property names of nodes and edges (reads every record) |
 | `db.stats()` | `nodes`, `edges`, `texts`, `vectors`, `dimension` | counts of the namespace |
-| `db.indexes()` | `name`, `label`, `property`, `unique`, `entries` | property indexes (also `SHOW INDEXES`) |
+| `db.indexes()` | `name`, `label`, `property`, `unique`, `entries`, `fuzzy` | property and fuzzy indexes (also `SHOW INDEXES`); a fuzzy index counts trigram entries |
+| `db.searchFuzzy(label, property, text, limit = 10, measure = 'dice')` | `node`, `score` | nodes whose property looks like the text, through its fuzzy index (see *Similar text and entity resolution*) |
+| `db.match(label, properties, limit = 10)` | `node`, `score`, `decision`, `fields` | nodes that may be the record described, by the label's match rule |
 | `db.search(text, limit = 10)` | `node`, `score` | full-text search (BM25), best first |
 | `db.searchVector(embedding, limit = 10)` | `node`, `score` | nearest nodes by embedding |
 | `temporal.series(start, end, step)` | `at` | times from start to end every step (see *Time and durations*) |
@@ -479,6 +481,64 @@ ones decide it.
 | `datetime([x])` / `time([x])`, `date([t])` (`YYYY-MM-DD`), `now()`, `timestamp()` (milliseconds) | |
 | `duration(x)`, `duration.between`, `duration.inMonths` / `inDays` / `inSeconds`, `date.truncate(unit, t)` | see *Time and durations* |
 | `exists(pattern)`, `exists(n.key)` | pattern predicate; whether a property is set |
+| `text.levenshtein`, `text.damerau`, `text.jaroWinkler`, `text.similarity(a, b[, measure])`, … | text similarity (see *Similar text and entity resolution*) |
+
+## Similar text and entity resolution
+
+Functions that say how alike two strings are. Distances count characters;
+similarities go from 0 to 1. `text.similarity` and the indexes compare
+normalized text (lowercase, without accents or punctuation); the other
+functions compare what they get. A `null` argument gives `null`.
+
+| Function | |
+| --- | --- |
+| `text.levenshtein(a, b)` | edits (insert, delete, replace) between them, an integer |
+| `text.damerau(a, b)` | the same, with two swapped neighbors as one edit (`'jonh'`, `'john'`: 1) |
+| `text.jaro(a, b)`, `text.jaroWinkler(a, b)` | for short strings such as names; Winkler favors a common start |
+| `text.dice(a, b[, n])`, `text.jaccard(a, b[, n])` | shared n-grams (3 by default), robust to word order and long names |
+| `text.lcs(a, b)` | length of the longest common subsequence |
+| `text.soundex(s)`, `text.phonetic(s[, 'es' \| 'en'])` | how it sounds: Soundex (English), or a Spanish key (`b`/`v`, `c`/`s`/`z`, silent `h`, `ll`/`y`) |
+| `text.normalize(s)`, `text.ngrams(s[, n])` | the normalized text, its n-grams |
+| `text.similarity(a, b[, measure])` | any measure by name: `exact`, `edit`, `jaro`, `jaro_winkler` (default), `dice`, `bigram`, `jaccard`, `tokens` (shared words), `lcs`, `soundex`, `phonetic_es`, `date` (1 the same day, 0.8 with day and month swapped, falling to 0 a year apart), `number` |
+| `apoc.text.levenshteinDistance`, `levenshteinSimilarity`, `jaroWinklerDistance`, `sorensenDiceSimilarity`, `phonetic` | the same under APOC's names |
+
+```text
+RETURN text.jaroWinkler('martha', 'marhta');                   // 0.961
+MATCH (p:Person) WHERE text.similarity(p.name, $name) > 0.9 RETURN p;
+```
+
+**Fuzzy indexes.** A `WHERE text.similarity(…)` compares with every node.
+A fuzzy index keeps the trigrams of a text property (of each string of a
+list, such as `aliases`) and finds the nodes that look like a text
+without comparing with every node: typos, accents, case and word order
+included.
+
+```text
+CREATE FUZZY INDEX FOR (p:Person) ON (p.name);                 // Person_name_fuzzy
+CALL db.searchFuzzy('Person', 'name', 'jonh smit', 5) YIELD node, score RETURN node.name, score;
+CALL db.searchFuzzy('Person', 'name', 'maria garsia', 5, 'jaro_winkler') YIELD node RETURN node.name;
+```
+
+Candidates are the nodes that share the most trigrams with the text;
+each is then scored with the measure against its value. A fuzzy index is
+never unique and is not used for `=` or ranges (an exact index can sit
+beside it on the same property).
+
+**Match rules.** Deciding that a record and a node are the same thing
+takes more than one field. A match rule, declared per label through the
+API (`PUT /v1/{ns}/match-rules/{label}`, see the server's README), says
+which properties identify (strong keys: equal means the same, different
+means not), which properties compare and with what measure and weight,
+whether shared neighbors count, and two thresholds: `same` and `review`.
+`db.match` scores the candidates its indexes find (fuzzy indexes for
+similar text, exact ones for equal values; without either, the first
+20 000 nodes of the label) and explains every score:
+
+```text
+CALL db.match('Person', {name: 'Jon Smyth', born_on: '1980-03-12'}, 3)
+YIELD node, score, decision, fields
+RETURN node.name, score, decision, [f IN fields | f.key + ': ' + toString(f.similarity)];
+```
 
 ## Indexes and performance
 
@@ -490,7 +550,8 @@ the label and property reads only the matching ones.
 CREATE INDEX FOR (p:Person) ON (p.age);                   // named Person_age
 CREATE INDEX people_by_name IF NOT EXISTS FOR (p:Person) ON (p.name);
 CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE; // Person_email_unique
-SHOW INDEXES;                                             // name, label, property, unique, entries
+CREATE FUZZY INDEX FOR (p:Person) ON (p.name);           // trigrams, for db.searchFuzzy
+SHOW INDEXES;                                             // name, label, property, unique, entries, fuzzy
 SHOW NAMESPACES;                                          // name, nodes, edges, created_at, description (those the caller may read)
 SHOW CONSTRAINTS;
 DROP INDEX people_by_name;

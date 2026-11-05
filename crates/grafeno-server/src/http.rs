@@ -208,6 +208,14 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/{ns}/algo/{name}", post(algorithm))
         .route("/{ns}/resolve", get(resolve))
         .route("/{ns}/duplicates", get(duplicates))
+        .route("/{ns}/fuzzy", get(fuzzy))
+        .route("/{ns}/match", post(find_matches))
+        .route("/{ns}/matches", get(match_pairs))
+        .route("/{ns}/match-rules", get(match_rules))
+        .route(
+            "/{ns}/match-rules/{label}",
+            axum::routing::put(set_match_rule).delete(delete_match_rule),
+        )
         .route("/{ns}/merge", post(merge))
         .route("/{ns}/merges", get(merges))
         .route("/{ns}/merges/{id}/undo", post(undo_merge))
@@ -1919,6 +1927,137 @@ async fn resolve(
     })
     .await?;
     Ok(Json(nodes))
+}
+
+#[derive(Deserialize)]
+struct FuzzyParams {
+    label: String,
+    key: String,
+    q: String,
+    limit: Option<usize>,
+    /// A measure name (`dice` by default, `jaro_winkler`, `edit`, …).
+    measure: Option<String>,
+}
+
+fn measure(name: Option<&str>) -> ApiResult<grafeno::textsim::Measure> {
+    match name {
+        None => Ok(grafeno::textsim::Measure::Dice { n: 3 }),
+        Some(name) => grafeno::textsim::Measure::by_name(name)
+            .ok_or_else(|| ApiError::bad_request(format!("unknown measure {name:?}"))),
+    }
+}
+
+/// Nodes whose property looks like `q`, through the fuzzy index on it.
+async fn fuzzy(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Params(params): Params<FuzzyParams>,
+) -> ApiResult<Json<Vec<grafeno::FuzzyHit>>> {
+    let measure = measure(params.measure.as_deref())?;
+    let limit = params.limit.unwrap_or(10).min(MAX_PAGE);
+    let hits = blocking(&state, move |db| {
+        db.begin_read()?
+            .fuzzy_search(&ns, &params.label, &params.key, &params.q, measure, limit)
+    })
+    .await?;
+    Ok(Json(hits))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MatchInput {
+    label: String,
+    #[serde(default)]
+    props: grafeno::Props,
+    /// Nodes the record is linked to, for rules that weigh neighbors.
+    #[serde(default)]
+    neighbors: Vec<NodeId>,
+    #[serde(default)]
+    limit: Option<usize>,
+    /// A rule to try instead of the stored one.
+    #[serde(default)]
+    rule: Option<grafeno::MatchRule>,
+}
+
+/// Nodes that may be this record, with scores, decisions and fields.
+async fn find_matches(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Body(input): Body<MatchInput>,
+) -> ApiResult<Json<Vec<grafeno::Match>>> {
+    let limit = input.limit.unwrap_or(10).min(MAX_PAGE);
+    let found = blocking(&state, move |db| {
+        let probe = grafeno::Probe {
+            label: input.label,
+            props: input.props,
+            neighbors: input.neighbors,
+        };
+        db.begin_read()?
+            .find_matches(&ns, &probe, input.rule.as_ref(), limit, None)
+    })
+    .await?;
+    Ok(Json(found))
+}
+
+#[derive(Deserialize)]
+struct PairsParams {
+    label: String,
+    limit: Option<usize>,
+}
+
+/// Pairs of nodes of a label that its rule calls the same or to review.
+async fn match_pairs(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Params(params): Params<PairsParams>,
+) -> ApiResult<Json<Value>> {
+    let limit = params.limit.unwrap_or(50).min(MAX_PAGE);
+    let pairs = blocking(&state, move |db| {
+        db.begin_read()?.match_pairs(&ns, &params.label, limit)
+    })
+    .await?;
+    Ok(Json(json!(
+        pairs
+            .into_iter()
+            .map(|(node, found)| json!({ "a": node, "b": found.node, "match": found }))
+            .collect::<Vec<_>>()
+    )))
+}
+
+async fn match_rules(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+) -> ApiResult<Json<Vec<grafeno::MatchRule>>> {
+    let rules = blocking(&state, move |db| db.begin_read()?.match_rules(&ns)).await?;
+    Ok(Json(rules))
+}
+
+/// Declares the match rule of a label (its `label` is the path's).
+async fn set_match_rule(
+    State(state): State<AppState>,
+    Path((ns, label)): Path<(String, String)>,
+    axum::Json(mut rule): axum::Json<Value>,
+) -> ApiResult<Json<grafeno::MatchRule>> {
+    if let Some(object) = rule.as_object_mut() {
+        object.insert("label".into(), Value::from(label));
+    }
+    let rule: grafeno::MatchRule =
+        serde_json::from_value(rule).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let stored = rule.clone();
+    write(&state, move |tx| tx.set_match_rule(&ns, &rule)).await?;
+    Ok(Json(stored))
+}
+
+async fn delete_match_rule(
+    State(state): State<AppState>,
+    Path((ns, label)): Path<(String, String)>,
+) -> ApiResult<StatusCode> {
+    let existed = write(&state, move |tx| tx.delete_match_rule(&ns, &label)).await?;
+    if existed {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found("no match rule for that label"))
+    }
 }
 
 #[derive(Deserialize)]

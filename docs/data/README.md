@@ -28,6 +28,8 @@ build unless the file says otherwise; on E1, runs vary by about ±20%.
 | `vector_search.csv` | 1 000 searches on 1 M and 300 000 vectors | `ram_bench.rs search` | E2 | 2026-11-05 | bars, ms per search and MiB |
 | `saturation_immediate.csv` | Write latency against offered load, immediate durability, `max_batch` 128 and 512 | `crates/grafeno/examples/saturation.rs` | E1-disk | 2026-11-05 | p50 / p99 / p999 against offered load (log–log), throughput against offered load |
 | `saturation_eventual.csv` | The same with eventual durability | `saturation.rs` | E1-disk | 2026-11-05 | as above |
+| `resolve_speed.csv` | Fuzzy index against a scan, and `find_matches`, 100 000 people | `crates/grafeno/examples/resolve_bench.rs` | E1-mem | 2026-11-05 | bars, log scale |
+| `resolve_quality.csv` | A match rule's decisions on 2 000 damaged duplicates and 2 000 namesakes | `resolve_bench.rs` | E1-mem | 2026-11-05 | grouped bars of shares per kind |
 | `import_interference.csv` | An agent's write latency during a 300 000-node import | `saturation.rs` | E1-disk | 2026-11-05 | bars of p99 per import mode, log scale |
 
 `python docs/charts/build.py` draws the charts of

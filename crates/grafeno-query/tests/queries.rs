@@ -494,3 +494,38 @@ fn memory_pseudo_properties() {
             .ends_with('Z')
     );
 }
+
+#[test]
+fn text_similarity_functions() {
+    let db = grafeno::Grafeno::in_memory().unwrap();
+    let rows = |q: &str| {
+        grafeno_query::execute(&db, "t", q, &grafeno_query::Params::new())
+            .unwrap()
+            .to_json()["rows"][0]
+            .clone()
+    };
+    let row = rows(
+        "RETURN text.levenshtein('kitten', 'sitting'), text.damerau('jonh', 'john'), \
+         round(text.jaroWinkler('martha', 'marhta') * 1000) / 1000.0, text.soundex('Robert'), \
+         text.phonetic('Jiménez') = text.phonetic('Gimenes'), text.normalize('  Ana  García '), \
+         text.similarity('ANA GARCIA', 'Ana García', 'exact'), text.lcs('abcbdab', 'bdcaba'), \
+         text.levenshtein(null, 'x'), size(text.ngrams('ana'))",
+    );
+    assert_eq!(
+        row,
+        serde_json::json!([3, 1, 0.961, "R163", true, "ana garcia", 1.0, 4, null, 4])
+    );
+    let row = rows(
+        "RETURN apoc.text.levenshteinDistance('a', 'b'), text.similarity('1990-03-12', '1990-12-03', 'date'), \
+         text.dice('ana garcia', 'ana garcia')",
+    );
+    assert_eq!(row, serde_json::json!([1, 0.8, 1.0]));
+    let error = grafeno_query::execute(
+        &db,
+        "t",
+        "RETURN text.similarity('a', 'b', 'nope')",
+        &grafeno_query::Params::new(),
+    )
+    .unwrap_err();
+    assert!(error.message.contains("knows exact"), "{}", error.message);
+}

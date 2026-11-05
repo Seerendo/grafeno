@@ -123,6 +123,12 @@ measured speed, memory and limits, with charts, in
   go through a bulk lane, so an agent writing during a large import waits
   88 ms at p99 instead of the whole import; `GET /v1/metrics` for
   Prometheus. Phase 10 (hardening) is complete.
+- **Phase 11.0, entity resolution:** text similarity in GQ (Levenshtein,
+  Damerau, Jaro-Winkler, n-grams, Soundex and a Spanish phonetic key),
+  fuzzy trigram indexes (`CREATE FUZZY INDEX`, about 23 times faster than
+  comparing with every node), and match rules per label with strong
+  keys, weighted fields, neighbors as evidence and explained decisions
+  (`db.match`, `POST /v1/{ns}/match`, the `find_matches` MCP tool).
 
 ## Installing
 

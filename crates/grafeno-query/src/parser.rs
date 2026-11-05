@@ -213,10 +213,19 @@ impl Parser<'_> {
                 if_exists,
             }));
         }
-        let Some(unique) = self.at_keyword("CREATE").then(|| what(self, 1)).flatten() else {
-            return Ok(None);
+        // CREATE FUZZY INDEX … ON (n.key)
+        let fuzzy =
+            self.at_keyword("CREATE") && self.keyword_at(1, "FUZZY") && self.keyword_at(2, "INDEX");
+        let unique = if fuzzy {
+            self.position += 3;
+            false
+        } else {
+            let Some(unique) = self.at_keyword("CREATE").then(|| what(self, 1)).flatten() else {
+                return Ok(None);
+            };
+            self.position += 2;
+            unique
         };
-        self.position += 2;
         let mut name = None;
         if matches!(self.peek(), Token::Ident(_))
             && !self.at_keyword("IF")
@@ -242,6 +251,7 @@ impl Parser<'_> {
                 label,
                 key,
                 unique,
+                fuzzy,
                 if_not_exists,
             }));
         }
@@ -285,6 +295,7 @@ impl Parser<'_> {
             label,
             key,
             unique,
+            fuzzy,
             if_not_exists,
         }))
     }

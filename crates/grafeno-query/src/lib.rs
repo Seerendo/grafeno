@@ -49,6 +49,7 @@ mod parser;
 mod plan;
 mod procedures;
 mod temporal;
+mod textfns;
 mod value;
 
 use std::fmt;

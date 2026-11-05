@@ -78,6 +78,7 @@ fn handshake_and_tool_list() {
             "query",
             "merge",
             "undo_merge",
+            "find_matches",
             "maintain",
             "consolidate"
         ]

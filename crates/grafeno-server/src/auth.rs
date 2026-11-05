@@ -194,8 +194,12 @@ pub fn need(method: &str, path: &str) -> Need {
                     | ["context"]
                     | ["query"]
                     | ["algo", ..]
+                    | ["match"]
             );
-            let role = if rest == ["rebuild"] || rest == ["compact"] {
+            let role = if rest == ["rebuild"]
+                || rest == ["compact"]
+                || (rest.first() == Some(&"match-rules") && method != "GET")
+            {
                 Role::Admin
             } else if method == "GET" || (method == "POST" && reads) {
                 Role::Read
@@ -220,6 +224,12 @@ mod tests {
         assert_eq!(need("POST", "/vault/search/text"), ns("vault", Role::Read));
         assert_eq!(need("POST", "/vault/query"), ns("vault", Role::Read));
         assert_eq!(need("POST", "/vault/merge"), ns("vault", Role::Write));
+        assert_eq!(need("POST", "/vault/match"), ns("vault", Role::Read));
+        assert_eq!(need("GET", "/vault/match-rules"), ns("vault", Role::Read));
+        assert_eq!(
+            need("PUT", "/vault/match-rules/Person"),
+            ns("vault", Role::Admin)
+        );
         assert_eq!(need("POST", "/vault/rebuild"), ns("vault", Role::Admin));
         assert_eq!(need("DELETE", "/vault/edges/x"), ns("vault", Role::Write));
         assert_eq!(

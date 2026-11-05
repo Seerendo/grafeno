@@ -25,6 +25,8 @@ pub(crate) enum Schema {
         label: String,
         key: String,
         unique: bool,
+        /// `CREATE FUZZY INDEX`: trigrams for `db.searchFuzzy`.
+        fuzzy: bool,
         if_not_exists: bool,
     },
     /// `DROP INDEX` / `DROP CONSTRAINT`.

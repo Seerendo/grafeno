@@ -376,6 +376,47 @@ transaction (all or nothing) still holds the writer for its whole length,
 in either lane: that is what all or nothing means; `?bulk=true` is the
 way for large loads.
 
+## Entity resolution (`crates/grafeno/examples/resolve_bench.rs`)
+
+100 000 synthetic people (first names and one or two last names from
+lists of Spanish and English names, so many people share a name; a birth
+date; a city), in memory, release build, 2026-11-05. A fuzzy index on the
+name holds 17 trigram entries per person and takes 4.9 s to build.
+
+| Finding a damaged name, top 10 | p50 | p99 |
+| --- | --- | --- |
+| fuzzy index | 20 ms | 39 ms |
+| comparing with every node (Dice) | 469 ms | 542 ms |
+| `find_matches` with a rule of four fields | 51 ms | 91 ms |
+
+The true name was in the fuzzy top 10 for 280 of 300 damaged names (the
+misses are initials and heavy damage to short names).
+
+The rule: name by Dice over trigrams (weight 2) and by shared words
+(0.5), birth date within 30 days (2; day and month swapped scores 0.8),
+city exact (0.5); `same` from 0.85, `review` from 0.7. 2 000 duplicates
+(one person's record with one kind of damage, and no city a quarter of
+the time) and 2 000 namesakes (an existing name with another person's
+birth date and city):
+
+| Record | Records | same | review | different |
+| --- | --- | --- | --- | --- |
+| day and month swapped | 349 | 349 | 0 | 0 |
+| no accents, upper case | 339 | 339 | 0 | 0 |
+| word order | 318 | 318 | 0 | 0 |
+| typo | 338 | 244 | 93 | 1 |
+| two letters swapped | 329 | 218 | 108 | 3 |
+| initial for the first name | 327 | 152 | 82 | 93 |
+| **all duplicates** | 2 000 | 1 620 | 283 | 97 |
+| namesakes (should not be same) | 2 000 | 9 | 59 | 1 932 |
+
+Precision of `same`: 0.994 (1 620 of 1 629); recall at `same` 0.81, at
+`review` or better 0.95. The same rule with a 365-day date tolerance
+called 115 namesakes `same` (precision 0.932): tolerances decide how many
+namesakes pass, and each decision lists its fields so they can be tuned.
+Initials are the hard case for trigram measures; a field compared with
+Jaro-Winkler, or an `initials` alias, would catch more of them.
+
 ## Remaining limits
 
 - **Vector search reads each visited vector from redb** (about 0.4 µs per

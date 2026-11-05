@@ -66,7 +66,7 @@ fn index_commands() {
     let created = rows(&db, "CREATE INDEX FOR (p:Person) ON (p.age)");
     assert_eq!(
         created,
-        json!([["Person_age", "Person", "age", false, 2000]])
+        json!([["Person_age", "Person", "age", false, 2000, false]])
     );
     run(
         &db,
@@ -84,10 +84,10 @@ fn index_commands() {
     assert_eq!(
         rows(&db, "SHOW INDEXES"),
         json!([
-            ["Company_name", "Company", "name", false, 5],
-            ["Person_age", "Person", "age", false, 2000],
-            ["Person_email_unique", "Person", "email", true, 2000],
-            ["names", "Person", "name", false, 2000]
+            ["Company_name", "Company", "name", false, 5, false],
+            ["Person_age", "Person", "age", false, 2000, false],
+            ["Person_email_unique", "Person", "email", true, 2000, false],
+            ["names", "Person", "name", false, 2000, false]
         ])
     );
     assert_eq!(rows(&db, "SHOW CONSTRAINTS").as_array().unwrap().len(), 1);
@@ -321,5 +321,53 @@ fn limits_stop_runaway_queries() {
             Limits::standard()
         )
         .is_ok()
+    );
+}
+
+#[test]
+fn fuzzy_indexes_in_gq() {
+    let db = grafeno::Grafeno::in_memory().unwrap();
+    let run = |q: &str| {
+        grafeno_query::execute(&db, "f", q, &grafeno_query::Params::new())
+            .unwrap_or_else(|e| panic!("{q}: {}", e.message))
+            .to_json()
+    };
+    run(
+        "UNWIND ['John Smith', 'Jane Smith', 'María García', 'Pedro López'] AS n CREATE (:Person {name: n})",
+    );
+    let created = run("CREATE FUZZY INDEX FOR (p:Person) ON (p.name)");
+    assert_eq!(created["rows"][0][0], "Person_name_fuzzy");
+    assert_eq!(created["rows"][0][5], true, "{created}");
+    let found = run(
+        "CALL db.searchFuzzy('Person', 'name', 'jonh smith', 2) YIELD node, score RETURN node.name, score > 0.5",
+    );
+    assert_eq!(found["rows"][0], serde_json::json!(["John Smith", true]));
+    let found = run(
+        "CALL db.searchFuzzy('Person', 'name', 'maria garsia', 1, 'jaro_winkler') YIELD node RETURN node.name",
+    );
+    assert_eq!(found["rows"][0][0], "María García");
+    // An equality still finds the exact value: the planner does not use
+    // the fuzzy index for it.
+    let exact = run("MATCH (p:Person {name: 'Jane Smith'}) RETURN count(p)");
+    assert_eq!(exact["rows"][0][0], 1);
+    let plan = run("EXPLAIN MATCH (p:Person {name: 'Jane Smith'}) RETURN p");
+    assert!(
+        !plan["rows"][0][2].as_str().unwrap().contains("fuzzy"),
+        "{plan}"
+    );
+    let shown = run("SHOW INDEXES");
+    assert_eq!(shown["columns"][5], "fuzzy");
+    run("DROP INDEX Person_name_fuzzy");
+    let error = grafeno_query::execute(
+        &db,
+        "f",
+        "CALL db.searchFuzzy('Person', 'name', 'x') YIELD node RETURN node",
+        &grafeno_query::Params::new(),
+    )
+    .unwrap_err();
+    assert!(
+        error.message.contains("CREATE FUZZY INDEX"),
+        "{}",
+        error.message
     );
 }

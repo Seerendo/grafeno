@@ -62,6 +62,7 @@ fn identity_and_contradictions_are_checked_before_merging() {
                 label: "Person".into(),
                 key: "passport".into(),
                 unique: true,
+                fuzzy: false,
             },
         )
         .map(|_| ())

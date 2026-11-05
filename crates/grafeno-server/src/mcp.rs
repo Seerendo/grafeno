@@ -237,6 +237,7 @@ impl McpServer {
             "merge" => self.merge(arguments),
             "undo_merge" => self.undo_merge(arguments),
             "maintain" => self.maintain(arguments),
+            "find_matches" => self.find_matches(arguments),
             "consolidate" => self.consolidate(arguments),
             _ => return Err((-32602, format!("unknown tool: {name}"))),
         };
@@ -778,6 +779,55 @@ impl McpServer {
         })))
     }
 
+    fn find_matches(&self, arguments: Value) -> ToolResult {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            label: String,
+            props: grafeno::Props,
+            #[serde(default)]
+            limit: Option<usize>,
+            #[serde(default)]
+            namespace: Option<String>,
+        }
+        let args: Args = parse_args(arguments)?;
+        let ns = self.ns(&args.namespace);
+        let probe = grafeno::Probe {
+            label: args.label,
+            props: args.props,
+            neighbors: Vec::new(),
+        };
+        let read = self.db.begin_read().map_err(describe)?;
+        let found = read
+            .find_matches(ns, &probe, None, args.limit.unwrap_or(5).min(50), None)
+            .map_err(describe)?;
+        let rows: Vec<Value> = found
+            .iter()
+            .map(|m| {
+                let name = read
+                    .node(ns, m.node)
+                    .ok()
+                    .flatten()
+                    .map(|node| node.display_name());
+                json!({
+                    "id": m.node,
+                    "name": name,
+                    "score": (m.score * 1000.0).round() / 1000.0,
+                    "decision": m.decision,
+                    "decided_by": m.decided_by,
+                    "fields": m.fields.iter().map(|f| json!({
+                        "key": f.key,
+                        "similarity": (f.similarity * 1000.0).round() / 1000.0,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        Ok(ToolOutput::Json(json!({
+            "matches": rows,
+            "hint": "same: link to or merge with that node; review: check the fields before deciding; different: a new entity.",
+        })))
+    }
+
     fn maintain(&self, arguments: Value) -> ToolResult {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -1224,6 +1274,21 @@ fn tools() -> Value {
                     "namespace": namespace
                 },
                 "required": ["merge_id"]
+            }
+        },
+        {
+            "name": "find_matches",
+            "title": "Find matches",
+            "description": "Before creating an entity, find the nodes that may already be it, by the label's match rule                 (strong keys, fields compared by similarity, thresholds): each with a score, a decision                 (same, review, different) and every field's similarity.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "label": { "type": "string", "description": "The label whose match rule applies (Person, Company, …)." },
+                    "props": { "type": "object", "description": "What is known of the entity: name, email, birth date, …" },
+                    "limit": { "type": "integer", "description": "Candidates to return (5 by default)." },
+                    "namespace": namespace
+                },
+                "required": ["label", "props"]
             }
         },
         {

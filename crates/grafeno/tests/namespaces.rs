@@ -73,6 +73,7 @@ fn dropping_removes_everything_and_nothing_else() {
                     label: "Person".into(),
                     key: "name".into(),
                     unique: false,
+                    fuzzy: false,
                 },
             )?;
             Ok(())

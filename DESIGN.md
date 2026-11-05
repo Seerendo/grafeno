@@ -88,14 +88,17 @@ short-lived agents.
 | `namespaces`   | `ns`                          | creation time, description (JSON) |
 | `principals`   | key name                      | secret hash, grants, owner, `own_only` (JSON) |
 | `merges`       | `(ns, merge_id)`              | merge record: who, when, both nodes before, edges moved and dropped |
+| `match_rules`  | `(ns, label)`                 | match rule: strong keys, fields with measures and weights, thresholds (JSON) |
 
-- The layout has a version (`SCHEMA_VERSION`, now 8) in `meta`. Opening an
+- The layout has a version (`SCHEMA_VERSION`, now 9) in `meta`. Opening an
   older file upgrades it in one transaction: version 1 gets its counters
   computed, version 2 gets the new adjacency and posting tables (built from
   the records) and loses the old ones, version 3 gets the names index,
   version 4 the (empty) property index tables, version 5 the namespace
-  registry (every namespace with data), version 6 the (empty) principals
-  and version 7 the (empty) merge records. A newer layout is refused.
+  registry (every namespace with data), version 6 the (empty) principals,
+  version 7 the (empty) merge records, and version 8 the (empty) match
+  rules and the possibility of fuzzy indexes (whose trigram entries an
+  older Grafeno would read as values). A newer layout is refused.
 - Adjacency entries hold the edge's record time and valid time
   (`recorded_at`, `expired_at`, `valid_from`, `valid_to`), so traversals
   filter without reading edge records. Postings hold the length of their
@@ -1016,7 +1019,7 @@ writer's options are `[writer]` in `grafeno.toml`.
 
 #### Phase 11: memory that keeps itself
 
-**11.0 Entity resolution and text similarity.** Deciding that two records
+**11.0 Entity resolution and text similarity** (done). Deciding that two records
 are the same thing (record linkage), for any kind of entity: the base of
 11.1's reconciliation, and useful on its own (contacts from several
 systems, products from several suppliers, companies, addresses, authors,
@@ -1040,6 +1043,56 @@ assets).
   address, an employer, contacts) are likelier the same.
 - Merges keep the rules and the undo of 10.5. No language model, CPU
   only; an agent may add its own judgment through the API.
+
+As built:
+
+- `grafeno::textsim` holds the measures: Levenshtein, Damerau-Levenshtein
+  (optimal string alignment, with a bounded version that stops early),
+  edit similarity, Jaro and Jaro-Winkler (checked against the published
+  examples), n-grams with word padding, Jaccard and Dice over them, shared
+  words, the longest common subsequence, American Soundex, a Spanish
+  phonetic key, and date and number similarities with tolerances. A
+  `Measure` names one with its settings and compares normalized text. GQ
+  exposes them as `text.*` functions (and APOC's names for the common ones).
+- A fuzzy index is an `IndexDef` with `fuzzy: true` whose entries, in the
+  same table as the others, are the trigrams of the normalized text (of
+  each string of a list), tagged apart from values. Creating, dropping,
+  checking, rebuilding, exporting and backing up it needs nothing of its
+  own; the planner never uses it for equality or ranges. A search reads
+  the entries of each trigram of the query (skipping trigrams shared by
+  more than 20 000 nodes), takes the nodes sharing the most, and scores
+  them with a measure against their value. `CREATE FUZZY INDEX`,
+  `db.searchFuzzy`, `GET /v1/{ns}/fuzzy`. Layout version 9 marks files that
+  may hold one.
+- A `MatchRule` per label (table `match_rules`): strong keys decide (equal
+  values trimmed and lowercased: same; different: different); otherwise
+  the score is the weighted mean of the fields present on both sides
+  (the best pair for lists such as aliases), plus shared neighbors
+  (Jaccard of the neighbor sets) as one more field when both sides have
+  neighbors (no links known says nothing). `same` and `review` cut the
+  score into three decisions, and every `Match` carries its fields:
+  measure, both values, similarity and weight. `find_matches` takes its
+  candidates from the indexes on the rule's keys (exact and fuzzy), or
+  scans the first 20 000 nodes of the label when there are none;
+  `match_pairs` matches every node of a label against the others for
+  deduplication, leaving out pairs marked `distinct_from`. Exposed as
+  `db.match`, `POST /v1/{ns}/match`, `GET /v1/{ns}/matches`, the rules at
+  `/v1/{ns}/match-rules` (admin to change), the `find_matches` MCP tool and
+  the TypeScript client. `find_duplicates` (10.5) uses the same edit
+  distance.
+- Measured (`examples/resolve_bench.rs`, numbers in `docs/benchmarks.md`):
+  among 100 000 synthetic people, a fuzzy search for a damaged name takes
+  20 ms (p50) against 469 ms comparing with every node, and finds the
+  true name in the top 10 for 93% of the damaged names. A rule on name
+  (Dice and shared words), birth date and city finds 95% of 2 000 damaged
+  duplicates as `same` or `review` (81% as `same`), with a precision of
+  0.994 for `same`; 9 of 2 000 namesakes were called `same`. With a
+  365-day date tolerance instead of 30, 115 namesakes were: a rule is only
+  as good as its tolerances, which is why every decision explains itself.
+- Not yet: rules travel with exports (they are kept in backups);
+  candidate generation by MinHash/LSH for very common names; phonetic
+  keys for other languages; a learned weighting (Fellegi-Sunter m and u
+  probabilities from labeled pairs).
 
 **11.1 Incremental extraction and reconciliation of entities.**
 
@@ -1193,6 +1246,8 @@ spinning disk, on ARM, or for days at a time.
 | Integrity check of 10 M edges | 249 s, 443 MiB peak (killed at 2 GiB before 10.6) | E2 | `check_cost.csv` |
 | Projection memory | about 12 bytes per edge, 28 with edge ids | E2 | `projection_size.csv` |
 | Hostile GQ queries | 32 of 32 end within their limits, none crashes | E1-mem | `hostile_queries.csv` |
+| Fuzzy search for a damaged name among 100 000 people | 20 ms p50 (469 ms comparing with every node) | E1-mem | `resolve_speed.csv` |
+| Entity resolution by a match rule (2 000 damaged duplicates, 2 000 namesakes) | 95% found as same or review, precision of `same` 0.994 | E1-mem | `resolve_quality.csv` |
 
 ### Guarantees and the tests that hold them
 
@@ -1210,6 +1265,7 @@ real binary. The ones that carry each guarantee:
 | Readers see whole transactions | `grafeno/tests/concurrency.rs` | readers during commits never see part of one, and snapshots never go back |
 | Group commit is correct | `grafeno/tests/writer.rs` | concurrent writes all commit; a failing write leaves the others; a full queue answers busy; imports through the bulk lane let interactive writes in; metrics count what happened |
 | Vector search keeps its quality | `grafeno/tests/vector_churn.rs` | deletes, reinserts, three rounds of churn and a compaction keep recall@10 at 0.95 or more, and reinserted vectors are found |
+| Records are matched by rule, with reasons | `grafeno/tests/resolve.rs`, `property_index.rs` (fuzzy), `src/textsim.rs` tests | measures against published values; strong keys decide either way; typos, swapped dates and namesakes; neighbors as evidence (and no links as no evidence); scans without indexes; pairs for deduplication; fuzzy indexes through updates, check and export |
 | Merges are right and reversible | `grafeno/tests/merges.rs`, `grafeno-memory/tests/maintenance.rs` | strong keys, labels, conflicting facts and functional edges; namesakes, typos, nicknames, translations; a merge undone exactly (indexes, counters and the check agree) |
 | Isolation between principals | `grafeno-server/tests/access.rs` | a matrix of keys, grants and endpoints: no read or write outside a key's grants, `own_only` keys change only their own records |
 | GQ follows Cypher | `grafeno-query/tests/cypher.rs`, `queries.rs`, `statistics.rs`, `indexes.rs`, `algorithms.rs` | clauses, functions, aggregates, indexes, planner choices and algorithms on known graphs |
@@ -1228,6 +1284,7 @@ cargo run --release -p grafeno --example bulk_load -- 200000
 cargo run --release -p grafeno --example algo_bench
 cargo run --release -p grafeno --example saturation -- 3
 cargo run --release -p grafeno-query --example index_bench
+cargo run --release -p grafeno --example resolve_bench -- 100000
 cargo test --release -p grafeno-query --test adversarial -- --nocapture
 ```
 

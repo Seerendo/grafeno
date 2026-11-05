@@ -1223,3 +1223,88 @@ async fn metrics_count_requests_writes_and_limits() {
         assert!(text.contains(line), "missing {line:?} in:\n{text}");
     }
 }
+
+#[tokio::test]
+async fn entity_resolution_endpoints() {
+    let app = app(None);
+    let ops = json!({ "ops": [
+        { "op": "create_node", "ref": "$john", "node": { "labels": ["Person"], "props": { "name": "John Smith", "born_on": "1980-03-12" } } },
+        { "op": "create_node", "node": { "labels": ["Person"], "props": { "name": "Jane Smith", "born_on": "1982-07-01" } } },
+        { "op": "create_node", "node": { "labels": ["Person"], "props": { "name": "Pedro López", "born_on": "1990-01-05" } } }
+    ]});
+    let (_, made) = call(&app, "POST", "/v1/er/batch", Some(ops)).await;
+    let john = made["refs"]["$john"].clone();
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/er/query",
+        Some(json!({ "query": "CREATE FUZZY INDEX FOR (p:Person) ON (p.name)" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, hits) = call(
+        &app,
+        "GET",
+        "/v1/er/fuzzy?label=Person&key=name&q=jonh%20smith&limit=2",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{hits}");
+    assert_eq!(hits[0]["node"], john);
+
+    let rule = json!({
+        "strong_keys": ["email"],
+        "fields": [
+            { "key": "name", "measure": "jaro_winkler", "weight": 2 },
+            { "key": "born_on", "measure": "date", "days": 365 }
+        ],
+        "same": 0.9,
+        "review": 0.75
+    });
+    let (status, stored) = call(&app, "PUT", "/v1/er/match-rules/Person", Some(rule)).await;
+    assert_eq!(status, StatusCode::OK, "{stored}");
+    assert_eq!(stored["label"], "Person");
+    let (_, rules) = call(&app, "GET", "/v1/er/match-rules", None).await;
+    assert_eq!(rules.as_array().unwrap().len(), 1);
+
+    let (status, found) = call(
+        &app,
+        "POST",
+        "/v1/er/match",
+        Some(
+            json!({ "label": "Person", "props": { "name": "Jon Smyth", "born_on": "1980-03-12" } }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(found[0]["node"], john);
+    assert_eq!(found[0]["decision"], "same");
+    assert_eq!(found[0]["fields"][0]["measure"], "jaro_winkler");
+
+    let (status, query) = call(
+        &app,
+        "POST",
+        "/v1/er/query",
+        Some(json!({ "query": "CALL db.match('Person', {name: 'Jon Smyth', born_on: '1980-03-12'}, 1) YIELD node, decision RETURN node.name, decision" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{query}");
+    assert_eq!(query["rows"][0], json!(["John Smith", "same"]));
+
+    let (status, pairs) = call(&app, "GET", "/v1/er/matches?label=Person", None).await;
+    assert_eq!(status, StatusCode::OK, "{pairs}");
+    assert!(
+        pairs.as_array().unwrap().is_empty(),
+        "no duplicates yet: {pairs}"
+    );
+    let (status, _) = call(&app, "DELETE", "/v1/er/match-rules/Person", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/er/match",
+        Some(json!({ "label": "Person", "props": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

@@ -42,8 +42,20 @@ pub(crate) const PROCEDURES: &[Procedure] = &[
     Procedure {
         name: "db.indexes",
         args: "",
-        columns: &["name", "label", "property", "unique", "entries"],
-        description: "Property indexes and unique constraints (also SHOW INDEXES).",
+        columns: &["name", "label", "property", "unique", "entries", "fuzzy"],
+        description: "Property indexes, fuzzy indexes and unique constraints (also SHOW INDEXES); a fuzzy index counts trigram entries.",
+    },
+    Procedure {
+        name: "db.match",
+        args: "label, properties, limit = 10",
+        columns: &["node", "score", "decision", "fields"],
+        description: "Nodes that may be the record described by the properties, by the label's match rule: score, decision (same, review, different) and each field's similarity.",
+    },
+    Procedure {
+        name: "db.searchFuzzy",
+        args: "label, property, text, limit = 10, measure = 'dice'",
+        columns: &["node", "score"],
+        description: "Nodes whose property looks like the text (typos, word order), through the fuzzy index on it; measure: dice, jaro_winkler, edit, tokens, …",
     },
     Procedure {
         name: "db.stats",
@@ -200,6 +212,77 @@ pub(crate) fn call(
                         Value::Node(Arc::new(node)),
                         Value::Float(f64::from(hit.score)),
                     ]);
+                }
+            }
+            rows
+        }
+        "db.match" => {
+            let (Some(Value::Str(label)), Some(Value::Map(props))) = (args.first(), args.get(1))
+            else {
+                return Err(QueryError::runtime(
+                    "db.match(label, properties, limit) needs a label and a map of properties",
+                ));
+            };
+            let probe = grafeno::Probe {
+                label: label.clone(),
+                props: props
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.to_json()))
+                    .collect(),
+                neighbors: Vec::new(),
+            };
+            let limit = limit_arg(args, 2)?;
+            let mut rows = Vec::new();
+            for found in read.find_matches(ns, &probe, None, limit, None)? {
+                let Some(node) = ctx.node(found.node)? else {
+                    continue;
+                };
+                let decision = serde_json::to_value(found.decision)
+                    .map_err(|e| QueryError::runtime(e.to_string()))?;
+                let fields = serde_json::to_value(&found.fields)
+                    .map_err(|e| QueryError::runtime(e.to_string()))?;
+                rows.push(vec![
+                    Value::Node(Arc::new(node)),
+                    Value::Float(found.score),
+                    Value::from_json(&decision),
+                    Value::from_json(&fields),
+                ]);
+            }
+            rows
+        }
+        "db.searchFuzzy" => {
+            let text_at = |at: usize, what: &str| -> Result<String, QueryError> {
+                match args.get(at) {
+                    Some(Value::Str(s)) => Ok(s.clone()),
+                    _ => Err(QueryError::runtime(format!(
+                        "db.searchFuzzy(label, property, text, limit, measure) needs {what}"
+                    ))),
+                }
+            };
+            let (label, key, text) = (
+                text_at(0, "a label")?,
+                text_at(1, "a property")?,
+                text_at(2, "the text to look for")?,
+            );
+            let limit = limit_arg(args, 3)?;
+            let measure = match args.get(4) {
+                None | Some(Value::Null) => grafeno::textsim::Measure::Dice { n: 3 },
+                Some(Value::Str(name)) => {
+                    grafeno::textsim::Measure::by_name(name).ok_or_else(|| {
+                        QueryError::runtime(format!("db.searchFuzzy(): unknown measure {name:?}"))
+                    })?
+                }
+                Some(other) => {
+                    return Err(QueryError::runtime(format!(
+                        "db.searchFuzzy(): the measure is a name, not a {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            let mut rows = Vec::new();
+            for hit in read.fuzzy_search(ns, &label, &key, &text, measure, limit)? {
+                if let Some(node) = ctx.node(hit.node)? {
+                    rows.push(vec![Value::Node(Arc::new(node)), Value::Float(hit.score)]);
                 }
             }
             rows

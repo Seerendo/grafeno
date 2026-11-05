@@ -204,6 +204,14 @@ test("memory: names, importance, duplicates, merge and summaries", async () => {
     { op: "create_node", ref: "$y", node: { labels: ["Person"], props: { name: "Eva", email: "eva@b.com" } } },
   ]);
   assert.equal((await memory.mergeConflicts(two.refs.$x, two.refs.$y))[0].key, "email");
+  await memory.query("CREATE FUZZY INDEX FOR (p:Person) ON (p.name)");
+  assert.equal((await memory.fuzzy("Person", "name", "ana garsia"))[0].node, refs.$ana);
+  await memory.setMatchRule({ label: "Person", strong_keys: ["email"], fields: [{ key: "name", measure: "jaro_winkler" }] });
+  assert.equal((await memory.matchRules()).length, 1);
+  const [best] = await memory.match("Person", { name: "Ana Garsia" });
+  assert.equal(best.node, refs.$ana);
+  assert.notEqual(best.decision, "different");
+  await memory.deleteMatchRule("Person");
   await assert.rejects(memory.merge(two.refs.$x, two.refs.$y), (error: GrafenoError) => {
     assert.equal(error.status, 409);
     assert.equal((error.details.conflicts as Conflict[])[0].kind, "strong_key");

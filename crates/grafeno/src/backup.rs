@@ -14,6 +14,7 @@ use crate::db::ReadTx;
 use crate::index::{INDEX_ENTRIES, INDEXES};
 use crate::merge::MERGES;
 use crate::namespace::NAMESPACES;
+use crate::resolve::MATCH_RULES;
 use crate::store::{
     ADJ_IN, ADJ_OUT, EDGE_LABEL_COUNTS, EDGES, HNSW_LINKS, LABEL_COUNTS, MEMORY, META, NAMES,
     NODE_LABELS, NODES, NS_COUNTS, POSTINGS, TEXT_LENGTHS, TEXT_STATS, TEXTS, VECTOR_META, VECTORS,
@@ -85,6 +86,7 @@ impl ReadTx {
                 NAMESPACES.name(),
                 PRINCIPALS.name(),
                 MERGES.name(),
+                MATCH_RULES.name(),
             ];
             for table in from.list_tables().map_err(storage)? {
                 if !known.contains(&table.name()) {
@@ -118,6 +120,7 @@ impl ReadTx {
             entries += copy(from, &tx, NAMESPACES)?;
             entries += copy(from, &tx, PRINCIPALS)?;
             entries += copy(from, &tx, MERGES)?;
+            entries += copy(from, &tx, MATCH_RULES)?;
             tx.commit().map_err(storage)?;
             drop(db);
             Ok(entries)
@@ -134,7 +137,7 @@ impl ReadTx {
         })?;
         let bytes = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
         Ok(BackupStats {
-            tables: 23,
+            tables: 24,
             entries,
             bytes,
         })

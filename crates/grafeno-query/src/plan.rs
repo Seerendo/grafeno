@@ -170,7 +170,7 @@ fn source_for<'q>(
     for def in info
         .indexes
         .iter()
-        .filter(|def| node.labels.contains(&def.label))
+        .filter(|def| !def.fuzzy && node.labels.contains(&def.label))
     {
         if let Some(seek) = seek_for(node, &def.key, is_bound, conditions) {
             consider(Source::Index {

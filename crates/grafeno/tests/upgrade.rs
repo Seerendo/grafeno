@@ -106,7 +106,7 @@ fn verify(db: &Grafeno, version: u64) {
 
 #[test]
 fn every_past_layout_upgrades() {
-    for version in 1..=7 {
+    for version in 1..=8 {
         let path = fixture(version);
         {
             let db = Grafeno::open(&path).unwrap_or_else(|e| panic!("v{version}: {e}"));

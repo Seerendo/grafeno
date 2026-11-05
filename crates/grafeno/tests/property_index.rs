@@ -14,6 +14,7 @@ fn def(label: &str, key: &str, unique: bool) -> IndexDef {
         label: label.into(),
         key: key.into(),
         unique,
+        fuzzy: false,
     }
 }
 
@@ -214,4 +215,109 @@ fn indexes_survive_rebuild_and_export() {
         2
     );
     assert!(copy.begin_read().unwrap().check(NS).unwrap().is_ok());
+}
+
+#[test]
+fn fuzzy_indexes_find_what_looks_alike() {
+    use grafeno::textsim::Measure;
+    let db = Grafeno::in_memory().unwrap();
+    let ids = db
+        .write(|tx| {
+            let mut ids = Vec::new();
+            for name in [
+                "John Smith",
+                "Jane Smith",
+                "Jonathan Smithers",
+                "María José García",
+                "Pedro López",
+            ] {
+                ids.push(tx.create_node(NS, NewNode::new("Person").prop("name", name))?);
+            }
+            ids.push(
+                tx.create_node(
+                    NS,
+                    NewNode::new("Person")
+                        .prop("name", "Robert Brown")
+                        .prop("aliases", vec!["Bobby Brown"]),
+                )?,
+            );
+            // Another label is not in the index.
+            tx.create_node(NS, NewNode::new("Company").prop("name", "John Smith Ltd"))?;
+            Ok(ids)
+        })
+        .unwrap();
+    let entries = db
+        .write(|tx| tx.create_index(NS, IndexDef::fuzzy("Person", "name")))
+        .unwrap();
+    assert!(entries > 20, "trigram entries: {entries}");
+    db.write(|tx| tx.create_index(NS, IndexDef::fuzzy("Person", "aliases")))
+        .unwrap();
+    let read = db.begin_read().unwrap();
+    let search = |key: &str, text: &str| {
+        read.fuzzy_search(NS, "Person", key, text, Measure::Dice { n: 3 }, 3)
+            .unwrap()
+    };
+    // A typo, accents, case, word order.
+    assert_eq!(search("name", "jonh smith")[0].node, ids[0]);
+    assert_eq!(search("name", "MARIA JOSE GARCIA")[0].node, ids[3]);
+    assert_eq!(search("name", "garcia maria jose")[0].node, ids[3]);
+    assert!(search("name", "jonh smith")[0].score > 0.5);
+    assert_eq!(search("aliases", "bobby brwn")[0].node, ids[5]);
+    assert!(search("name", "zzzz").is_empty());
+    let winkler = read
+        .fuzzy_search(NS, "Person", "name", "jon smith", Measure::JaroWinkler, 2)
+        .unwrap();
+    assert_eq!(winkler[0].node, ids[0]);
+    assert!(
+        read.fuzzy_search(NS, "Person", "age", "x", Measure::Exact, 1)
+            .is_err(),
+        "no fuzzy index there"
+    );
+    assert!(read.check(NS).unwrap().is_ok());
+    drop(read);
+
+    // Entries follow the node.
+    db.write(|tx| {
+        let mut props = grafeno::Props::new();
+        props.insert("name".into(), serde_json::json!("Pedro Lopes"));
+        tx.set_node_props(NS, ids[4], props)
+    })
+    .unwrap();
+    let read = db.begin_read().unwrap();
+    let hits = read
+        .fuzzy_search(NS, "Person", "name", "pedro lopes", Measure::Exact, 1)
+        .unwrap();
+    assert_eq!((hits[0].node, hits[0].score), (ids[4], 1.0));
+    assert!(read.check(NS).unwrap().is_ok());
+    let mut dump = Vec::new();
+    read.export(&[], &mut dump).unwrap();
+    drop(read);
+    let copy = Grafeno::in_memory().unwrap();
+    copy.import(dump.as_slice()).unwrap();
+    let read = copy.begin_read().unwrap();
+    assert!(read.index_defs(NS).unwrap().iter().any(|def| def.fuzzy));
+    assert_eq!(
+        read.fuzzy_search(
+            NS,
+            "Person",
+            "name",
+            "jonh smith",
+            Measure::Dice { n: 3 },
+            1
+        )
+        .unwrap()[0]
+            .node,
+        ids[0]
+    );
+    assert!(read.check(NS).unwrap().is_ok());
+    drop(read);
+
+    // Never unique; an exact index can sit beside it.
+    let unique = IndexDef {
+        unique: true,
+        ..IndexDef::fuzzy("Person", "name")
+    };
+    assert!(db.write(|tx| tx.create_index(NS, unique)).is_err());
+    db.write(|tx| tx.create_index(NS, IndexDef::new("Person", "name")))
+        .unwrap();
 }

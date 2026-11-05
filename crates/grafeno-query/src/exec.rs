@@ -211,7 +211,7 @@ fn plan_info(read: &ReadTx, ns: &str) -> Result<PlanInfo, QueryError> {
     })
 }
 
-const INDEX_COLUMNS: [&str; 5] = ["name", "label", "property", "unique", "entries"];
+const INDEX_COLUMNS: [&str; 6] = ["name", "label", "property", "unique", "entries", "fuzzy"];
 
 fn index_row(def: &IndexDef, entries: u64) -> Vec<Value> {
     vec![
@@ -220,6 +220,7 @@ fn index_row(def: &IndexDef, entries: u64) -> Vec<Value> {
         Value::Str(def.key.clone()),
         Value::Bool(def.unique),
         Value::Int(entries as i64),
+        Value::Bool(def.fuzzy),
     ]
 }
 
@@ -277,23 +278,30 @@ fn run_schema(
             label,
             key,
             unique,
+            fuzzy,
             if_not_exists,
         } => {
             let tx = tx.expect("schema writes run with a write transaction");
             let def = IndexDef {
-                name: name
-                    .clone()
-                    .unwrap_or_else(|| IndexDef::default_name(label, key, *unique)),
+                name: name.clone().unwrap_or_else(|| {
+                    if *fuzzy {
+                        IndexDef::default_fuzzy_name(label, key)
+                    } else {
+                        IndexDef::default_name(label, key, *unique)
+                    }
+                }),
                 label: label.clone(),
                 key: key.clone(),
                 unique: *unique,
+                fuzzy: *fuzzy,
             };
             if *if_not_exists
                 && let Some(existing) = tx.index_defs(ns)?.into_iter().find(|other| {
                     other.name == def.name
                         || (other.label == def.label
                             && other.key == def.key
-                            && other.unique == def.unique)
+                            && other.unique == def.unique
+                            && other.fuzzy == def.fuzzy)
                 })
             {
                 return Ok(table(vec![index_row(&existing, 0)]));
@@ -1996,11 +2004,17 @@ fn explain(statement: &Statement, info: &PlanInfo) -> Result<QueryResult, QueryE
     if let Some(schema) = &statement.schema {
         let details = match schema {
             Schema::Create {
-                label, key, unique, ..
+                label,
+                key,
+                unique,
+                fuzzy,
+                ..
             } => format!(
                 "{} on :{label}({key}), filled from the nodes with the label",
                 if *unique {
                     "unique constraint"
+                } else if *fuzzy {
+                    "fuzzy index"
                 } else {
                     "index"
                 }

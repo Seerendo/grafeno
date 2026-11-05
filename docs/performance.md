@@ -19,6 +19,8 @@ test environments").
 | Most writes per second (immediate / eventual durability) | about 11 000 / 16 000 |
 | A graph of 1 M nodes and 10 M edges | fits in 512 MiB |
 | Hostile queries (cartesian products, huge loops, deep nesting) | 32 of 32 stopped within their limits |
+| Finding a person by a misspelled name among 100 000 | 20 ms with a fuzzy index |
+| Telling duplicates from namesakes (match rule) | 95% of duplicates found, 99.4% of "same" right |
 
 ## Test environments
 
@@ -132,6 +134,33 @@ embeddings in large transactions when loading many.
 A property index (`CREATE INDEX FOR (p:Person) ON (p.age)`) turns a label
 scan of 100 000 nodes (about 2 µs a node) into a range read: 20 to 55 times
 faster for selective conditions.
+
+## Entity resolution
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/charts/resolve-speed-dark.svg">
+  <img alt="finding a damaged name among 100 000 people: 20 ms with a fuzzy index, 469 ms comparing with every node, 51 ms for a full match rule" src="assets/charts/resolve-speed-light.svg">
+</picture>
+
+A fuzzy index (`CREATE FUZZY INDEX FOR (p:Person) ON (p.name)`) keeps the
+trigrams of a text property and finds what looks like a query (typos,
+accents, word order) in 20 ms among 100 000 people, instead of comparing
+with each of them (469 ms).
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/charts/resolve-quality-dark.svg">
+  <img alt="a match rule's decisions: every duplicate with swapped dates, no accents or another word order called same; most typos same and the rest review; initials split; namesakes 96.6% different" src="assets/charts/resolve-quality-light.svg">
+</picture>
+
+A match rule per label says how to decide that a record is a node:
+strong keys (an email, an id) decide outright; otherwise fields compare
+with their own measures and weights, and shared neighbors can count. On
+2 000 damaged duplicates and 2 000 namesakes (a real name, another
+person), a rule on name, birth date and city found 95% of the duplicates
+(81% as "same", the rest "to review") and called 9 namesakes "same": 99.4%
+of its "same" decisions were right. Every decision lists each field's
+similarity, so a rule can be checked and tuned; with a looser date
+tolerance (a year instead of 30 days) 115 namesakes passed as "same".
 
 ## The engine
 

@@ -390,6 +390,55 @@ export interface MergeReport {
   conflicts: Conflict[];
 }
 
+/** A similarity measure for a field, with its settings. */
+export type Measure =
+  | { measure: "exact" | "edit" | "jaro" | "jaro_winkler" | "tokens" | "lcs" | "soundex" | "phonetic_es" }
+  | { measure: "dice" | "jaccard"; n?: number }
+  | { measure: "date"; days?: number }
+  | { measure: "number"; tolerance?: number };
+
+/** How one property compares in a match rule. */
+export type FieldRule = { key: string; weight?: number } & Measure;
+
+/** How to tell whether two nodes of a label are the same thing. */
+export interface MatchRule {
+  label: string;
+  /** Properties that identify: equal decides same, different decides different. */
+  strong_keys?: string[];
+  fields?: FieldRule[];
+  /** Weight of shared neighbors, when both sides have some (0: off). */
+  neighbors?: number;
+  /** From this score on: the same thing (0.9 by default). */
+  same?: number;
+  /** From this score on: to review (0.75 by default). */
+  review?: number;
+}
+
+export interface FieldScore {
+  key: string;
+  measure: string;
+  record: unknown;
+  node: unknown;
+  similarity: number;
+  weight: number;
+}
+
+/** A node compared with a record, and why it scored what it did. */
+export interface Match {
+  node: Id;
+  score: number;
+  decision: "same" | "review" | "different";
+  /** The strong key that decided, if one did. */
+  decided_by: string | null;
+  fields: FieldScore[];
+  neighbors: number | null;
+}
+
+export interface FuzzyHit {
+  node: Id;
+  score: number;
+}
+
 /** A recorded merge (the snapshots it keeps for undo are left loosely typed). */
 export interface MergeRecord {
   id: Id;
@@ -816,6 +865,36 @@ export class Namespace {
   /** Undoes a merge: the merged node and its facts come back. `force` if the kept node changed since. */
   undoMerge(id: Id, force = false): Promise<MergeRecord> {
     return this.#call("POST", `/merges/${encodeURIComponent(id)}/undo`, { force });
+  }
+
+  /** Nodes whose property looks like `text`, through the fuzzy index on it (`CREATE FUZZY INDEX`). */
+  fuzzy(label: string, key: string, text: string, options: { limit?: number; measure?: string } = {}): Promise<FuzzyHit[]> {
+    return this.#call("GET", `/fuzzy${queryString({ label, key, q: text, ...options })}`);
+  }
+
+  /** The match rules of the namespace. */
+  matchRules(): Promise<MatchRule[]> {
+    return this.#call("GET", "/match-rules");
+  }
+
+  /** Declares (or replaces) the match rule of a label. */
+  setMatchRule(rule: MatchRule): Promise<MatchRule> {
+    const { label, ...rest } = rule;
+    return this.#call("PUT", `/match-rules/${encodeURIComponent(label)}`, rest);
+  }
+
+  async deleteMatchRule(label: string): Promise<void> {
+    await this.#call("DELETE", `/match-rules/${encodeURIComponent(label)}`);
+  }
+
+  /** Nodes that may be this record, by the label's match rule (or `rule`), with reasons. */
+  match(label: string, props: Record<string, unknown>, options: { neighbors?: Id[]; limit?: number; rule?: MatchRule } = {}): Promise<Match[]> {
+    return this.#call("POST", "/match", { label, props, ...options });
+  }
+
+  /** Pairs of nodes of a label that its rule calls the same or to review. */
+  matchPairs(label: string, limit?: number): Promise<{ a: Id; b: Id; match: Match }[]> {
+    return this.#call("GET", `/matches${queryString({ label, limit })}`);
   }
 
   /** Records an access to each node now. */

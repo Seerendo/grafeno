@@ -217,7 +217,7 @@ def log_bounds(values):
 
 # ---------------------------------------------------------------- charts
 
-def hbars(name, title, subtitle, rows, unit, log=False, series=None, note=None, limit=None, legend=None):
+def hbars(name, title, subtitle, rows, unit, log=False, series=None, note=None, limit=None, legend=None, top_value=None):
     """rows: (label, [values per series], highlight) ; series: legend labels."""
     series = series or [None]
     ns = len(series)
@@ -231,6 +231,12 @@ def hbars(name, title, subtitle, rows, unit, log=False, series=None, note=None, 
     values = [v for r in rows for v in r[1] if v is not None] + ([limit[0]] if limit else [])
     if log:
         lo, hi = log_bounds(values)
+        # Bars need room below the smallest value, or it draws nothing.
+        smallest = min(v for v in values if v > 0)
+        steps = [m * 10 ** e for e in range(-4, 9) for m in (1, 2, 5)]
+        lo = max(s for s in steps if s <= smallest * 0.5)
+    elif top_value:
+        lo, hi = 0, top_value
     else:
         lo, hi = 0, max(values) * 1.08
         t = nice_ticks(0, hi)
@@ -493,6 +499,17 @@ def main():
           [(r['query'], [num(r['ms'])], order.index(r['outcome'])) for r in rows], ' ms', log=True,
           legend=[(o, i) for i, o in enumerate(order)],
           note='Every query ended within twice its 2 s timeout, without a crash. Data: docs/data/hostile_queries.csv')
+
+    # Entity resolution.
+    rows = read('resolve_quality.csv')
+    hbars('resolve-quality', 'What a match rule decided, by kind of record', 'Share of records; 100 000 people, 2 000 damaged duplicates and 2 000 namesakes. E1-mem.',
+          [(r['kind'], [num(r['same']) / num(r['records']) * 100, num(r['review']) / num(r['records']) * 100, num(r['missed']) / num(r['records']) * 100], None) for r in rows],
+          '%', series=['same', 'review', 'different (missed for duplicates)'], top_value=100,
+          note='For a namesake, “different” is right. Data: docs/data/resolve_quality.csv')
+    rows = read('resolve_speed.csv')
+    hbars('resolve-speed', 'Finding a person by a damaged name among 100 000', 'Milliseconds, p50, log scale. E1-mem.',
+          [(r['search'], [num(r['p50_ms'])], 0 if 'fuzzy' in r['search'] else (2 if 'find_matches' in r['search'] else False)) for r in rows],
+          ' ms', log=True, note='Data: docs/data/resolve_speed.csv')
 
     print('charts written to', OUT)
 

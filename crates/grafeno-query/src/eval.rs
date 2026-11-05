@@ -1404,6 +1404,12 @@ fn function(ctx: &Context, name: &str, args: Vec<Value>) -> Result<Value, QueryE
             }
             Value::List(out)
         }
+        other if other.starts_with("text.") || other.starts_with("apoc.text.") => {
+            match crate::textfns::function(other, &args) {
+                Some(result) => result?,
+                None => return Err(error(format!("unknown function {other}()"))),
+            }
+        }
         other => match crate::algorithms::function(ctx, other, &args) {
             Some(result) => result?,
             None => return Err(error(format!("unknown function {other}()"))),

@@ -47,6 +47,7 @@ fn a_backup_is_the_snapshot_while_writes_go_on() {
                 label: "Note".into(),
                 key: "i".into(),
                 unique: false,
+                fuzzy: false,
             },
         )?;
         tx.create_namespace("empty", Some("still here"))?;

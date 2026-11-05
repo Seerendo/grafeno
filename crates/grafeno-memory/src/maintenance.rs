@@ -65,35 +65,6 @@ fn words(name: &str) -> BTreeSet<&str> {
     name.split(' ').filter(|word| !word.is_empty()).collect()
 }
 
-/// Edits between two words (insertions, deletions, substitutions and
-/// swaps of neighbors), up to `max` (more is `max + 1`).
-fn edits(a: &str, b: &str, max: usize) -> usize {
-    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
-    if a.len().abs_diff(b.len()) > max {
-        return max + 1;
-    }
-    let mut rows = vec![vec![0usize; b.len() + 1]; a.len() + 1];
-    for (i, row) in rows.iter_mut().enumerate() {
-        row[0] = i;
-    }
-    for (j, cell) in rows[0].iter_mut().enumerate() {
-        *cell = j;
-    }
-    for i in 1..=a.len() {
-        for j in 1..=b.len() {
-            let cost = usize::from(a[i - 1] != b[j - 1]);
-            let mut best = (rows[i - 1][j] + 1)
-                .min(rows[i][j - 1] + 1)
-                .min(rows[i - 1][j - 1] + cost);
-            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
-                best = best.min(rows[i - 2][j - 2] + 1);
-            }
-            rows[i][j] = best;
-        }
-    }
-    rows[a.len()][b.len()].min(max + 1)
-}
-
 /// Whether two different words are likely one with a typo: letters only,
 /// at least four, one edit apart (two from eight letters on). A different
 /// or added last letter is not a typo but another name ("mario" and
@@ -124,7 +95,7 @@ fn typo(a: &str, b: &str) -> bool {
     } else {
         1
     };
-    edits(a, b, max) <= max
+    grafeno::textsim::damerau_within(a, b, max).is_some()
 }
 
 /// The keys under which a word is filed to find typos of it: the word, and

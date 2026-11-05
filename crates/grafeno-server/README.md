@@ -242,6 +242,12 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `POST`   | `/v1/{ns}/merge`                      | `{keep, merge, force?, dry_run?, functional?, strong_keys?}` | `{id, kept, merged, edges_moved, edges_dropped, conflicts}`; 409 with `error.conflicts` when they disagree; `{conflicts}` with `dry_run` |
 | `GET`    | `/v1/{ns}/merges`                     | `?node=&limit=`                                         | merge records, newest first   |
 | `POST`   | `/v1/{ns}/merges/{id}/undo`           | `{force?}` (optional)                                   | the record, marked undone     |
+| `GET`    | `/v1/{ns}/fuzzy`                      | `?label=&key=&q=&limit=&measure=`                       | `[{node, score}]`: nodes whose property looks like `q` (needs a fuzzy index) |
+| `GET`    | `/v1/{ns}/match-rules`                |                                                         | the match rules of the namespace |
+| `PUT`    | `/v1/{ns}/match-rules/{label}`        | `{strong_keys?, fields: [{key, measure, weight?, …}], neighbors?, same?, review?}` | the rule (admin) |
+| `DELETE` | `/v1/{ns}/match-rules/{label}`        |                                                         | 204 (admin)                   |
+| `POST`   | `/v1/{ns}/match`                      | `{label, props, neighbors?, limit?, rule?}`             | `[{node, score, decision, decided_by, fields, neighbors}]` |
+| `GET`    | `/v1/{ns}/matches`                    | `?label=&limit=`                                        | `[{a, b, match}]`: pairs the rule calls same or to review |
 | `POST`   | `/v1/{ns}/touch`                      | `{ids}`                                                 | 204                           |
 | `GET`    | `/v1/{ns}/weak`                       | `?half_life_days=&threshold=&label=&limit=`             | `[{node, strength, memory}]`  |
 | `POST`   | `/v1/{ns}/archive`                    | `{ids}`                                                 | `{archived}`                  |
@@ -315,6 +321,7 @@ Syncing a note and replacing its links in one request:
 | `query`    | A read-only [GQ](../../docs/query-language.md) statement; at most 200 rows.   |
 | `merge`    | Folds a duplicate node into another one; refused when they disagree unless `force`. Returns a `merge_id`. |
 | `undo_merge` | Undoes a merge by its `merge_id`: the merged node and its facts come back.   |
+| `find_matches` | Before creating an entity, the nodes that may already be it, by the label's match rule, with a decision and each field's similarity. |
 | `maintain` | Lists likely duplicates, weak memories and groups ready to consolidate.        |
 | `consolidate` | Stores a summary of several memories and archives them.                     |
 

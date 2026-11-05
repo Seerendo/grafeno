@@ -31,9 +31,11 @@ mod index;
 mod memory;
 mod merge;
 mod namespace;
+mod resolve;
 mod stats;
 mod store;
 mod text;
+pub mod textsim;
 mod traverse;
 mod vector;
 mod writer;
@@ -47,13 +49,14 @@ pub use db::{
 };
 pub use dump::{DumpStats, EXPORT_FORMAT, EXPORT_VERSION, ImportOptions, Record};
 pub use grafeno_core::*;
-pub use index::{IndexDef, IndexInfo, IndexRange};
+pub use index::{FuzzyHit, IndexDef, IndexInfo, IndexRange};
 pub use memory::{DEFAULT_IMPORTANCE, MemoryState, names_of, normalize_name};
 pub use merge::{
     Conflict, ConflictKind, DEFAULT_STRONG_KEYS, MergeOptions, MergeRecord, MergeReport,
     NodeSnapshot, node_conflicts,
 };
 pub use namespace::{DropStats, MAX_NAMESPACE_LENGTH, check_new_namespace};
+pub use resolve::{Decision, FieldRule, FieldScore, Match, MatchRule, Probe, SCAN_LIMIT, score};
 pub use stats::{NamespaceInfo, NamespaceStats};
 pub use text::tokenize;
 pub use traverse::{Direction, EdgeFilter, Neighbor, Path, Subgraph};
