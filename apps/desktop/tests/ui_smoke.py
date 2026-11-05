@@ -12,36 +12,56 @@ import subprocess
 import tempfile
 import time
 import traceback
-from urllib.error import HTTPError
-from urllib.request import ProxyHandler, Request, build_opener
+from http.client import HTTPConnection, HTTPException, RemoteDisconnected
+from urllib.parse import urlsplit
 
 
 class Window:
     def __init__(self, endpoint):
+        url = urlsplit(endpoint)
+        if url.scheme != "http" or url.hostname not in {"127.0.0.1", "localhost"}:
+            raise ValueError("WebDriver debe ejecutarse en el equipo local")
         self.endpoint = endpoint
         self.session = None
-        self.http = build_opener(ProxyHandler({}))
+        self.host, self.port = url.hostname, url.port or 80
+        self.http = HTTPConnection(self.host, self.port, timeout=60)
 
-    def command(self, method, path, body=None):
+    def close(self):
+        self.http.close()
+
+    def command(self, method, path, body=None, *, read_only=False):
         data = None if body is None else json.dumps(body).encode()
-        request = Request(self.endpoint + path, data=data, method=method,
-                          headers={"Content-Type": "application/json"})
-        try:
-            with self.http.open(request, timeout=60) as response:
-                result = json.load(response)
-        except HTTPError as error:
-            raise RuntimeError(error.read().decode()) from error
-        # Los errores del protocolo llegan mediante HTTPError. Una ejecución
-        # JavaScript puede devolver {ok: false, error: ...} como dato de prueba.
-        return result.get("value")
+        attempts = 3 if read_only or method == "GET" else 1
+        for attempt in range(attempts):
+            try:
+                # No propagar Connection: close al proxy de tauri-driver.
+                self.http.request(method, path, body=data,
+                                  headers={"Content-Type": "application/json"})
+                response = self.http.getresponse()
+                payload = response.read()
+                if response.status >= 400:
+                    raise RuntimeError(payload.decode(errors="replace"))
+                # Un error devuelto por el JavaScript es un dato, no un error HTTP.
+                return json.loads(payload).get("value")
+            except (OSError, HTTPException) as error:
+                self.http.close()
+                self.http = HTTPConnection(self.host, self.port, timeout=60)
+                transient = isinstance(error, (RemoteDisconnected, ConnectionResetError))
+                if not transient or attempt + 1 == attempts:
+                    raise
+                print(f"Reintento de lectura WebDriver {attempt + 2}/{attempts}: {error}", flush=True)
+                time.sleep(0.15 * (attempt + 1))
 
-    def call(self, method, path, body=None):
-        return self.command(method, f"/session/{self.session}{path}", body)
+    def call(self, method, path, body=None, *, read_only=False):
+        return self.command(method, f"/session/{self.session}{path}", body,
+                            read_only=read_only)
 
-    def script(self, script, *args):
-        return self.call("POST", "/execute/sync", {"script": script, "args": list(args)})
+    def read_dom(self, script, *args):
+        """Solo consultas del DOM, sin efectos sobre la aplicación."""
+        return self.call("POST", "/execute/sync", {"script": script, "args": list(args)},
+                         read_only=True)
 
-    def promise(self, expression, *args):
+    def promise(self, expression, *args, read_only=False):
         script = """
         const done = arguments[arguments.length - 1];
         Promise.resolve().then(async () => {
@@ -49,11 +69,12 @@ class Window:
         }).then(value => done({ok: true, value}),
                 error => done({ok: false, error: String(error)}));
         """
-        return self.call("POST", "/execute/async", {"script": script, "args": list(args)})
+        return self.call("POST", "/execute/async", {"script": script, "args": list(args)},
+                         read_only=read_only)
 
-    def invoke(self, command, args=None):
+    def invoke(self, command, args=None, *, read_only=False):
         result = self.promise("return await window.__TAURI__.core.invoke(arguments[0], arguments[1]);",
-                              command, args or {})
+                              command, args or {}, read_only=read_only or command in {"session", "recent"})
         assert result["ok"], result
         return result.get("value")
 
@@ -66,13 +87,14 @@ class Window:
         raise AssertionError(f"Tiempo agotado: {description}")
 
     def exists(self, selector):
-        return self.script("return document.querySelector(arguments[0]) !== null;", selector)
+        return self.read_dom("return document.querySelector(arguments[0]) !== null;", selector)
 
     def text(self, selector):
-        return self.script("return document.querySelector(arguments[0])?.textContent ?? '';", selector)
+        return self.read_dom("return document.querySelector(arguments[0])?.textContent ?? '';", selector)
 
     def element(self, selector):
-        result = self.call("POST", "/element", {"using": "css selector", "value": selector})
+        result = self.call("POST", "/element", {"using": "css selector", "value": selector},
+                           read_only=True)
         return result["element-6066-11e4-a52e-4f735466cecf"]
 
     def click(self, selector):
@@ -87,13 +109,13 @@ class Window:
         self.wait(lambda: path.name in self.text(".server-pill")
                   and self.exists('.app[aria-busy="false"]'), f"abrir {path.name}")
 
-    def query(self, query):
+    def read_query(self, query):
         session = self.invoke("session")
         reply = self.invoke("request", {
             "method": "POST", "url": session["url"] + "/v1/default/query",
             "headers": {"content-type": "application/json"},
             "body": json.dumps({"query": query}),
-        })
+        }, read_only=True)
         assert reply["status"] == 200, reply
         return json.loads(reply["body"])["rows"]
 
@@ -106,7 +128,7 @@ class Window:
                 .filter(animation => Number.isFinite(animation.effect?.getComputedTiming().iterations))
                 .map(animation => animation.finished.catch(() => {})));
             await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        """)
+        """, read_only=True)
         assert result["ok"], result
         png = self.call("GET", "/screenshot")
         (directory / f"{name}.png").write_bytes(base64.b64decode(png, validate=True))
@@ -144,7 +166,7 @@ def scenario(window, files, artifacts):
     window.type('.modal input[placeholder="Ana García"]', "Ana de prueba")
     window.click(".modal footer button.primary")
     window.wait(lambda: not window.exists(".modal"), "guardar nodo desde la interfaz")
-    assert window.query("MATCH (p:Person) RETURN p.name") == [["Ana de prueba"]]
+    assert window.read_query("MATCH (p:Person) RETURN p.name") == [["Ana de prueba"]]
     window.wait(lambda: "Ana de prueba" in window.text("main .detail h2"), "mostrar el nodo guardado")
     window.capture(artifacts, "02-nodo-creado")
     first_session = window.invoke("session")
@@ -155,7 +177,7 @@ def scenario(window, files, artifacts):
     window.wait(lambda: "cannot open" in window.text(".toast.error"), "aviso de apertura fallida")
     assert window.invoke("session")["url"] == first_session["url"]
     assert first.name in window.text(".server-pill")
-    assert window.query("MATCH (p:Person) RETURN p.name") == [["Ana de prueba"]]
+    assert window.read_query("MATCH (p:Person) RETURN p.name") == [["Ana de prueba"]]
     window.capture(artifacts, "03-error-sin-desconexion")
     checks.append("Una apertura fallida muestra el error y conserva la conexión y los datos.")
 
@@ -165,19 +187,19 @@ def scenario(window, files, artifacts):
     window.type('.modal input[placeholder="Ana García"]', "Borrador de la base anterior")
     window.open_file(second)
     assert not window.exists(".modal"), "el borrador anterior quedó abierto en otra base"
-    assert window.script("return window.location.hash;") == "#/overview"
+    assert window.read_dom("return window.location.hash;") == "#/overview"
     window.wait(lambda: window.text("main .cards .card:first-child .value") == "0", "mostrar la base vacía")
     assert not window.exists(".toast.error"), "quedó un aviso de la base anterior"
     assert not window.exists("main .error"), "quedó un error de la vista anterior"
     window.capture(artifacts, "04-otra-base-sin-borradores")
-    assert window.query("MATCH (p:Person) RETURN count(p)") == [[0]]
+    assert window.read_query("MATCH (p:Person) RETURN count(p)") == [[0]]
     stale = window.promise("return await window.__TAURI__.core.invoke('request', arguments[0]);", {
         "method": "POST", "url": first_session["url"] + "/v1/default/query",
         "headers": {"content-type": "application/json"},
         "body": json.dumps({"query": "CREATE (:Person {name: 'No debe aparecer'})"}),
     })
     assert not stale["ok"] and "session changed" in stale["error"], stale
-    assert window.query("MATCH (p:Person) RETURN count(p)") == [[0]]
+    assert window.read_query("MATCH (p:Person) RETURN count(p)") == [[0]]
     checks.append("Cambiar de base, cerrar borradores y rechazar una escritura de la sesión anterior.")
 
     window.click('.topbar button[title="Close the database"]')
@@ -187,7 +209,7 @@ def scenario(window, files, artifacts):
     window.click(selector)
     window.wait(lambda: first.name in window.text(".server-pill")
                 and window.exists('.app[aria-busy="false"]'), "reabrir desde recientes")
-    assert window.query("MATCH (p:Person) RETURN p.name") == [["Ana de prueba"]]
+    assert window.read_query("MATCH (p:Person) RETURN p.name") == [["Ana de prueba"]]
     window.wait(lambda: window.text("main .cards .card:first-child .value") == "1", "mostrar los datos al reabrir")
     assert not window.exists("main .error"), "la vista reabierta muestra un error anterior"
     window.capture(artifacts, "05-base-reabierta")
@@ -257,6 +279,7 @@ def main():
                     window.call("DELETE", "")
                 except Exception:
                     pass
+            window.close()
             if driver is not None:
                 try:
                     os.killpg(driver.pid, signal.SIGTERM)

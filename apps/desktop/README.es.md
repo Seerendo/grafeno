@@ -105,3 +105,12 @@ Las capturas y el diagnóstico se escriben en `reports/desktop-e2e/` (ignorado
 por Git) y CI los conserva durante siete días como artefacto
 `pruebas-escritorio-linux`. La prueba no sustituye la revisión manual en los
 sistemas operativos soportados ni verifica instaladores.
+
+El cliente de pruebas mantiene una conexión HTTP persistente. Reintenta de
+forma acotada solo lecturas si el controlador corta la conexión; no repite
+clics, escritura de texto ni órdenes que puedan modificar datos. Sus cinco
+pruebas de transporte pueden ejecutarse sin Tauri:
+
+```bash
+python3 -m unittest discover -s apps/desktop/tests -p 'test_*.py'
+```

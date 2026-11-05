@@ -66,6 +66,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: Probar el transporte del controlador de escritorio
+        run: python3 -m unittest discover -s apps/desktop/tests -p 'test_*.py'
       - uses: actions/setup-node@v4
         with:
           node-version: 24

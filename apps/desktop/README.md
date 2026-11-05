@@ -117,3 +117,12 @@ Screenshots and diagnostics go to `reports/desktop-e2e/` (ignored by Git).
 CI retains them for seven days in the `pruebas-escritorio-linux` artifact.
 These tests do not replace manual checks on supported operating systems or
 validate installers.
+
+The test client keeps a persistent HTTP connection. It retries only reads,
+with a fixed limit, when the driver closes the connection; it never retries
+clicks, typing or commands that may modify data. Its five transport tests run
+without Tauri:
+
+```bash
+python3 -m unittest discover -s apps/desktop/tests -p 'test_*.py'
+```
