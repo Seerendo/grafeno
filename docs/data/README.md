@@ -30,5 +30,7 @@ build unless the file says otherwise; on E1, runs vary by about ±20%.
 | `saturation_eventual.csv` | The same with eventual durability | `saturation.rs` | E1-disk | 2026-11-05 | as above |
 | `import_interference.csv` | An agent's write latency during a 300 000-node import | `saturation.rs` | E1-disk | 2026-11-05 | bars of p99 per import mode, log scale |
 
-To add a run, keep the columns, add rows with a new date (or a new file
+`python docs/charts/build.py` draws the charts of
+[performance](../performance.md) from these files (light and dark SVG in
+`docs/assets/charts/`). To add a run, keep the columns, add rows with a new date (or a new file
 for a new environment), and say in `DESIGN.md` what changed.

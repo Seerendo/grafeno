@@ -2,7 +2,8 @@
 
 The environments (E1-mem, E1-disk, E2), the methodology and a summary are
 in `DESIGN.md`, "Measurements and test environments"; every table here
-has its numbers as CSV in [`data/`](data/README.md).
+has its numbers as CSV in [`data/`](data/README.md), and
+[performance](performance.md) shows them as charts.
 
 Measured on 2026-11-03 on an AMD Ryzen 7 7435HS with 32 GB of RAM, Windows 11,
 Rust 1.99 (release builds). Databases are in memory, so the numbers measure

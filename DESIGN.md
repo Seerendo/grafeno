@@ -1124,8 +1124,10 @@ assets).
 What Grafeno has been measured to do, where, and how; the base for the
 official documentation's charts. The raw numbers are CSV files in
 `docs/data/` (one per experiment, described in its `README.md`); the
-discussion of each experiment is in `docs/benchmarks.md`. Every number
-below comes from one of three environments.
+discussion of each experiment is in `docs/benchmarks.md`, and
+`docs/performance.md` presents them with charts (drawn from the CSV files
+by `docs/charts/build.py`). Every number below comes from one of three
+environments.
 
 ### Environments
 

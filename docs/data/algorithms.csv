@@ -7,8 +7,8 @@ Yen 5 shortest paths,756
 PageRank 20 rounds,17
 weakly connected components,3
 label propagation,309
-Louvain (384 communities, modularity 0.899),427
-triangles (89,654),77
-betweenness, 100 sampled sources,1700
+"Louvain (384 communities, modularity 0.899)",427
+"triangles (89,654)",77
+"betweenness, 100 sampled sources",1700
 FastRP 64 dimensions,104
 node similarity top 10 per node,374

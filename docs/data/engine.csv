@@ -1,11 +1,11 @@
 operation,setup,before_us,after_us
-write 100 nodes with text, one transaction,60-word notes,26000,17000
+"write 100 nodes with text, one transaction",60-word notes,26000,17000
 write 1 node with text and 64-d vector,2k nodes,3000,3500
-write 1 edge, own transaction,,98,120
+"write 1 edge, own transaction",,98,120
 get a node,10k nodes,1.4,1.6
-neighbors, both directions,10k nodes, 40k edges,26,25
-k-hop depth 2,10k nodes, 40k edges,66,16
-shortest path, at most 6 hops,10k nodes, 40k edges,11000,3200
+"neighbors, both directions","10k nodes, 40k edges",26,25
+k-hop depth 2,"10k nodes, 40k edges",66,16
+"shortest path, at most 6 hops","10k nodes, 40k edges",11000,3200
 BM25 3-word query top 10,10k notes,900,270
 HNSW top 10 ef 32,10k uniform 128-d,1500,1100
 HNSW top 10 ef 64,10k uniform 128-d,2400,1800

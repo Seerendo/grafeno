@@ -1,6 +1,6 @@
 operation,container,seconds,steady_mib,peak_mib,outcome
 check (all records in memory),2g,,,,killed (out of memory)
-check (streaming, point lookups),2g,2562,386,436,ok
+"check (streaming, point lookups)",2g,2562,386,436,ok
 check (fingerprints),2g,249,393,443,ok
 GQ algo.pageRank every row then LIMIT 5 (no row budget),2g,13,1506,1813,refused late
 GQ algo.pageRank every row then LIMIT 5 (row budget),2g,8,989,989,refused

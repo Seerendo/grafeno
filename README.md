@@ -9,7 +9,9 @@ a Cypher-like query language (GQ) with statistics and property indexes, and
 graph algorithms (paths, centrality, communities, similarity, embeddings).
 First client: [Grafito](https://github.com/Seerendo/grafito).
 
-The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
+The design, phases and open decisions are in [DESIGN.md](DESIGN.md);
+measured speed, memory and limits, with charts, in
+[docs/performance.md](docs/performance.md).
 
 ## Status
 

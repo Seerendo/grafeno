@@ -1,4 +1,4 @@
 query,without_index_ms,without_index_reads,with_index_ms,with_index_reads
-WHERE p.age > 97 (2%), count,233,100000,10.7,6000
-{age: 42} (1%), count,200,100000,3.6,2000
+"WHERE p.age > 97 (2%), count",233,100000,10.7,6000
+"{age: 42} (1%), count",200,100000,3.6,2000
 WHERE p.age = 42 LIMIT 10,2.4,1024,0.38,1064
