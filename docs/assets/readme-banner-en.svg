@@ -1,45 +1,209 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="440" viewBox="0 0 1440 440" role="img" aria-labelledby="title desc">
-  <title id="title">Grafeno symbol</title>
-  <desc id="desc">Three carbon rings connected to a network of nodes.</desc>
+  <title id="title">Graphene network</title>
+  <desc id="desc">Three carbon rings highlighted within a hexagonal lattice of nodes and bonds.</desc>
   <defs>
-    <linearGradient id="bond" x1="0" y1="0" x2="1" y2="1">
-      <stop stop-color="#b2f3dc" />
-      <stop offset="1" stop-color="#27b99e" />
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#101b20"/><stop offset="1" stop-color="#090f13"/>
     </linearGradient>
+    <radialGradient id="light">
+      <stop stop-color="#1c5040" stop-opacity=".24"/><stop offset="1" stop-color="#1c5040" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="bond" gradientUnits="userSpaceOnUse" x1="590" y1="87" x2="850" y2="353">
+      <stop stop-color="#c4f1dd"/><stop offset=".45" stop-color="#83dcc0"/><stop offset="1" stop-color="#2eae91"/>
+    </linearGradient>
+    <linearGradient id="cell" gradientUnits="userSpaceOnUse" x1="720" y1="87" x2="720" y2="353">
+      <stop stop-color="#90e0c3" stop-opacity=".035"/><stop offset="1" stop-color="#2aa68b" stop-opacity=".075"/>
+    </linearGradient>
+    <clipPath id="frame"><rect width="1440" height="440" rx="18"/></clipPath>
   </defs>
-  <rect width="1440" height="440" rx="20" fill="#0c161a" />
-  <g transform="translate(-381 -44)">
-    <g fill="none" stroke="#315449" stroke-width="1.3">
-      <path d="M840 126L1004 174M944 76L1052 146M1224 78L1149 146M1330 148L1198 174M1348 316L1198 230M1278 430L1149 314M1090 455L1101 342M888 418L1052 314M800 302L1004 230" />
-      <path d="M840 126L944 76L1224 78L1330 148L1348 316L1278 430L1090 455L888 418L800 302Z" stroke-opacity=".38" />
+  <g clip-path="url(#frame)">
+    <rect width="1440" height="440" fill="url(#background)"/>
+    <ellipse cx="720" cy="220" rx="510" ry="320" fill="url(#light)"/>
+    <g fill="none" stroke="#65b39b" stroke-width="1.1">
+      <path d="M127.639 87.0L193.457 125.0" opacity="0.014"/>
+      <path d="M127.639 239.0L127.639 315.0" opacity="0.015"/>
+      <path d="M127.639 239.0L193.457 201.0" opacity="0.022"/>
+      <path d="M127.639 315.0L193.457 353.0" opacity="0.014"/>
+      <path d="M193.457 125.0L193.457 201.0" opacity="0.027"/>
+      <path d="M193.457 125.0L259.274 87.0" opacity="0.026"/>
+      <path d="M193.457 201.0L259.274 239.0" opacity="0.040"/>
+      <path d="M193.457 353.0L259.274 315.0" opacity="0.026"/>
+      <path d="M259.274 11.0L259.274 87.0" opacity="0.019"/>
+      <path d="M259.274 87.0L325.092 125.0" opacity="0.043"/>
+      <path d="M259.274 239.0L259.274 315.0" opacity="0.046"/>
+      <path d="M259.274 239.0L325.092 201.0" opacity="0.066"/>
+      <path d="M259.274 315.0L325.092 353.0" opacity="0.043"/>
+      <path d="M325.092 -27.0L390.91 11.0" opacity="0.018"/>
+      <path d="M325.092 125.0L325.092 201.0" opacity="0.074"/>
+      <path d="M325.092 125.0L390.91 87.0" opacity="0.066"/>
+      <path d="M325.092 201.0L390.91 239.0" opacity="0.101"/>
+      <path d="M325.092 353.0L325.092 429.0" opacity="0.031"/>
+      <path d="M325.092 353.0L390.91 315.0" opacity="0.066"/>
+      <path d="M325.092 429.0L390.91 467.0" opacity="0.018"/>
+      <path d="M390.91 11.0L390.91 87.0" opacity="0.046"/>
+      <path d="M390.91 11.0L456.728 -27.0" opacity="0.026"/>
+      <path d="M390.91 87.0L456.728 125.0" opacity="0.094"/>
+      <path d="M390.91 239.0L390.91 315.0" opacity="0.109"/>
+      <path d="M390.91 239.0L456.728 201.0" opacity="0.145"/>
+      <path d="M390.91 315.0L456.728 353.0" opacity="0.094"/>
+      <path d="M390.91 467.0L456.728 429.0" opacity="0.026"/>
+      <path d="M456.728 -27.0L522.546 11.0" opacity="0.034"/>
+      <path d="M456.728 125.0L456.728 201.0" opacity="0.151"/>
+      <path d="M456.728 125.0L522.546 87.0" opacity="0.125"/>
+      <path d="M456.728 201.0L522.546 239.0" opacity="0.193"/>
+      <path d="M456.728 353.0L456.728 429.0" opacity="0.064"/>
+      <path d="M456.728 353.0L522.546 315.0" opacity="0.125"/>
+      <path d="M456.728 429.0L522.546 467.0" opacity="0.034"/>
+      <path d="M522.546 11.0L522.546 87.0" opacity="0.082"/>
+      <path d="M522.546 11.0L588.364 -27.0" opacity="0.043"/>
+      <path d="M522.546 87.0L588.364 125.0" opacity="0.156"/>
+      <path d="M522.546 239.0L522.546 315.0" opacity="0.195"/>
+      <path d="M522.546 239.0L588.364 201.0" opacity="0.240"/>
+      <path d="M522.546 315.0L588.364 353.0" opacity="0.156"/>
+      <path d="M522.546 467.0L522.546 543.0" opacity="0.015"/>
+      <path d="M522.546 467.0L588.364 429.0" opacity="0.043"/>
+      <path d="M588.364 -103.0L588.364 -27.0" opacity="0.017"/>
+      <path d="M588.364 -27.0L654.182 11.0" opacity="0.049"/>
+      <path d="M588.364 353.0L588.364 429.0" opacity="0.098"/>
+      <path d="M588.364 353.0L654.182 315.0" opacity="0.180"/>
+      <path d="M588.364 429.0L654.182 467.0" opacity="0.049"/>
+      <path d="M654.182 11.0L654.182 87.0" opacity="0.109"/>
+      <path d="M654.182 11.0L720.0 -27.0" opacity="0.053"/>
+      <path d="M654.182 467.0L654.182 543.0" opacity="0.019"/>
+      <path d="M654.182 467.0L720.0 429.0" opacity="0.053"/>
+      <path d="M720.0 -103.0L720.0 -27.0" opacity="0.020"/>
+      <path d="M720.0 -27.0L785.818 11.0" opacity="0.053"/>
+      <path d="M720.0 353.0L720.0 429.0" opacity="0.113"/>
+      <path d="M720.0 429.0L785.818 467.0" opacity="0.053"/>
+      <path d="M785.818 11.0L785.818 87.0" opacity="0.109"/>
+      <path d="M785.818 11.0L851.636 -27.0" opacity="0.049"/>
+      <path d="M785.818 315.0L851.636 353.0" opacity="0.180"/>
+      <path d="M785.818 467.0L785.818 543.0" opacity="0.019"/>
+      <path d="M785.818 467.0L851.636 429.0" opacity="0.049"/>
+      <path d="M851.636 -103.0L851.636 -27.0" opacity="0.017"/>
+      <path d="M851.636 -27.0L917.454 11.0" opacity="0.043"/>
+      <path d="M851.636 125.0L917.454 87.0" opacity="0.156"/>
+      <path d="M851.636 201.0L917.454 239.0" opacity="0.240"/>
+      <path d="M851.636 353.0L851.636 429.0" opacity="0.098"/>
+      <path d="M851.636 353.0L917.454 315.0" opacity="0.156"/>
+      <path d="M851.636 429.0L917.454 467.0" opacity="0.043"/>
+      <path d="M917.454 11.0L917.454 87.0" opacity="0.082"/>
+      <path d="M917.454 11.0L983.272 -27.0" opacity="0.034"/>
+      <path d="M917.454 87.0L983.272 125.0" opacity="0.125"/>
+      <path d="M917.454 239.0L917.454 315.0" opacity="0.195"/>
+      <path d="M917.454 239.0L983.272 201.0" opacity="0.193"/>
+      <path d="M917.454 315.0L983.272 353.0" opacity="0.125"/>
+      <path d="M917.454 467.0L917.454 543.0" opacity="0.015"/>
+      <path d="M917.454 467.0L983.272 429.0" opacity="0.034"/>
+      <path d="M983.272 -27.0L1049.09 11.0" opacity="0.026"/>
+      <path d="M983.272 125.0L983.272 201.0" opacity="0.151"/>
+      <path d="M983.272 125.0L1049.09 87.0" opacity="0.094"/>
+      <path d="M983.272 201.0L1049.09 239.0" opacity="0.145"/>
+      <path d="M983.272 353.0L983.272 429.0" opacity="0.064"/>
+      <path d="M983.272 353.0L1049.09 315.0" opacity="0.094"/>
+      <path d="M983.272 429.0L1049.09 467.0" opacity="0.026"/>
+      <path d="M1049.09 11.0L1049.09 87.0" opacity="0.046"/>
+      <path d="M1049.09 11.0L1114.908 -27.0" opacity="0.018"/>
+      <path d="M1049.09 87.0L1114.908 125.0" opacity="0.066"/>
+      <path d="M1049.09 239.0L1049.09 315.0" opacity="0.109"/>
+      <path d="M1049.09 239.0L1114.908 201.0" opacity="0.101"/>
+      <path d="M1049.09 315.0L1114.908 353.0" opacity="0.066"/>
+      <path d="M1049.09 467.0L1114.908 429.0" opacity="0.018"/>
+      <path d="M1114.908 125.0L1114.908 201.0" opacity="0.074"/>
+      <path d="M1114.908 125.0L1180.726 87.0" opacity="0.043"/>
+      <path d="M1114.908 201.0L1180.726 239.0" opacity="0.066"/>
+      <path d="M1114.908 353.0L1114.908 429.0" opacity="0.031"/>
+      <path d="M1114.908 353.0L1180.726 315.0" opacity="0.043"/>
+      <path d="M1180.726 11.0L1180.726 87.0" opacity="0.019"/>
+      <path d="M1180.726 87.0L1246.543 125.0" opacity="0.026"/>
+      <path d="M1180.726 239.0L1180.726 315.0" opacity="0.046"/>
+      <path d="M1180.726 239.0L1246.543 201.0" opacity="0.040"/>
+      <path d="M1180.726 315.0L1246.543 353.0" opacity="0.026"/>
+      <path d="M1246.543 125.0L1246.543 201.0" opacity="0.027"/>
+      <path d="M1246.543 125.0L1312.361 87.0" opacity="0.014"/>
+      <path d="M1246.543 201.0L1312.361 239.0" opacity="0.022"/>
+      <path d="M1246.543 353.0L1312.361 315.0" opacity="0.014"/>
+      <path d="M1312.361 239.0L1312.361 315.0" opacity="0.015"/>
     </g>
-    <circle cx="840" cy="126" r="5" fill="#8ce5d1" />
-    <circle cx="944" cy="76" r="5" fill="#8ce5d1" />
-    <circle cx="1224" cy="78" r="5" fill="#8ce5d1" />
-    <circle cx="1330" cy="148" r="5" fill="#8ce5d1" />
-    <circle cx="1348" cy="316" r="5" fill="#8ce5d1" />
-    <circle cx="1278" cy="430" r="5" fill="#8ce5d1" />
-    <circle cx="1090" cy="455" r="5" fill="#8ce5d1" />
-    <circle cx="888" cy="418" r="5" fill="#8ce5d1" />
-    <circle cx="800" cy="302" r="5" fill="#8ce5d1" />
-    <g transform="translate(957 100) scale(4.5)">
-      <path d="M10.46 16.46L10.46 28.89M10.46 16.46L21.23 10.24M10.46 28.89L21.23 35.11M21.23 10.24L32 16.46M21.23 35.11L21.23 47.54M21.23 35.11L32 28.89M21.23 47.54L32 53.76M32 16.46L32 28.89M32 16.46L42.77 10.24M32 28.89L42.77 35.11M32 53.76L42.77 47.54M42.77 10.24L53.54 16.46M42.77 35.11L42.77 47.54M42.77 35.11L53.54 28.89M53.54 16.46L53.54 28.89" stroke="url(#bond)" stroke-width="1.2" fill="none" stroke-linecap="round" />
-      <g fill="#a8ecd6">
-        <circle cx="10.46" cy="16.46" r="1.55" />
-        <circle cx="10.46" cy="28.89" r="1.55" />
-        <circle cx="21.23" cy="10.24" r="1.55" />
-        <circle cx="21.23" cy="35.11" r="1.55" />
-        <circle cx="21.23" cy="47.54" r="1.55" />
-        <circle cx="32" cy="16.46" r="1.55" />
-        <circle cx="32" cy="53.76" r="1.55" />
-        <circle cx="42.77" cy="10.24" r="1.55" />
-        <circle cx="42.77" cy="35.11" r="1.55" />
-        <circle cx="42.77" cy="47.54" r="1.55" />
-        <circle cx="53.54" cy="16.46" r="1.55" />
-        <circle cx="53.54" cy="28.89" r="1.55" />
-      </g>
-      <circle cx="32" cy="28.89" r="4" fill="#0d2823" stroke="#62d9b8" stroke-width=".3" />
-      <circle cx="32" cy="28.89" r="2.2" fill="#c3f8df" />
+    <g fill="#8acbb5">
+      <circle cx="193.457" cy="125.0" r="2" opacity="0.036"/>
+      <circle cx="193.457" cy="201.0" r="2" opacity="0.047"/>
+      <circle cx="259.274" cy="87.0" r="2" opacity="0.046"/>
+      <circle cx="259.274" cy="239.0" r="2" opacity="0.081"/>
+      <circle cx="259.274" cy="315.0" r="2" opacity="0.061"/>
+      <circle cx="325.092" cy="125.0" r="2" opacity="0.097"/>
+      <circle cx="325.092" cy="201.0" r="2" opacity="0.130"/>
+      <circle cx="325.092" cy="353.0" r="2" opacity="0.073"/>
+      <circle cx="390.91" cy="11.0" r="2" opacity="0.046"/>
+      <circle cx="390.91" cy="87.0" r="2" opacity="0.108"/>
+      <circle cx="390.91" cy="239.0" r="2" opacity="0.193"/>
+      <circle cx="390.91" cy="315.0" r="2" opacity="0.145"/>
+      <circle cx="456.728" cy="-27.0" r="2" opacity="0.036"/>
+      <circle cx="456.728" cy="125.0" r="2" opacity="0.200"/>
+      <circle cx="456.728" cy="201.0" r="2" opacity="0.267"/>
+      <circle cx="456.728" cy="353.0" r="2" opacity="0.150"/>
+      <circle cx="456.728" cy="429.0" r="2" opacity="0.063"/>
+      <circle cx="522.546" cy="11.0" r="2" opacity="0.081"/>
+      <circle cx="522.546" cy="87.0" r="2" opacity="0.193"/>
+      <circle cx="522.546" cy="239.0" r="2" opacity="0.343"/>
+      <circle cx="522.546" cy="315.0" r="2" opacity="0.257"/>
+      <circle cx="522.546" cy="467.0" r="2" opacity="0.046"/>
+      <circle cx="588.364" cy="-27.0" r="2" opacity="0.055"/>
+      <circle cx="588.364" cy="353.0" r="2" opacity="0.231"/>
+      <circle cx="588.364" cy="429.0" r="2" opacity="0.097"/>
+      <circle cx="654.182" cy="11.0" r="2" opacity="0.108"/>
+      <circle cx="654.182" cy="467.0" r="2" opacity="0.061"/>
+      <circle cx="720.0" cy="-27.0" r="2" opacity="0.063"/>
+      <circle cx="720.0" cy="429.0" r="2" opacity="0.112"/>
+      <circle cx="785.818" cy="11.0" r="2" opacity="0.108"/>
+      <circle cx="785.818" cy="467.0" r="2" opacity="0.061"/>
+      <circle cx="851.636" cy="-27.0" r="2" opacity="0.055"/>
+      <circle cx="851.636" cy="353.0" r="2" opacity="0.231"/>
+      <circle cx="851.636" cy="429.0" r="2" opacity="0.097"/>
+      <circle cx="917.454" cy="11.0" r="2" opacity="0.081"/>
+      <circle cx="917.454" cy="87.0" r="2" opacity="0.193"/>
+      <circle cx="917.454" cy="239.0" r="2" opacity="0.343"/>
+      <circle cx="917.454" cy="315.0" r="2" opacity="0.257"/>
+      <circle cx="917.454" cy="467.0" r="2" opacity="0.046"/>
+      <circle cx="983.272" cy="-27.0" r="2" opacity="0.036"/>
+      <circle cx="983.272" cy="125.0" r="2" opacity="0.200"/>
+      <circle cx="983.272" cy="201.0" r="2" opacity="0.267"/>
+      <circle cx="983.272" cy="353.0" r="2" opacity="0.150"/>
+      <circle cx="983.272" cy="429.0" r="2" opacity="0.063"/>
+      <circle cx="1049.09" cy="11.0" r="2" opacity="0.046"/>
+      <circle cx="1049.09" cy="87.0" r="2" opacity="0.108"/>
+      <circle cx="1049.09" cy="239.0" r="2" opacity="0.193"/>
+      <circle cx="1049.09" cy="315.0" r="2" opacity="0.145"/>
+      <circle cx="1114.908" cy="125.0" r="2" opacity="0.097"/>
+      <circle cx="1114.908" cy="201.0" r="2" opacity="0.130"/>
+      <circle cx="1114.908" cy="353.0" r="2" opacity="0.073"/>
+      <circle cx="1180.726" cy="87.0" r="2" opacity="0.046"/>
+      <circle cx="1180.726" cy="239.0" r="2" opacity="0.081"/>
+      <circle cx="1180.726" cy="315.0" r="2" opacity="0.061"/>
+      <circle cx="1246.543" cy="125.0" r="2" opacity="0.036"/>
+      <circle cx="1246.543" cy="201.0" r="2" opacity="0.047"/>
     </g>
+    <g fill="url(#cell)">
+      <polygon points="654.182,87.0 720.0,125.0 720.0,201.0 654.182,239.0 588.364,201.0 588.364,125.0"/>
+    <polygon points="785.818,87.0 851.636,125.0 851.636,201.0 785.818,239.0 720.0,201.0 720.0,125.0"/>
+    <polygon points="720.0,201.0 785.818,239.0 785.818,315.0 720.0,353.0 654.182,315.0 654.182,239.0"/>
+    </g>
+    <path d="M588.364 125.0L588.364 201.0 M588.364 125.0L654.182 87.0 M588.364 201.0L654.182 239.0 M654.182 87.0L720.0 125.0 M654.182 239.0L654.182 315.0 M654.182 239.0L720.0 201.0 M654.182 315.0L720.0 353.0 M720.0 125.0L720.0 201.0 M720.0 125.0L785.818 87.0 M720.0 201.0L785.818 239.0 M720.0 353.0L785.818 315.0 M785.818 87.0L851.636 125.0 M785.818 239.0L785.818 315.0 M785.818 239.0L851.636 201.0 M851.636 125.0L851.636 201.0" fill="none" stroke="url(#bond)" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <g fill="#b0ead2" stroke="#102820" stroke-width="1.6">
+      <circle cx="588.364" cy="125.0" r="4.8"/>
+    <circle cx="588.364" cy="201.0" r="4.8"/>
+    <circle cx="654.182" cy="87.0" r="4.8"/>
+    <circle cx="654.182" cy="239.0" r="4.8"/>
+    <circle cx="654.182" cy="315.0" r="4.8"/>
+    <circle cx="720.0" cy="125.0" r="4.8"/>
+    <circle cx="720.0" cy="353.0" r="4.8"/>
+    <circle cx="785.818" cy="87.0" r="4.8"/>
+    <circle cx="785.818" cy="239.0" r="4.8"/>
+    <circle cx="785.818" cy="315.0" r="4.8"/>
+    <circle cx="851.636" cy="125.0" r="4.8"/>
+    <circle cx="851.636" cy="201.0" r="4.8"/>
+    </g>
+    <circle cx="720" cy="201" r="15" fill="#0e211c" stroke="#559c85" stroke-width=".8"/>
+    <circle cx="720" cy="201" r="7.2" fill="#cef5df"/>
   </g>
 </svg>
