@@ -53,6 +53,17 @@ cargo test --workspace --locked --exclude grafeno-desktop
 cargo build --locked -p grafeno-server
 ```
 
+When temporary storage is limited, on Linux you can reduce build artifacts
+with this variant (also used by CI):
+
+```bash
+CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  cargo test --workspace --locked --exclude grafeno-desktop -j 2
+```
+
+It disables debug information and incremental compilation while preserving
+tests and debug assertions. It does not require changes to `Cargo.toml`.
+
 ## Check the interface and client
 
 ```bash
@@ -96,7 +107,8 @@ open the window, automate clicks or generate installers.
 ## Contribution checks
 
 The [Verificación de contribuciones](.github/workflows/ci.yml) workflow runs
-on pull requests, pushes to `main` and `f-slg/**`, and manual dispatch.
+on pull requests, pushes to `main`, and manual dispatch. Pushes to a branch
+with an open PR therefore do not duplicate runs.
 It checks separately:
 
 - Studio and TypeScript client types and builds.

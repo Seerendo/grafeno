@@ -3,7 +3,7 @@ name: Verificación de contribuciones
 on:
   pull_request:
   push:
-    branches: [main, "f-slg/**"]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -12,6 +12,13 @@ permissions:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+# Limita los artefactos de compilación en los runners de CI.
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_BUILD_JOBS: "2"
 
 jobs:
   frontend:

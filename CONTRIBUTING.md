@@ -53,6 +53,17 @@ cargo test --workspace --locked --exclude grafeno-desktop
 cargo build --locked -p grafeno-server
 ```
 
+Si tienes poco espacio temporal, en Linux puedes reducir los artefactos de
+compilación con esta variante (también utilizada por CI):
+
+```bash
+CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  cargo test --workspace --locked --exclude grafeno-desktop -j 2
+```
+
+Desactiva la información de depuración y la caché incremental; mantiene las
+pruebas y las aserciones de depuración. No requiere cambiar `Cargo.toml`.
+
 ## Verificar la interfaz y el cliente
 
 ```bash
@@ -97,7 +108,8 @@ del puente, pero no abre la ventana, automatiza clics ni genera instaladores.
 ## Comprobaciones de cada contribución
 
 El workflow [Verificación de contribuciones](.github/workflows/ci.yml) se ejecuta
-en los pull requests, en los pushes a `main` y `f-slg/**`, y manualmente.
+en los pull requests, en los pushes a `main`, y manualmente. Así los pushes a
+una rama con un PR abierto no duplican las ejecuciones.
 Comprueba por separado:
 
 - Tipos y compilación de Studio y del cliente TypeScript.
