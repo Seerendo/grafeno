@@ -1,272 +1,155 @@
-<p align="center"><img src="docs/assets/logo.svg" width="96" alt="Grafeno logo: three fused carbon rings of a graphene lattice"></p>
-
 # Grafeno
 
-A graph engine in Rust for agent memory and knowledge: a property graph with
-namespaces, facts with valid time and record time, provenance, full-text and
-vector search, hybrid recall that returns context within a token budget,
-a Cypher-like query language (GQ) with statistics and property indexes, and
-graph algorithms (paths, centrality, communities, similarity, embeddings).
-First client: [Grafito](https://github.com/Seerendo/grafito).
+<p align="center">
+  <img src="docs/assets/readme-banner-es.svg" width="1440" alt="Grafeno. La memoria, conectada. Motor de grafos en Rust, escritorio Tauri e integración MCP.">
+</p>
 
-The design, phases and open decisions are in [DESIGN.md](DESIGN.md);
-measured speed, memory and limits, with charts, in
-[docs/performance.md](docs/performance.md).
+<p align="center">
+  <strong>Español</strong> · <a href="README.en.md">English</a><br>
+  <a href="#empezar-por-el-escritorio">Empezar</a> ·
+  <a href="docs/install.md">Instalación</a> ·
+  <a href="docs/query-language.md">Consultas GQ</a> ·
+  <a href="CONTRIBUTING.md">Contribuir</a>
+</p>
 
-## Status
+Grafeno es un **motor de grafos en Rust para memoria y conocimiento de agentes**.
+Conecta entidades, documentos y hechos; conserva su procedencia e historial;
+y combina búsqueda por texto, vectores y relaciones para recuperar contexto.
+Su primer cliente es [Grafito](https://github.com/Seerendo/grafito).
 
-- **Phase 1, core:** storage on [redb](https://github.com/cberner/redb),
-  transactions, neighbors, k hops, shortest path, subgraph.
-- **Phase 2, retrieval:** BM25 full-text index, HNSW vector index, hybrid
-  recall (RRF + graph expansion) and `context_for`.
-- **Phase 3, server:** the `grafeno` binary with an HTTP API (`grafeno serve`)
-  and an MCP server for agents (`grafeno mcp`), a TypeScript client and a
-  Docker image. See [crates/grafeno-server](crates/grafeno-server/README.md).
-- **Phase 4, foundations and validation:** namespaces and statistics, paged
-  listings, integrity check and index rebuild, export/import, and property,
-  durability and concurrency tests plus benchmarks
-  ([docs/benchmarks.md](docs/benchmarks.md)).
-- **Phase 5, shell and query language:** `grafeno shell`, a console like
-  `psql` for a file or a server, and [GQ](docs/query-language.md), a
-  Cypher-style language with time travel (`VALID AT`, `KNOWN AT`).
-- **Phase 6, Studio and installers:** Grafeno Studio, the web interface
-  (explorer, graph view with time travel, query editor, search and context
-  lab, administration) served by `grafeno serve` at `/studio/`; a Windows
-  installer with a Windows service; `.deb` and `.rpm` packages with a
-  systemd service; `install.sh` for any Linux. See
-  [docs/install.md](docs/install.md).
-- **Phase 7, memory:** entities found by normalized names and aliases (MCP
-  `remember` updates them instead of duplicating), importance, accesses and
-  decay in recall ranking, duplicate detection and merging, archiving, and
-  consolidation of old memories into summaries; a Memory view in the Studio.
-- **Studio redesign:** a new look with light and dark themes; nodes, labels,
-  properties, text, importance and facts are created and edited from the
-  interface (explorer, graph and dialogs); a script workspace with tabs,
-  GQ highlighting and completion, run-at-cursor or run-all, and results as a
-  table, JSON or graph; a command palette (Ctrl+K). The logo is a piece of
-  graphene: three fused carbon rings.
-- **Phase 8.1, complete GQ:** `OPTIONAL MATCH`, `WITH`, `UNWIND`, `UNION`,
-  `MERGE`, `FOREACH`, `CALL` procedures, `CASE`, list comprehensions,
-  quantifiers, `reduce`, pattern predicates in `WHERE`, `EXPLAIN` and
-  `PROFILE` ([docs/query-language.md](docs/query-language.md)).
-- **Phase 8.2, statistics and time:** `stdev`, `variance`, `median`,
-  percentiles and `mode`; durations with calendar arithmetic,
-  `duration.between`, date parts and `date.truncate` for grouping by period;
-  `temporal.series` with per-row `VALID AT` to count what was true at each
-  point; bar and line charts in the Studio's script results.
-- **Phase 8.3, indexes and safe queries:** `CREATE INDEX`, unique
-  constraints, a planner that starts from indexes or the smallest label and
-  stops early for `LIMIT`; per-query limits (time, records read, rows held)
-  and cancellation, so one query cannot take the service down; an indexes
-  panel in the Studio.
-- **Phase 8.4, concurrent and bulk work:** group commit for concurrent
-  writes (11 times the writes per second on disk), eventual durability,
-  bulk imports in chunks, and 503 with `Retry-After` when the server is
-  full.
-- **Phase 8.5, graph algorithms:** `CALL algo.*` for weighted paths
-  (Dijkstra, A*, Yen, all shortest paths), centrality (degree, PageRank,
-  betweenness, closeness), communities (components, label propagation,
-  Louvain, triangles), similarity, link prediction and FastRP embeddings,
-  on a cached in-memory projection; over HTTP too, and in the Studio's
-  graph (color by community, size by centrality).
-- **Phase 9.1, namespaces you create:** namespaces are records of their
-  own (layout version 6): empty ones stay listed, creating an existing one
-  is a clear conflict, and dropping one deletes everything in it; over
-  HTTP, the shell (`\ns create`, `\ns drop`), GQ (`SHOW NAMESPACES`) and
-  the Studio.
-- **Phase 9.2, graph lab design:** a new design for the Studio, dark first,
-  with a floating rail and command bar over the canvas, Space Grotesk and
-  JetBrains Mono bundled for offline use, and glowing nodes.
-- **Phase 9.3, a graph you can handle:** the Studio's graph is a live
-  physics simulation on its own canvas: drag and pin nodes, lasso and
-  move groups, connect by dragging, context menus, a minimap, and
-  communities that collapse into one node.
-- **Phase 9.4, desktop application:** `apps/desktop`, a Tauri app that
-  opens database files with the engine inside the app (no service, no
-  port) or connects to a server, with native menus, dialogs and recent
-  databases ([apps/desktop/README.md](apps/desktop/README.md)).
-- **Phase 9.5, installers and icons:** Grafeno Desktop installers for
-  Windows (`.exe`, `.msi`) and Linux (`.deb`, `.rpm`, `.AppImage`) with
-  `.redb` files opening in it, every icon rendered from one source, and a
-  Grafeno Studio menu entry with its icon in the server's Linux packages.
-- **Phase 10.1, isolation and authorization:** API keys with grants per
-  namespace (read, write, admin, prefixes), owners, and keys limited to
-  their own records; every write records who made it (`@recorded_by`);
-  every route checked by one policy and tested against leaks; `grafeno
-  keys`, MCP fences (`--allow`, `--read-only`, `--as`) and a keys panel in
-  the Studio.
-- **Phase 10.2, integrity under failure:** crash tests during imports,
-  rebuilds, drops and upgrades; databases written by every past layout
-  version open and upgrade; damaged files are refused by a checksum
-  check (`grafeno check`) instead of crashing; online backups (`grafeno
-  backup`, `GET /v1/backup`, the Studio).
-- **Phase 10.3, vector search under change:** recall@10 measured after
-  deletions, reinserts and churn; four repair bugs fixed (a reinserted
-  vector could become its own only neighbor), so recall stays at 0.99 or
-  more; `grafeno compact` and a recall estimate (`grafeno check --recall`).
-- **Phase 10.4, costly queries:** 32 hostile queries (products, long paths,
-  huge `UNWIND`s and reduces, deep nesting) all stop within their limits; a
-  memory limit for values and held rows, time checked inside computing
-  loops, a nesting limit, cost estimates in `EXPLAIN` with an optional
-  `max_cost`, and a fuzz test that the parser and planner never panic.
-- **Phase 10.5, correct merges:** merges refuse nodes that disagree (two
-  emails, a person and a company, two birth dates) unless forced; duplicate
-  detection follows the same identity rules and catches typos; every merge
-  is recorded (who, when, both nodes as they were) and can be undone.
-- **Phase 10.6, memory under large graphs:** measured with 10 M edges and
-  1 M vectors in 2 GiB and 512 MiB containers; caches sized by bytes
-  (`[memory]`), projections at about 12 bytes per edge, a streaming
-  `check` ten times faster, and GQ algorithms bounded by `max_memory` and
-  `top`.
-- **Phase 10.7, one writer:** saturation measured (about 2 ms a write up
-  to 4 000 a second with immediate durability, 11 000 at most); imports
-  go through a bulk lane, so an agent writing during a large import waits
-  88 ms at p99 instead of the whole import; `GET /v1/metrics` for
-  Prometheus. Phase 10 (hardening) is complete.
-- **Phase 11.0, entity resolution:** text similarity in GQ (Levenshtein,
-  Damerau, Jaro-Winkler, n-grams, Soundex and a Spanish phonetic key),
-  fuzzy trigram indexes (`CREATE FUZZY INDEX`, about 23 times faster than
-  comparing with every node), and match rules per label with strong
-  keys, weighted fields, neighbors as evidence and explained decisions
-  (`db.match`, `POST /v1/{ns}/match`, the `find_matches` MCP tool).
-- **Phase 11.1, extraction:** memories are read for what they mention
-  (known names through a gazetteer, emails, URLs, handles, hashtags,
-  dates, amounts, identifiers, recurring new names) and linked by
-  `mentions` edges; namesakes are settled by context or queued for
-  review; runs read only what changed (`grafeno extract`, the `extract`
-  MCP tool); agents can send their own mentions.
-- **Phase 11.2, contradicting facts:** edge constraints (`REQUIRE ONE PER
-  SOURCE`, `TARGET` or `PAIR`) end the old fact in valid time when a new
-  one contradicts it, as a new version so `KNOWN AT` keeps what was
-  believed; or flag, or reject; functional properties keep their
-  earlier values (`history(n, 'city')`).
-- **Phase 11.3, community summaries:** Louvain levels kept as a
-  hierarchy, each community summarized without a model (central members,
-  distinctive terms, label mix, key facts, time span) as a `Community`
-  node; refreshes rewrite only what changed and keep an agent's own text;
-  `overview` answers broad questions and drills down.
+En el escritorio, abre una base local con el motor dentro de la aplicación
+Tauri. También puede utilizarse como biblioteca Rust, servidor HTTP o servidor
+MCP para agentes.
 
-## Installing
+## Qué puedes hacer
 
-**Grafeno Desktop**, the desktop application (database files with the
-engine inside, or a connection to a server):
+| Capacidad | Para qué sirve |
+| --- | --- |
+| **Conectar conocimiento** | Nodos con etiquetas y propiedades, relaciones dirigidas y namespaces para organizar los datos. |
+| **Consultar el pasado** | Distinguir cuándo un hecho era válido y cuándo el sistema lo conoció mediante `VALID AT` y `KNOWN AT`. |
+| **Encontrar contexto** | Combinar búsqueda BM25, vectores HNSW y expansión del grafo; preparar contexto con un presupuesto de tokens. |
+| **Mantener la memoria** | Resolver entidades, revisar posibles duplicados, registrar fusiones reversibles y resumir comunidades sin un modelo. |
+| **Explorar y consultar** | Visualizar relaciones, editar información y ejecutar GQ, un lenguaje parecido a Cypher. |
+| **Operar la base** | Usar claves con permisos, respaldos, importación y exportación, comprobaciones de integridad y reconstrucción de índices. |
 
-| System | Install |
-| ------ | ------- |
-| Windows | `grafeno-desktop-<version>-windows-x64-setup.exe` or `.msi` |
-| Debian, Ubuntu | `sudo apt install ./grafeno-desktop_<version>_amd64.deb` |
-| Fedora, RHEL | `sudo dnf install ./grafeno-desktop-<version>-1.x86_64.rpm` |
-| Any Linux | `grafeno-desktop-<version>-x86_64.AppImage` |
+## Empezar por el escritorio
 
-**The Grafeno server**, as a service for agents and applications:
+**Grafeno Desktop** permite crear o abrir archivos `.redb`, recuperar bases
+recientes y conectarse a un servidor. El modo local ejecuta el motor dentro del
+proceso: no necesita un servicio ni abre un puerto.
 
-| System | Install |
-| ------ | ------- |
-| Windows | `grafeno-<version>-windows-x64-setup.exe` |
-| Debian, Ubuntu | `sudo apt install ./grafeno_<version>-1_amd64.deb` |
-| Fedora, RHEL | `sudo dnf install ./grafeno-<version>-1.x86_64.rpm` |
-| Any Linux | `curl -fsSL https://raw.githubusercontent.com/Seerendo/grafeno/main/install.sh \| sh` |
+Para conocer los paquetes de Windows y Linux, consulta la
+[guía de instalación](docs/install.md) y la
+[documentación de escritorio](apps/desktop/README.md).
 
-Then open Grafeno Studio at <http://127.0.0.1:7810/studio/>, with the token
-from `grafeno config token`. Details, Docker and settings:
-[docs/install.md](docs/install.md).
-
-```text
-$ grafeno shell --db memory.redb -n vault
-vault=> MATCH (p:Person)-[w:works_at]->(c) VALID AT '2022-01-01'
-vault->   RETURN p.name, c.name, date(w.@valid_from) AS since;
- p.name | c.name | since
---------+--------+------------
- Ana    | Acme   | 2020-01-01
-(1 row)
-```
-
-Graph algorithms run from GQ too
-([docs/query-language.md](docs/query-language.md#graph-algorithms)):
-
-```text
-vault=> CALL algo.pageRank({labels: 'Person'}) YIELD node, score
-vault->   RETURN node.name, score LIMIT 3;
-vault=> CALL algo.louvain() YIELD node, community SET node.community = community;
-```
-
-Give an agent long-term memory over MCP, for example in Claude Code:
+Para ejecutarlo desde el código, prepara primero los
+[requisitos de desarrollo](CONTRIBUTING.md#requisitos). Desde la raíz:
 
 ```bash
-cargo install --path crates/grafeno-server
+npm ci --prefix studio
+npm run build --prefix studio
+cargo run --locked -p grafeno-desktop
 ```
+
+Un archivo `.redb` solo puede estar abierto en un proceso a la vez. Cierra la
+base en el escritorio antes de abrir ese mismo archivo con el servidor o la
+consola, y viceversa.
+
+## Una consulta, relaciones e historia
+
+Con el binario `grafeno` instalado, abre una consola local:
 
 ```bash
-claude mcp add grafeno -- grafeno mcp --db ~/.grafeno/memory.redb
+grafeno shell --db ejemplo.redb -n demo
 ```
 
-Or embed it as a library:
+Crea una persona y una relación con fecha de inicio:
 
-```rust
-use grafeno::{Grafeno, NewEdge, NewNode, Timestamp};
-use grafeno_memory::{ContextOptions, RecallQuery, context_for};
-
-let db = Grafeno::open("memory.redb")?;
-db.write(|tx| {
-    let ana = tx.create_node("vault", NewNode::new("Person").prop("name", "Ana"))?;
-    let note = tx.create_node(
-        "vault",
-        NewNode::new("Note")
-            .prop("title", "Rust notes")
-            .text("Ownership rules and the borrow checker")
-            .embedding(vec![0.12, 0.80, 0.33]),
-    )?;
-    tx.create_edge("vault", NewEdge::new(ana, "wrote", note).valid_from(Timestamp::now()))?;
-    Ok(())
-})?;
-
-let read = db.begin_read()?;
-let query = RecallQuery::new()
-    .text("borrow checker")
-    .embedding(vec![0.10, 0.85, 0.30]);
-let context = context_for(&read, "vault", &query, &ContextOptions::with_budget(800))?;
-println!("{}", context.rendered);
-// ## Memory
-// [1] Rust notes (Note)
-// Ownership rules and the borrow checker
-//
-// [2] Ana (Person)
-//
-// ## Facts
-// - Ana wrote Rust notes (from 2026-11-03)
+```cypher
+CREATE (a:Person {name: 'Ana'})
+  -[:works_at {@valid_from: '2024-01-01'}]->
+  (h:Organization {name: 'Hospital Central'})
+RETURN a.name, h.name;
 ```
 
-## Development
+Consulta qué era válido en una fecha:
 
-Guía de contribución: [Español](CONTRIBUTING.md) | [English](CONTRIBUTING.en.md).
-Incluye requisitos, compilación de escritorio y comprobaciones de cada PR.
-The contribution guide covers prerequisites, desktop builds and PR checks.
+```cypher
+MATCH (p:Person)-[r:works_at]->(o:Organization)
+VALID AT '2024-06-01'
+RETURN p.name, o.name, r.@valid_from;
+```
 
-On Windows, install Visual Studio Build Tools (C++ workload) and use the MSVC
-Rust toolchain.
+GQ también incluye agregaciones, índices y algoritmos de caminos, centralidad,
+comunidades y similitud. Consulta la [referencia de GQ](docs/query-language.md).
+
+## Integrar aplicaciones y agentes
+
+| Forma de acceso | Punto de entrada |
+| --- | --- |
+| Escritorio local o conexión a un servidor | [Aplicación Tauri](apps/desktop/README.md) |
+| Servicio HTTP, servidor MCP y consola | [Servidor Grafeno](crates/grafeno-server/README.md) |
+| Aplicaciones JavaScript y TypeScript | [Cliente TypeScript](clients/typescript/README.md) |
+| Biblioteca Rust embebida | [`grafeno`](crates/grafeno/src/lib.rs) y [`grafeno-memory`](crates/grafeno-memory/src/lib.rs) |
+
+Para iniciar MCP con una base propia, después de instalar el binario:
 
 ```bash
-cargo test
+grafeno mcp --db agente.redb
 ```
+
+Para probar el servidor HTTP con datos temporales en memoria:
 
 ```bash
-cd clients/typescript && npm test
+grafeno serve --memory
 ```
+
+Escucha por defecto en `127.0.0.1:7810`. Studio está en
+<http://127.0.0.1:7810/studio/> cuando su compilación se incluye en el binario.
+Los datos de `--memory` se pierden al cerrar el proceso. Para una configuración
+persistente y autenticada, sigue la [guía del servidor](docs/install.md#settings).
+
+## Cómo está organizado
+
+| Directorio | Responsabilidad |
+| --- | --- |
+| `crates/grafeno-core` | Modelo de nodos, relaciones, identificadores y tiempo. |
+| `crates/grafeno` | Almacenamiento redb, transacciones, índices, recorridos y algoritmos. |
+| `crates/grafeno-memory` | Recuperación híbrida, contexto, extracción y mantenimiento de memoria. |
+| `crates/grafeno-query` | Parser, planificación y ejecución de GQ. |
+| `crates/grafeno-server` | API HTTP, MCP, consola y administración. |
+| `studio` | Interfaz compartida por el navegador y el escritorio. |
+| `apps/desktop` | Ventana Tauri, archivos locales, menús y puente hacia el motor. |
+| `clients/typescript` | Cliente HTTP para aplicaciones. |
+
+## Desarrollo y pruebas
+
+La [guía de contribución en español](CONTRIBUTING.md) y su
+[versión en inglés](CONTRIBUTING.en.md) incluyen los requisitos, la compilación
+del escritorio y una alternativa que reduce el espacio temporal utilizado.
+
+Para verificar el motor sin instalar las bibliotecas gráficas de Tauri:
 
 ```bash
-cargo clippy --all-targets
+cargo test --workspace --locked --exclude grafeno-desktop
 ```
 
-```bash
-cargo run -p grafeno-memory --example context
-```
+El [workflow de contribuciones](.github/workflows/ci.yml) verifica interfaz y
+cliente TypeScript, motor y servidor, integración del cliente, pruebas del
+puente Tauri y compilación del escritorio en Linux. La interacción visual y
+los instaladores requieren comprobaciones adicionales.
 
-| Crate            | Contents                                                     |
-| ---------------- | ------------------------------------------------------------ |
-| `grafeno-core`   | Model: `Node`, `Edge`, UUID v7 ids, `Timestamp`              |
-| `grafeno`        | Database, transactions, traversals, BM25, HNSW and property indexes, group commit, graph algorithms (`algo`) |
-| `grafeno-memory` | Hybrid recall and token-budgeted context                      |
-| `grafeno-query`  | GQ: parser, planner and executor of the query language, `CALL algo.*` |
-| `grafeno-server` | The `grafeno` binary: HTTP API, MCP server, shell, admin CLI   |
-| `clients/typescript` | `grafeno-client`, the TypeScript HTTP client              |
-| `apps/desktop`   | `grafeno-desktop`, the desktop application (Tauri)            |
+## Diseño, rendimiento y alcance
+
+- [Diseño y decisiones](DESIGN.md): arquitectura, almacenamiento y semántica temporal.
+- [Rendimiento](docs/performance.md) y [benchmarks](docs/benchmarks.md): métodos, datos y límites de las mediciones del proyecto.
+- [Historial de desarrollo](docs/development-history.md): detalle de las fases documentadas originalmente.
+
+Los embeddings los proporciona el cliente. El presupuesto de contexto utiliza
+una estimación de tokens por defecto; la biblioteca Rust permite proporcionar
+el contador del modelo. El motor admite múltiples lectores y un escritor;
+no implementa distribución ni sharding. La licencia sigue como decisión abierta
+en el diseño.
+
+Creado por [Seerendo](https://github.com/Seerendo). La identidad gráfica representa
+tres anillos de carbono fusionados de una red de grafeno.

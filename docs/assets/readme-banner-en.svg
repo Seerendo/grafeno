@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="520" viewBox="0 0 1440 520" role="img" aria-labelledby="title desc">
+  <title id="title">Grafeno: connected memory and knowledge</title>
+  <desc id="desc">One graph engine. Many ways to explore. Rust, Tauri, MCP.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#111d22"/><stop offset="1" stop-color="#080f13"/>
+    </linearGradient>
+    <radialGradient id="field">
+      <stop stop-color="#1d6451" stop-opacity=".28"/><stop offset="1" stop-color="#1d6451" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="bond" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#b2f3dc"/><stop offset="1" stop-color="#27b99e"/>
+    </linearGradient>
+    <pattern id="grid" width="56" height="56" patternUnits="userSpaceOnUse">
+      <path d="M56 0H0V56" fill="none" stroke="#b2f3dc" stroke-opacity=".035"/>
+    </pattern>
+  </defs>
+  <rect width="1440" height="520" rx="24" fill="url(#background)"/>
+  <rect x="744" width="672" height="520" fill="url(#grid)"/>
+  <ellipse cx="1095" cy="260" rx="345" ry="290" fill="url(#field)"/>
+  <path d="M760 64V456" stroke="#c0e8dc" stroke-opacity=".12"/>
+  <g transform="translate(56 43) scale(.72)">
+    <path d="M10.46 16.46L10.46 28.89M10.46 16.46L21.23 10.24M10.46 28.89L21.23 35.11M21.23 10.24L32 16.46M21.23 35.11L21.23 47.54M21.23 35.11L32 28.89M21.23 47.54L32 53.76M32 16.46L32 28.89M32 16.46L42.77 10.24M32 28.89L42.77 35.11M32 53.76L42.77 47.54M42.77 10.24L53.54 16.46M42.77 35.11L42.77 47.54M42.77 35.11L53.54 28.89M53.54 16.46L53.54 28.89" stroke="#70dcc1" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  </g>
+  <g font-family="DejaVu Sans,Arial,sans-serif">
+    <text x="116" y="76" font-size="20" font-weight="600" letter-spacing="4" fill="#d1e7df">GRAFENO</text>
+    <text x="64" y="201" font-size="76" font-weight="700" letter-spacing="-3.5" fill="#f2f4ed">Memory,</text>
+    <text x="64" y="285" font-size="76" font-weight="700" letter-spacing="-3.5" fill="#85e3c7">connected.</text>
+    <text x="68" y="339" font-size="20" fill="#9eafa9">One graph engine. Many ways to explore.</text>
+  </g>
+  <g fill="none" stroke="#35574d" stroke-width="1.3">
+    <circle cx="1095" cy="260" r="184" stroke-dasharray="3 9" stroke-opacity=".5"/>
+    <circle cx="1095" cy="260" r="238" stroke-opacity=".32"/>
+    <path d="M840 126L1004 174M944 76L1052 146M1224 78L1149 146M1330 148L1198 174M1348 316L1198 230M1278 430L1149 314M1090 455L1101 342M888 418L1052 314M800 302L1004 230"/>
+    <path d="M840 126L944 76L1224 78L1330 148L1348 316L1278 430L1090 455L888 418L800 302Z" stroke-opacity=".38"/>
+  </g>
+  <circle cx="840" cy="126" r="18" fill="#53d9bf" opacity=".05"/><circle cx="840" cy="126" r="5" fill="#8ce5d1"/><circle cx="840" cy="126" r="10" fill="none" stroke="#31584f"/><circle cx="944" cy="76" r="18" fill="#53d9bf" opacity=".05"/><circle cx="944" cy="76" r="5" fill="#8ce5d1"/><circle cx="944" cy="76" r="10" fill="none" stroke="#31584f"/><circle cx="1224" cy="78" r="18" fill="#53d9bf" opacity=".05"/><circle cx="1224" cy="78" r="5" fill="#8ce5d1"/><circle cx="1224" cy="78" r="10" fill="none" stroke="#31584f"/><circle cx="1330" cy="148" r="18" fill="#53d9bf" opacity=".05"/><circle cx="1330" cy="148" r="5" fill="#8ce5d1"/><circle cx="1330" cy="148" r="10" fill="none" stroke="#31584f"/><circle cx="1348" cy="316" r="18" fill="#53d9bf" opacity=".05"/><circle cx="1348" cy="316" r="5" fill="#8ce5d1"/><circle cx="1348" cy="316" r="10" fill="none" stroke="#31584f"/><circle cx="1278" cy="430" r="18" fill="#53d9bf" opacity=".05"/><circle cx="1278" cy="430" r="5" fill="#8ce5d1"/><circle cx="1278" cy="430" r="10" fill="none" stroke="#31584f"/><circle cx="1090" cy="455" r="18" fill="#53d9bf" opacity=".05"/><circle cx="1090" cy="455" r="5" fill="#8ce5d1"/><circle cx="1090" cy="455" r="10" fill="none" stroke="#31584f"/><circle cx="888" cy="418" r="18" fill="#53d9bf" opacity=".05"/><circle cx="888" cy="418" r="5" fill="#8ce5d1"/><circle cx="888" cy="418" r="10" fill="none" stroke="#31584f"/><circle cx="800" cy="302" r="18" fill="#53d9bf" opacity=".05"/><circle cx="800" cy="302" r="5" fill="#8ce5d1"/><circle cx="800" cy="302" r="10" fill="none" stroke="#31584f"/>
+  <g transform="translate(957 100) scale(4.5)">
+    <path d="M10.46 16.46L10.46 28.89M10.46 16.46L21.23 10.24M10.46 28.89L21.23 35.11M21.23 10.24L32 16.46M21.23 35.11L21.23 47.54M21.23 35.11L32 28.89M21.23 47.54L32 53.76M32 16.46L32 28.89M32 16.46L42.77 10.24M32 28.89L42.77 35.11M32 53.76L42.77 47.54M42.77 10.24L53.54 16.46M42.77 35.11L42.77 47.54M42.77 35.11L53.54 28.89M53.54 16.46L53.54 28.89" stroke="url(#bond)" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+    <g fill="#a8ecd6"><circle cx="10.46" cy="16.46" r="1.55"/><circle cx="10.46" cy="28.89" r="1.55"/><circle cx="21.23" cy="10.24" r="1.55"/><circle cx="21.23" cy="35.11" r="1.55"/><circle cx="21.23" cy="47.54" r="1.55"/><circle cx="32" cy="16.46" r="1.55"/><circle cx="32" cy="53.76" r="1.55"/><circle cx="42.77" cy="10.24" r="1.55"/><circle cx="42.77" cy="35.11" r="1.55"/><circle cx="42.77" cy="47.54" r="1.55"/><circle cx="53.54" cy="16.46" r="1.55"/><circle cx="53.54" cy="28.89" r="1.55"/></g>
+    <circle cx="32" cy="28.89" r="4" fill="#0d2823" stroke="#62d9b8" stroke-width=".3"/>
+    <circle cx="32" cy="28.89" r="2.2" fill="#c3f8df"/>
+  </g>
+  <g font-family="DejaVu Sans Mono,monospace" font-size="13" fill="#b7c9c1">
+    <rect x="66" y="405" width="96" height="34" rx="17" fill="#17342c" stroke="#2c5043"/>
+    <circle cx="85" cy="422" r="3" fill="#85e3c7"/><text x="98" y="427">RUST</text>
+    <rect x="174" y="405" width="106" height="34" rx="17" fill="#12262a" stroke="#284249"/>
+    <circle cx="193" cy="422" r="3" fill="#82c5d0"/><text x="206" y="427">TAURI</text>
+    <rect x="292" y="405" width="88" height="34" rx="17" fill="#232a22" stroke="#424a38"/>
+    <circle cx="311" cy="422" r="3" fill="#c4d291"/><text x="324" y="427">MCP</text>
+  </g>
+  <path d="M64 478H1376" stroke="#c0e8dc" stroke-opacity=".1"/>
+</svg>
