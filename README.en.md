@@ -1,7 +1,7 @@
 # Grafeno
 
 <p align="center">
-  <img src="docs/assets/readme-banner-en.svg" width="1440" alt="Grafeno. Memory, connected. Rust graph engine, Tauri desktop and MCP integration.">
+  <img src="docs/assets/readme-banner-en.svg" width="1440" alt="Grafeno symbol: three carbon rings connected to a network of nodes.">
 </p>
 
 <p align="center">

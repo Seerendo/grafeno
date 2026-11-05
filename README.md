@@ -1,7 +1,7 @@
 # Grafeno
 
 <p align="center">
-  <img src="docs/assets/readme-banner-es.svg" width="1440" alt="Grafeno. La memoria, conectada. Motor de grafos en Rust, escritorio Tauri e integración MCP.">
+  <img src="docs/assets/readme-banner-es.svg" width="1440" alt="Símbolo de Grafeno: tres anillos de carbono conectados a una red de nodos.">
 </p>
 
 <p align="center">
