@@ -32,6 +32,7 @@ mod memory;
 mod merge;
 mod namespace;
 mod resolve;
+mod state;
 mod stats;
 mod store;
 mod text;

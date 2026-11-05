@@ -417,6 +417,31 @@ namesakes pass, and each decision lists its fields so they can be tuned.
 Initials are the hard case for trigram measures; a field compared with
 Jaro-Winkler, or an `initials` alias, would catch more of them.
 
+## Extraction (`crates/grafeno-memory/examples/extract_bench.rs`)
+
+5 000 entities (1 000 companies, 4 000 people with names from short lists,
+so 3 982 share a name with another; each person works at one company) and
+20 000 memories, each naming one to three people and their companies,
+sometimes with an email, a hashtag, an amount, or a project that recurs.
+In memory, release build, 2026-11-05.
+
+| Run | Texts read | Seconds |
+| --- | --- | --- |
+| first | 20 000 | 6.2 (3 236 texts/s) |
+| again, nothing changed | 0 (20 000 unchanged) | 0.06 |
+| again, 1% changed | 200 | 0.15 |
+
+The first run found 79 820 names, 10 064 emails, 6 658 hashtags, 6 678
+amounts and 1 923 phrases, and wrote 97 857 `mentions` edges. Against what
+the generator put in each memory: 79 348 of 79 787 mentions (0.994) were
+linked to the right entity, and none to a wrong one. 39 713 mentions were
+of a name several people share; the company named in the same sentence,
+linked to one of them by `works_at`, settled all but 263 names, which
+wait in the review queue. The recurring projects became entities, but
+phrases are words only: the 200 projects, named with a number ("Proyecto
+Andina 3"), collapsed into 16 entities by their words. Names with digits
+need an identifier pattern.
+
 ## Remaining limits
 
 - **Vector search reads each visited vector from redb** (about 0.4 µs per

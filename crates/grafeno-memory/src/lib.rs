@@ -22,8 +22,10 @@
 //! ```
 
 mod context;
+pub mod extract;
 mod maintenance;
 mod recall;
+mod reconcile;
 
 pub use context::{
     Context, ContextFact, ContextItem, ContextOptions, context_for, estimate_tokens,
@@ -34,3 +36,7 @@ pub use maintenance::{
     weak_memories, write_summary,
 };
 pub use recall::{ARCHIVED, Expansion, Ranking, RecallQuery, Recalled, Signal, recall};
+pub use reconcile::{
+    AgentMention, ExtractOptions, ExtractReport, MENTIONS, Occurrence, Plan, Resolution,
+    ReviewItem, SOURCE_LABELS, extract, extract_batch, ingest, plan, resolve, review_queue,
+};

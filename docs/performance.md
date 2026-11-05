@@ -21,6 +21,7 @@ test environments").
 | Hostile queries (cartesian products, huge loops, deep nesting) | 32 of 32 stopped within their limits |
 | Finding a person by a misspelled name among 100 000 | 20 ms with a fuzzy index |
 | Telling duplicates from namesakes (match rule) | 95% of duplicates found, 99.4% of "same" right |
+| Linking what memories mention to known entities | 3 200 texts/s, 99.4% linked right, none wrong |
 
 ## Test environments
 
@@ -161,6 +162,23 @@ person), a rule on name, birth date and city found 95% of the duplicates
 of its "same" decisions were right. Every decision lists each field's
 similarity, so a rule can be checked and tuned; with a looser date
 tolerance (a year instead of 30 days) 115 namesakes passed as "same".
+
+## Extraction
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/charts/extract-runs-dark.svg">
+  <img alt="extracting 20 000 memories: 6.2 s the first time, 0.06 s when nothing changed, 0.15 s when 1% changed" src="assets/charts/extract-runs-light.svg">
+</picture>
+
+`grafeno extract` (or `POST /v1/{ns}/extract`, or the `extract` MCP tool)
+reads the memories that are new or changed and links what they mention:
+the names and aliases the namespace knows, emails, URLs, handles,
+hashtags, dates, amounts, and new names once they recur. On 20 000
+memories naming 5 000 entities it reads about 3 200 texts a second and
+linked 99.4% of the mentions to the right entity, none to a wrong one,
+although most people shared their name with someone: the other entities
+in the same text decide, and what they cannot decide waits for review.
+Later runs read only what changed.
 
 ## The engine
 

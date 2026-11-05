@@ -511,6 +511,12 @@ def main():
           [(r['search'], [num(r['p50_ms'])], 0 if 'fuzzy' in r['search'] else (2 if 'find_matches' in r['search'] else False)) for r in rows],
           ' ms', log=True, note='Data: docs/data/resolve_speed.csv')
 
+    # Extraction runs.
+    rows = read('extract_runs.csv')
+    hbars('extract-runs', 'Extracting 20 000 memories, then again', 'Seconds, log scale; 5 000 known entities. Only new or changed texts are read. E1-mem.',
+          [(f"{r['run']} ({r['texts_read']} read)", [num(r['seconds'])], 0 if r['run'] == 'first run' else 2) for r in rows],
+          ' s', log=True, note='Data: docs/data/extract_runs.csv')
+
     print('charts written to', OUT)
 
 

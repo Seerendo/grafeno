@@ -1766,8 +1766,13 @@ dependencies = [
 name = "grafeno-memory"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "grafeno",
+ "regex",
  "serde",
+ "serde_json",
+ "unicode-normalization",
+ "uuid",
 ]
 
 [[package]]

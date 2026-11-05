@@ -439,6 +439,26 @@ export interface FuzzyHit {
   score: number;
 }
 
+/** What an extraction run (or an agent's mentions) did. */
+export interface ExtractReport {
+  read: number;
+  unchanged: number;
+  mentions: number;
+  linked: number;
+  created: number;
+  queued: number;
+  found: Record<string, number>;
+}
+
+/** Something extraction could not decide on its own. */
+export interface ReviewItem {
+  key: string;
+  kind: "phrase" | "ambiguous";
+  value: string;
+  occurrences: { source: Id; start: number; end: number; surface: string }[];
+  candidates: Id[];
+}
+
 /** A recorded merge (the snapshots it keeps for undo are left loosely typed). */
 export interface MergeRecord {
   id: Id;
@@ -895,6 +915,26 @@ export class Namespace {
   /** Pairs of nodes of a label that its rule calls the same or to review. */
   matchPairs(label: string, limit?: number): Promise<{ a: Id; b: Id; match: Match }[]> {
     return this.#call("GET", `/matches${queryString({ label, limit })}`);
+  }
+
+  /** Reads new and changed texts and links what they mention; what it cannot decide goes to the review queue. */
+  extract(options: { force?: boolean; source_labels?: string[]; entity_labels?: string[]; min_phrase_sources?: number; identifiers?: { label: string; pattern: string }[] } = {}): Promise<ExtractReport> {
+    return this.#call("POST", "/extract", options);
+  }
+
+  /** What extraction could not decide: ambiguous names and new phrases. */
+  reviewQueue(limit?: number): Promise<ReviewItem[]> {
+    return this.#call("GET", `/review${queryString({ limit })}`);
+  }
+
+  /** Settles a review item; the decision is remembered for later runs. */
+  resolveReview(key: string, resolution: { action: "link"; node: Id } | { action: "create"; label?: string } | { action: "dismiss" }): Promise<{ node: Id | null }> {
+    return this.#call("POST", `/review/${encodeURIComponent(key)}`, resolution);
+  }
+
+  /** An agent's own mentions of a node's text, reconciled like extraction's. */
+  addMentions(id: Id, mentions: { surface: string; label?: string; props?: Record<string, unknown>; start?: number; end?: number }[], defaultLabel?: string): Promise<ExtractReport> {
+    return this.#call("POST", `/nodes/${encodeURIComponent(id)}/mentions`, { mentions, default_label: defaultLabel });
   }
 
   /** Records an access to each node now. */

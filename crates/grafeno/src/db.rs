@@ -16,6 +16,7 @@ use crate::memory::names_of;
 use crate::merge::MERGES;
 use crate::namespace::{NAMESPACES, NamespaceMeta};
 use crate::resolve::MATCH_RULES;
+use crate::state::STATE;
 use crate::stats::{
     NamespaceInfo, NamespaceStats, bump_edge_label, bump_namespace, bump_node_label, label_counts,
     namespaces,
@@ -45,7 +46,8 @@ use crate::{Hit, text, vector};
 /// 8. Adds `merges` (merge records, for undo), empty until a merge.
 /// 9. Allows fuzzy indexes (`IndexDef::fuzzy`), whose trigram entries an
 ///    older Grafeno would read as values, and adds `match_rules`.
-pub const SCHEMA_VERSION: u64 = 9;
+/// 10. Adds `state` (what extraction read, its review queue), empty.
+pub const SCHEMA_VERSION: u64 = 10;
 
 /// The tables replaced in version 3, by name (their types no longer matter).
 const OLD_ADJ_OUT: TableDefinition<AdjKey, u128> = TableDefinition::new("adj_out");
@@ -216,6 +218,7 @@ impl Grafeno {
         tx.open_table(PRINCIPALS).map_err(storage)?;
         tx.open_table(MERGES).map_err(storage)?;
         tx.open_table(MATCH_RULES).map_err(storage)?;
+        tx.open_table(STATE).map_err(storage)?;
 
         let stored = tx
             .open_table(META)
@@ -323,6 +326,7 @@ impl Grafeno {
             principals: tx.open_table(PRINCIPALS).map_err(storage)?,
             merges: tx.open_table(MERGES).map_err(storage)?,
             match_rules: tx.open_table(MATCH_RULES).map_err(storage)?,
+            state: tx.open_table(STATE).map_err(storage)?,
             tx,
         })
     }
@@ -553,6 +557,7 @@ pub struct ReadTx {
     pub(crate) principals: ReadOnlyTable<&'static str, &'static [u8]>,
     pub(crate) merges: ReadOnlyTable<RecordKey, &'static [u8]>,
     pub(crate) match_rules: ReadOnlyTable<(&'static str, &'static str), &'static [u8]>,
+    pub(crate) state: ReadOnlyTable<crate::state::StateKey, &'static [u8]>,
     pub(crate) shared: Arc<Shared>,
     /// The commit this snapshot sees, when known (for the projection cache).
     pub(crate) generation: Option<u64>,

@@ -100,6 +100,7 @@ They open the file directly (stop the server first):
 | `grafeno check --db F [-n NS]...`         | Integrity check; exits with an error if anything is wrong.     |
 | `grafeno rebuild --db F (-n NS... \| --all)` | Rebuilds indexes and counters from the records.             |
 | `grafeno export --db F [-n NS]... [-o FILE]` | JSON Lines export (standard output by default).             |
+| `grafeno extract --db F -n NS` (`--all`, `--force`) | Reads new and changed texts and links what they mention; prints what waits for review. |
 | `grafeno import --db F FILE`              | Imports an export (`-` reads standard input), all or nothing; `--bulk` loads large exports in chunks. |
 
 ```bash
@@ -243,6 +244,10 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `GET`    | `/v1/{ns}/merges`                     | `?node=&limit=`                                         | merge records, newest first   |
 | `POST`   | `/v1/{ns}/merges/{id}/undo`           | `{force?}` (optional)                                   | the record, marked undone     |
 | `GET`    | `/v1/{ns}/fuzzy`                      | `?label=&key=&q=&limit=&measure=`                       | `[{node, score}]`: nodes whose property looks like `q` (needs a fuzzy index) |
+| `POST`   | `/v1/{ns}/extract`                    | `{source_labels?, entity_labels?, identifiers?, min_phrase_sources?, force?, …}` (optional) | `{read, unchanged, mentions, linked, created, queued, found}` |
+| `GET`    | `/v1/{ns}/review`                     | `?limit=`                                               | `[{key, kind, value, occurrences, candidates}]` |
+| `POST`   | `/v1/{ns}/review/{key}`               | `{action: "link", node}` / `{action: "create", label?}` / `{action: "dismiss"}` | `{node, report}` |
+| `POST`   | `/v1/{ns}/nodes/{id}/mentions`        | `{mentions: [{surface, label?, props?, start?, end?}], default_label?}` | the report |
 | `GET`    | `/v1/{ns}/match-rules`                |                                                         | the match rules of the namespace |
 | `PUT`    | `/v1/{ns}/match-rules/{label}`        | `{strong_keys?, fields: [{key, measure, weight?, …}], neighbors?, same?, review?}` | the rule (admin) |
 | `DELETE` | `/v1/{ns}/match-rules/{label}`        |                                                         | 204 (admin)                   |
@@ -322,6 +327,9 @@ Syncing a note and replacing its links in one request:
 | `merge`    | Folds a duplicate node into another one; refused when they disagree unless `force`. Returns a `merge_id`. |
 | `undo_merge` | Undoes a merge by its `merge_id`: the merged node and its facts come back.   |
 | `find_matches` | Before creating an entity, the nodes that may already be it, by the label's match rule, with a decision and each field's similarity. |
+| `extract`  | Reads new and changed memories and links what they mention (names, emails, URLs, handles, hashtags, dates, amounts, recurring new names). |
+| `add_mentions` | The entities a memory mentions, from the agent's own reading: linked, created or queued. |
+| `review` / `resolve_review` | What extraction could not decide, and settling it (link, create, dismiss). |
 | `maintain` | Lists likely duplicates, weak memories and groups ready to consolidate.        |
 | `consolidate` | Stores a summary of several memories and archives them.                     |
 

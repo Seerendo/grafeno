@@ -89,8 +89,9 @@ short-lived agents.
 | `principals`   | key name                      | secret hash, grants, owner, `own_only` (JSON) |
 | `merges`       | `(ns, merge_id)`              | merge record: who, when, both nodes before, edges moved and dropped |
 | `match_rules`  | `(ns, label)`                 | match rule: strong keys, fields with measures and weights, thresholds (JSON) |
+| `state`        | `(ns, kind, key)`             | bytes kept by features on the engine (extraction's text hashes, review queue and decisions) |
 
-- The layout has a version (`SCHEMA_VERSION`, now 9) in `meta`. Opening an
+- The layout has a version (`SCHEMA_VERSION`, now 10) in `meta`. Opening an
   older file upgrades it in one transaction: version 1 gets its counters
   computed, version 2 gets the new adjacency and posting tables (built from
   the records) and loses the old ones, version 3 gets the names index,
@@ -98,7 +99,8 @@ short-lived agents.
   registry (every namespace with data), version 6 the (empty) principals,
   version 7 the (empty) merge records, and version 8 the (empty) match
   rules and the possibility of fuzzy indexes (whose trigram entries an
-  older Grafeno would read as values). A newer layout is refused.
+  older Grafeno would read as values), and version 9 the (empty) state
+  table. A newer layout is refused.
 - Adjacency entries hold the edge's record time and valid time
   (`recorded_at`, `expired_at`, `valid_from`, `valid_to`), so traversals
   filter without reading edge records. Postings hold the length of their
@@ -1094,7 +1096,7 @@ As built:
   keys for other languages; a learned weighting (Fellegi-Sunter m and u
   probabilities from labeled pairs).
 
-**11.1 Incremental extraction and reconciliation of entities.**
+**11.1 Incremental extraction and reconciliation of entities** (done).
 
 - Extractors without a model: a gazetteer of the namespace's known names
   and aliases (Aho-Corasick over the names index), patterns (emails, URLs,
@@ -1108,6 +1110,67 @@ As built:
   one when nothing does, and is queued for review when it is ambiguous.
 - Extractions sent by an agent (from its own LLM) go through the same
   reconciliation.
+
+As built (`grafeno-memory`: `extract` finds, `reconcile` decides):
+
+- Finds carry character offsets in the original text and a normalized
+  value. Patterns: emails, URLs (trailing punctuation dropped), `@handles`
+  (not inside emails), `#hashtags`, dates (`YYYY-MM-DD`, and `d/m/yyyy`
+  day first unless `month_first`, checked for valid months and days),
+  amounts with a currency before or after (`S/ 1.250,50` → `PEN 1250.5`:
+  the last separator followed by one or two digits is the decimal point),
+  and identifier patterns declared with a label (`INV-\d{4}-\d{4}` →
+  `Invoice`). Phrases: up to five capitalized words with `de`, `del`,
+  `van`, `of` and the like inside, without a leading common word ("El",
+  "The") or a sentence's first word followed by a connector ("Hablamos de
+  Proyecto Atlas" is "Proyecto Atlas"); a single word that opens a
+  sentence is not a phrase. The gazetteer is an Aho-Corasick automaton
+  (leftmost-longest) over every normalized name and alias of the entity
+  nodes, matched on the normalized text at word boundaries and mapped back
+  to the original offsets.
+- Sources are the texts of `Memory`, `Note`, `Episode`, `Document`,
+  `Chunk`, `Message` and `Summary` nodes by default; entities are the named
+  nodes that are not sources. A run hashes each text and keeps the hash in
+  the `state` table (layout version 10, a small key-value store per
+  namespace for features like this one): only new or changed texts are
+  read, in batches of 100 per transaction (in the bulk lane over HTTP).
+  Reading a text again replaces the edges extraction wrote for it
+  (`extracted: true`) and its occurrences in the review queue.
+- Reconciliation: a name with one node links to it. With several, the
+  candidate linked to what the same text already links (its neighbors
+  among the text's other entities) wins when it is the only one; otherwise
+  the name waits in the review queue as `ambiguous`, every occurrence
+  grouped under one item. Emails link to the node whose `email` it is
+  (through an exact index on `email`), else to an `Email` node; URLs,
+  handles, hashtags and identifiers link to a node per value; dates and
+  amounts are kept on the text's node (`mentioned_dates`,
+  `mentioned_amounts`). An unknown phrase waits as `phrase` until it shows
+  up in `min_phrase_sources` (2) different texts, then becomes an `Entity`
+  named by its most frequent spelling, with the texts as its `sources`. A
+  phrase that became known in the meantime links like a name.
+- Mentions are `mentions` edges from the text's node, with the surface,
+  `start` and `end` (characters), the `kind` of find and the recorder (the
+  transaction's actor). The queue is settled with `link`, `create` or
+  `dismiss`; the decision is kept, so the same name links (or is ignored)
+  in later runs without asking again.
+- An agent's mentions (`ingest`, `POST /v1/{ns}/nodes/{id}/mentions`, the
+  `add_mentions` MCP tool) go through the label's match rule when there is
+  one (same → link, review → queued with the candidates, different → a new
+  node with the agent's properties), else by name; their edges have `kind:
+  agent` and stay when the text is extracted again.
+- Exposed as `grafeno extract`, `POST /v1/{ns}/extract`, `GET
+  /v1/{ns}/review`, `POST /v1/{ns}/review/{key}`, the `extract`, `review`
+  and `resolve_review` MCP tools, and the TypeScript client.
+- Measured (`examples/extract_bench.rs`, numbers in `docs/benchmarks.md`):
+  20 000 memories naming 5 000 entities (3 982 of which share a name with
+  another) are read at about 3 200 texts a second; a second run with
+  nothing changed takes 0.06 s, and with 1% changed 0.15 s. 99.4% of the
+  mentions link to the right entity and none to a wrong one; of 39 713
+  mentions of a shared name, the text's other entities settled all but
+  263 names, which wait for review.
+- Until 11.4's change log, runs find changes by hashing every text; texts
+  are read from nodes by label; and the review queue is scanned whole when
+  texts change, which is fine for thousands of items, not millions.
 
 **11.2 Automatic invalidation of contradicting facts.**
 
@@ -1248,6 +1311,7 @@ spinning disk, on ARM, or for days at a time.
 | Hostile GQ queries | 32 of 32 end within their limits, none crashes | E1-mem | `hostile_queries.csv` |
 | Fuzzy search for a damaged name among 100 000 people | 20 ms p50 (469 ms comparing with every node) | E1-mem | `resolve_speed.csv` |
 | Entity resolution by a match rule (2 000 damaged duplicates, 2 000 namesakes) | 95% found as same or review, precision of `same` 0.994 | E1-mem | `resolve_quality.csv` |
+| Extraction of 20 000 memories naming 5 000 entities | 3 200 texts/s; 99.4% of mentions linked right, none wrong; 0.06 s when nothing changed | E1-mem | `extract_*.csv` |
 
 ### Guarantees and the tests that hold them
 
@@ -1266,6 +1330,7 @@ real binary. The ones that carry each guarantee:
 | Group commit is correct | `grafeno/tests/writer.rs` | concurrent writes all commit; a failing write leaves the others; a full queue answers busy; imports through the bulk lane let interactive writes in; metrics count what happened |
 | Vector search keeps its quality | `grafeno/tests/vector_churn.rs` | deletes, reinserts, three rounds of churn and a compaction keep recall@10 at 0.95 or more, and reinserted vectors are found |
 | Records are matched by rule, with reasons | `grafeno/tests/resolve.rs`, `property_index.rs` (fuzzy), `src/textsim.rs` tests | measures against published values; strong keys decide either way; typos, swapped dates and namesakes; neighbors as evidence (and no links as no evidence); scans without indexes; pairs for deduplication; fuzzy indexes through updates, check and export |
+| Texts link to what they mention | `grafeno-memory/tests/extraction.rs`, `src/extract.rs` tests | patterns and their normalized values and offsets, phrases and sentence openers, the gazetteer on normalized text; known names, emails by index, value nodes, new names after two texts, namesakes settled by context or queued, decisions that last, dismissals, incremental runs, an agent's mentions through match rules |
 | Merges are right and reversible | `grafeno/tests/merges.rs`, `grafeno-memory/tests/maintenance.rs` | strong keys, labels, conflicting facts and functional edges; namesakes, typos, nicknames, translations; a merge undone exactly (indexes, counters and the check agree) |
 | Isolation between principals | `grafeno-server/tests/access.rs` | a matrix of keys, grants and endpoints: no read or write outside a key's grants, `own_only` keys change only their own records |
 | GQ follows Cypher | `grafeno-query/tests/cypher.rs`, `queries.rs`, `statistics.rs`, `indexes.rs`, `algorithms.rs` | clauses, functions, aggregates, indexes, planner choices and algorithms on known graphs |
@@ -1285,6 +1350,7 @@ cargo run --release -p grafeno --example algo_bench
 cargo run --release -p grafeno --example saturation -- 3
 cargo run --release -p grafeno-query --example index_bench
 cargo run --release -p grafeno --example resolve_bench -- 100000
+cargo run --release -p grafeno-memory --example extract_bench -- 5000 20000
 cargo test --release -p grafeno-query --test adversarial -- --nocapture
 ```
 

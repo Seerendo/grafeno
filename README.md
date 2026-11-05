@@ -129,6 +129,12 @@ measured speed, memory and limits, with charts, in
   comparing with every node), and match rules per label with strong
   keys, weighted fields, neighbors as evidence and explained decisions
   (`db.match`, `POST /v1/{ns}/match`, the `find_matches` MCP tool).
+- **Phase 11.1, extraction:** memories are read for what they mention
+  (known names through a gazetteer, emails, URLs, handles, hashtags,
+  dates, amounts, identifiers, recurring new names) and linked by
+  `mentions` edges; namesakes are settled by context or queued for
+  review; runs read only what changed (`grafeno extract`, the `extract`
+  MCP tool); agents can send their own mentions.
 
 ## Installing
 

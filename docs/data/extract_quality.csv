@@ -1,0 +1,13 @@
+measure,value
+entities,5000
+entities sharing a name,3982
+memories,20000
+mentions expected,79787
+linked to the right entity,79348
+links,79348
+wrong links,0
+mentions of a shared name,39713
+names waiting as ambiguous,263
+recall,0.994
+precision,1.0
+texts per second (first run),3236

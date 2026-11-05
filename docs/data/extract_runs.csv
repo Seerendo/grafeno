@@ -1,0 +1,4 @@
+run,texts_read,texts_unchanged,seconds
+first run,20000,0,6.2
+nothing changed,0,20000,0.06
+1% changed,200,19800,0.15

@@ -211,6 +211,10 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/{ns}/fuzzy", get(fuzzy))
         .route("/{ns}/match", post(find_matches))
         .route("/{ns}/matches", get(match_pairs))
+        .route("/{ns}/extract", post(extract))
+        .route("/{ns}/review", get(review_queue))
+        .route("/{ns}/review/{key}", post(resolve_review))
+        .route("/{ns}/nodes/{id}/mentions", post(add_mentions))
         .route("/{ns}/match-rules", get(match_rules))
         .route(
             "/{ns}/match-rules/{label}",
@@ -1997,6 +2001,118 @@ async fn find_matches(
     })
     .await?;
     Ok(Json(found))
+}
+
+/// Reads the namespace's new and changed texts and reconciles what they
+/// mention, a batch of texts per transaction in the writer's bulk lane.
+async fn extract(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<grafeno_memory::ExtractReport>> {
+    let options: grafeno_memory::ExtractOptions = if body.iter().all(u8::is_ascii_whitespace) {
+        grafeno_memory::ExtractOptions::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?
+    };
+    let (db, writer) = (state.db.clone(), state.writer.clone());
+    let actor = auth::current().actor();
+    let report = tokio::task::spawn_blocking(move || -> grafeno::Result<_> {
+        let options = Arc::new(options);
+        let plan = Arc::new(grafeno_memory::plan(&db.begin_read()?, &ns, &options)?);
+        let mut report = grafeno_memory::ExtractReport {
+            unchanged: plan.unchanged,
+            ..Default::default()
+        };
+        for batch in plan.sources.chunks(options.batch.max(1)) {
+            let (db, plan, options, ns, actor) = (
+                db.clone(),
+                plan.clone(),
+                options.clone(),
+                ns.clone(),
+                actor.clone(),
+            );
+            let batch = batch.to_vec();
+            let done = writer.write_bulk(move |tx| {
+                tx.act_as(actor.clone());
+                let read = db.begin_read()?;
+                let result = grafeno_memory::extract_batch(tx, &read, &ns, &plan, &batch, &options);
+                tx.act_as(None);
+                result
+            })?;
+            report.read += done.read;
+            report.mentions += done.mentions;
+            report.linked += done.linked;
+            report.created += done.created;
+            report.queued += done.queued;
+            for (kind, count) in done.found {
+                *report.found.entry(kind).or_default() += count;
+            }
+        }
+        writer.flush()?;
+        Ok(report)
+    })
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))??;
+    Ok(Json(report))
+}
+
+#[derive(Deserialize)]
+struct ReviewParams {
+    limit: Option<usize>,
+}
+
+/// What extraction could not decide: ambiguous names and new phrases.
+async fn review_queue(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Params(params): Params<ReviewParams>,
+) -> ApiResult<Json<Vec<grafeno_memory::ReviewItem>>> {
+    let limit = params.limit.unwrap_or(50).min(MAX_PAGE);
+    let items = blocking(&state, move |db| {
+        grafeno_memory::review_queue(&db.begin_read()?, &ns, limit)
+    })
+    .await?;
+    Ok(Json(items))
+}
+
+/// Settles a review item: `{"action": "link", "node": …}`, `{"action":
+/// "create", "label": …}` or `{"action": "dismiss"}`.
+async fn resolve_review(
+    State(state): State<AppState>,
+    Path((ns, key)): Path<(String, String)>,
+    Body(resolution): Body<grafeno_memory::Resolution>,
+) -> ApiResult<Json<Value>> {
+    let (node, report) = write(&state, move |tx| {
+        grafeno_memory::resolve(tx, &ns, &key, resolution.clone())
+    })
+    .await?;
+    Ok(Json(json!({ "node": node, "report": report })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MentionsInput {
+    mentions: Vec<grafeno_memory::AgentMention>,
+    /// The label of entities made for mentions without one.
+    #[serde(default)]
+    default_label: Option<String>,
+}
+
+/// An agent's mentions of a node's text, reconciled like extraction's.
+async fn add_mentions(
+    State(state): State<AppState>,
+    Path((ns, id)): Path<(String, NodeId)>,
+    Body(input): Body<MentionsInput>,
+) -> ApiResult<Json<grafeno_memory::ExtractReport>> {
+    let db = state.db.clone();
+    let label = input.default_label.unwrap_or_else(|| "Entity".into());
+    let report = write(&state, move |tx| {
+        let read = db.begin_read()?;
+        grafeno_memory::ingest(tx, &read, &ns, id, &input.mentions, &label)
+    })
+    .await?;
+    Ok(Json(report))
 }
 
 #[derive(Deserialize)]

@@ -212,6 +212,13 @@ test("memory: names, importance, duplicates, merge and summaries", async () => {
   assert.equal(best.node, refs.$ana);
   assert.notEqual(best.decision, "different");
   await memory.deleteMatchRule("Person");
+  const extracted = await memory.extract();
+  assert.ok(extracted.read >= 3, JSON.stringify(extracted));
+  // "Acme" and "Lima", seen once each: new phrases wait for a second text.
+  const waiting = await memory.reviewQueue();
+  assert.deepEqual(waiting.map((item) => item.value).sort(), ["acme", "lima"]);
+  await memory.resolveReview(waiting[0].key, { action: "dismiss" });
+  assert.equal((await memory.reviewQueue()).length, 1);
   await assert.rejects(memory.merge(two.refs.$x, two.refs.$y), (error: GrafenoError) => {
     assert.equal(error.status, 409);
     assert.equal((error.details.conflicts as Conflict[])[0].kind, "strong_key");

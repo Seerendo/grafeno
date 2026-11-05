@@ -78,6 +78,10 @@ fn handshake_and_tool_list() {
             "query",
             "merge",
             "undo_merge",
+            "extract",
+            "add_mentions",
+            "review",
+            "resolve_review",
             "find_matches",
             "maintain",
             "consolidate"

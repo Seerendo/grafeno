@@ -1308,3 +1308,68 @@ async fn entity_resolution_endpoints() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn extraction_endpoints() {
+    let app = app(None);
+    let ops = json!({ "ops": [
+        { "op": "create_node", "ref": "$ana", "node": { "labels": ["Person"], "props": { "name": "Ana García" } } },
+        { "op": "create_node", "ref": "$j1", "node": { "labels": ["Person"], "props": { "name": "Juan Pérez" } } },
+        { "op": "create_node", "ref": "$j2", "node": { "labels": ["Person"], "props": { "name": "Juan Pérez" } } },
+        { "op": "create_node", "ref": "$m1", "node": { "labels": ["Memory"], "text": "Ana García habló con Juan Pérez sobre #ventas." } },
+        { "op": "create_node", "ref": "$m2", "node": { "labels": ["Memory"], "text": "Reunión con Ana García el 2026-06-01." } }
+    ]});
+    let (_, made) = call(&app, "POST", "/v1/ex/batch", Some(ops)).await;
+    let refs = |name: &str| made["refs"][name].as_str().unwrap().to_owned();
+    let (status, report) = call(&app, "POST", "/v1/ex/extract", None).await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["read"], 2);
+    assert_eq!(report["queued"], 1, "Juan Pérez is two people: {report}");
+    let (status, again) = call(&app, "POST", "/v1/ex/extract", Some(json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        (again["read"].clone(), again["unchanged"].clone()),
+        (json!(0), json!(2))
+    );
+
+    let (status, queue) = call(&app, "GET", "/v1/ex/review", None).await;
+    assert_eq!(status, StatusCode::OK, "{queue}");
+    assert_eq!(queue[0]["kind"], "ambiguous");
+    let key = queue[0]["key"].as_str().unwrap().replace(' ', "%20");
+    let (status, settled) = call(
+        &app,
+        "POST",
+        &format!("/v1/ex/review/{key}"),
+        Some(json!({ "action": "link", "node": refs("$j2") })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{settled}");
+    assert_eq!(settled["node"], refs("$j2"));
+    let (_, queue) = call(&app, "GET", "/v1/ex/review", None).await;
+    assert!(queue.as_array().unwrap().is_empty());
+
+    // An agent's own mentions.
+    let (status, ingested) = call(
+        &app,
+        "POST",
+        &format!("/v1/ex/nodes/{}/mentions", refs("$m2")),
+        Some(json!({ "mentions": [
+            { "surface": "Ana García", "label": "Person" },
+            { "surface": "Banco Central", "label": "Organization" }
+        ] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ingested}");
+    assert_eq!(
+        (ingested["linked"].clone(), ingested["created"].clone()),
+        (json!(1), json!(1))
+    );
+    let (_, ana) = call(
+        &app,
+        "GET",
+        &format!("/v1/ex/nodes/{}/neighbors?direction=in", refs("$ana")),
+        None,
+    )
+    .await;
+    assert!(ana.as_array().unwrap().len() >= 2, "{ana}");
+}

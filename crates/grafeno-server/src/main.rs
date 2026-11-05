@@ -158,6 +158,20 @@ enum Command {
         #[arg(long, conflicts_with = "namespaces")]
         all: bool,
     },
+    /// Read new and changed texts and link what they mention (names,
+    /// emails, URLs, handles, hashtags, dates, amounts, new names).
+    Extract {
+        #[command(flatten)]
+        db: FileArgs,
+        #[arg(long = "namespace", short = 'n', required_unless_present = "all")]
+        namespaces: Vec<String>,
+        /// Every namespace.
+        #[arg(long, conflicts_with = "namespaces")]
+        all: bool,
+        /// Read every text again, changed or not.
+        #[arg(long)]
+        force: bool,
+    },
     /// Rebuild the indexes and counters of namespaces from their records.
     Rebuild {
         #[command(flatten)]
@@ -550,6 +564,27 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .map(|ns| read.stats(ns))
                 .collect::<grafeno::Result<Vec<_>>>()?;
             println!("{}", serde_json::to_string_pretty(&stats)?);
+        }
+        Command::Extract {
+            db,
+            namespaces,
+            all: _,
+            force,
+        } => {
+            let db = db.open()?;
+            let options = grafeno_memory::ExtractOptions {
+                force,
+                ..grafeno_memory::ExtractOptions::default()
+            };
+            for ns in namespaces_or_all(&db, namespaces)? {
+                let report = grafeno_memory::extract(&db, &ns, &options)?;
+                let waiting =
+                    grafeno_memory::review_queue(&db.begin_read()?, &ns, usize::MAX)?.len();
+                println!(
+                    "{ns}: {} texts read ({} unchanged), {} mentions, {} entities created, {waiting} waiting for review",
+                    report.read, report.unchanged, report.mentions, report.created
+                );
+            }
         }
         Command::Compact {
             db,

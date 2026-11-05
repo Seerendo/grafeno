@@ -71,6 +71,9 @@ impl McpAccess {
 
 /// Tools that change the database.
 const WRITING_TOOLS: &[&str] = &[
+    "extract",
+    "add_mentions",
+    "resolve_review",
     "remember",
     "relate",
     "update",
@@ -238,6 +241,10 @@ impl McpServer {
             "undo_merge" => self.undo_merge(arguments),
             "maintain" => self.maintain(arguments),
             "find_matches" => self.find_matches(arguments),
+            "extract" => self.extract(arguments),
+            "add_mentions" => self.add_mentions(arguments),
+            "review" => self.review(arguments),
+            "resolve_review" => self.resolve_review(arguments),
             "consolidate" => self.consolidate(arguments),
             _ => return Err((-32602, format!("unknown tool: {name}"))),
         };
@@ -779,6 +786,148 @@ impl McpServer {
         })))
     }
 
+    fn extract(&self, arguments: Value) -> ToolResult {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            #[serde(default)]
+            force: bool,
+            #[serde(default)]
+            namespace: Option<String>,
+        }
+        let args: Args = parse_args(arguments)?;
+        let ns = self.ns(&args.namespace).to_owned();
+        let options = grafeno_memory::ExtractOptions {
+            force: args.force,
+            ..grafeno_memory::ExtractOptions::default()
+        };
+        let plan = grafeno_memory::plan(&self.db.begin_read().map_err(describe)?, &ns, &options)
+            .map_err(describe)?;
+        let mut report = grafeno_memory::ExtractReport {
+            unchanged: plan.unchanged,
+            ..Default::default()
+        };
+        for batch in plan.sources.chunks(options.batch) {
+            let read = self.db.begin_read().map_err(describe)?;
+            let done = self
+                .write(|tx| grafeno_memory::extract_batch(tx, &read, &ns, &plan, batch, &options))
+                .map_err(describe)?;
+            report.read += done.read;
+            report.mentions += done.mentions;
+            report.linked += done.linked;
+            report.created += done.created;
+            report.queued += done.queued;
+        }
+        let waiting =
+            grafeno_memory::review_queue(&self.db.begin_read().map_err(describe)?, &ns, 1_000)
+                .map_err(describe)?
+                .len();
+        Ok(ToolOutput::Json(json!({
+            "texts_read": report.read,
+            "texts_unchanged": report.unchanged,
+            "mentions": report.mentions,
+            "linked": report.linked,
+            "created": report.created,
+            "waiting_for_review": waiting,
+        })))
+    }
+
+    fn add_mentions(&self, arguments: Value) -> ToolResult {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            id: String,
+            mentions: Vec<grafeno_memory::AgentMention>,
+            #[serde(default)]
+            namespace: Option<String>,
+        }
+        let args: Args = parse_args(arguments)?;
+        let ns = self.ns(&args.namespace);
+        let source = parse_id(&args.id).map_err(describe)?;
+        let read = self.db.begin_read().map_err(describe)?;
+        let report = self
+            .write(|tx| grafeno_memory::ingest(tx, &read, ns, source, &args.mentions, "Entity"))
+            .map_err(describe)?;
+        Ok(ToolOutput::Json(json!({
+            "mentions": report.mentions,
+            "linked": report.linked,
+            "created": report.created,
+            "waiting_for_review": report.queued,
+        })))
+    }
+
+    fn review(&self, arguments: Value) -> ToolResult {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            #[serde(default)]
+            limit: Option<usize>,
+            #[serde(default)]
+            namespace: Option<String>,
+        }
+        let args: Args = parse_args(arguments)?;
+        let ns = self.ns(&args.namespace);
+        let read = self.db.begin_read().map_err(describe)?;
+        let items = grafeno_memory::review_queue(&read, ns, args.limit.unwrap_or(20).min(100))
+            .map_err(describe)?;
+        let rows: Vec<Value> = items
+            .iter()
+            .map(|item| {
+                let candidates: Vec<Value> = item
+                    .candidates
+                    .iter()
+                    .map(|id| {
+                        let name = read.node(ns, *id).ok().flatten().map(|n| n.display_name());
+                        json!({ "id": id, "name": name })
+                    })
+                    .collect();
+                json!({
+                    "key": item.key,
+                    "kind": item.kind,
+                    "text": item.occurrences.first().map(|o| o.surface.clone()),
+                    "seen_in": item.occurrences.len(),
+                    "candidates": candidates,
+                })
+            })
+            .collect();
+        Ok(ToolOutput::Json(json!({
+            "items": rows,
+            "hint": "Settle each with resolve_review: link to a candidate, create a new entity, or dismiss.",
+        })))
+    }
+
+    fn resolve_review(&self, arguments: Value) -> ToolResult {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            key: String,
+            action: String,
+            #[serde(default)]
+            node: Option<String>,
+            #[serde(default)]
+            label: Option<String>,
+            #[serde(default)]
+            namespace: Option<String>,
+        }
+        let args: Args = parse_args(arguments)?;
+        let ns = self.ns(&args.namespace);
+        let resolution = match args.action.as_str() {
+            "link" => grafeno_memory::Resolution::Link {
+                node: parse_id(args.node.as_deref().ok_or("link needs a node")?)
+                    .map_err(describe)?,
+            },
+            "create" => grafeno_memory::Resolution::Create { label: args.label },
+            "dismiss" => grafeno_memory::Resolution::Dismiss,
+            other => return Err(format!("unknown action {other:?}: link, create or dismiss")),
+        };
+        let (node, report) = self
+            .write(|tx| grafeno_memory::resolve(tx, ns, &args.key, resolution))
+            .map_err(describe)?;
+        Ok(ToolOutput::Json(
+            json!({ "id": node, "mentions": report.mentions }),
+        ))
+    }
+
     fn find_matches(&self, arguments: Value) -> ToolResult {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -1274,6 +1423,74 @@ fn tools() -> Value {
                     "namespace": namespace
                 },
                 "required": ["merge_id"]
+            }
+        },
+        {
+            "name": "extract",
+            "title": "Extract",
+            "description": "Read the memories that are new or changed and link what they mention: known names, emails, \
+                URLs, handles, hashtags, dates and amounts; new names seen in several memories become entities. \
+                What cannot be decided waits in the review queue.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "force": { "type": "boolean", "description": "Read every memory again." },
+                    "namespace": namespace
+                }
+            }
+        },
+        {
+            "name": "add_mentions",
+            "title": "Add mentions",
+            "description": "Say which entities a memory mentions (from your own reading of it): each is linked to the \
+                node it is (by the label's match rule, or by name), created when new, or queued when ambiguous.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": id("The memory that mentions them."),
+                    "mentions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "surface": { "type": "string", "description": "As written." },
+                                "label": { "type": "string", "description": "Person, Company, Place, …" },
+                                "props": { "type": "object", "description": "What you know of it (email, …)." }
+                            },
+                            "required": ["surface"]
+                        }
+                    },
+                    "namespace": namespace
+                },
+                "required": ["id", "mentions"]
+            }
+        },
+        {
+            "name": "review",
+            "title": "Review queue",
+            "description": "Names extraction could not decide: ambiguous ones (several nodes have them) and new phrases.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer" },
+                    "namespace": namespace
+                }
+            }
+        },
+        {
+            "name": "resolve_review",
+            "title": "Resolve review",
+            "description": "Settle a review item: link it to a node, create a new entity, or dismiss it. The decision is remembered.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string", "description": "The item's key from review." },
+                    "action": { "type": "string", "enum": ["link", "create", "dismiss"] },
+                    "node": id("For link: the node it is."),
+                    "label": { "type": "string", "description": "For create: the new entity's label." },
+                    "namespace": namespace
+                },
+                "required": ["key", "action"]
             }
         },
         {
