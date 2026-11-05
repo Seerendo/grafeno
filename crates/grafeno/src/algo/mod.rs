@@ -493,6 +493,8 @@ pub(crate) struct Shared {
     projection_budget: std::sync::atomic::AtomicUsize,
     /// The change log's window and commit listeners.
     pub(crate) changes: crate::changes::Hub,
+    /// The planner's statistics per namespace.
+    pub(crate) planner: crate::planstats::Cache,
 }
 
 impl Default for Shared {
@@ -502,6 +504,7 @@ impl Default for Shared {
             projections: Mutex::default(),
             projection_budget: std::sync::atomic::AtomicUsize::new(DEFAULT_PROJECTION_CACHE),
             changes: crate::changes::Hub::default(),
+            planner: crate::planstats::Cache::default(),
         }
     }
 }

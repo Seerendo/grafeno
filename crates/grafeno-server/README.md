@@ -187,7 +187,9 @@ too many requests at once, or too many writes waiting) and `internal`.
 
 Writes from concurrent requests are committed together (group commit): each
 request still gets its own all-or-nothing result, and a failing write does
-not affect the others.
+not affect the others. Reads run on snapshots, side by side and alongside
+the writer; a large read-only GQ scan also splits across threads, which
+all queries share (`scan_threads` in `[query]`, one per CPU by default).
 
 Ids are UUIDs. Times in responses are microseconds since the Unix epoch;
 requests accept either that or an ISO 8601 string (`2024-05-01`,

@@ -30,6 +30,9 @@ uuid = { version = "1", default-features = false, features = ["serde"] }
 # index tests insert thousands of vectors.
 [profile.dev]
 opt-level = 1
+# Line numbers only: full debug info made target/debug grow by tens of GB.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
+debug = false

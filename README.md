@@ -156,6 +156,10 @@ measured speed, memory and limits, with charts, in
   `=~` and more functions; import and export in CSV and GraphML; 146
   hand-written conformance scenarios in the TCK's form (the official TCK is
   not run, and Bolt is not built).
+- **Phase 12.2, query optimization and concurrency:** planner statistics
+  (common values and buckets per index, edge degrees by direction) kept in
+  memory and rebuilt as data drifts; starts and pattern order by estimated
+  cost; parsed statements cached; large read scans split across threads.
 
 ## Installing
 

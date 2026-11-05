@@ -545,6 +545,21 @@ def main():
           [(f"{r['format']} {r['operation']}", [num(r['records_per_s'])], 0 if r['operation'] == 'import' else 2) for r in rows],
           '', log=True, note='An import writes through every index, as any write does. Data: docs/data/interchange.csv')
 
+    # The planner and concurrent reads.
+    rows = [r for r in read('planner_plans.csv') if 'per second' not in r['case']]
+    hbars('planner-plans', 'Queries a planner without statistics got wrong', 'Milliseconds, log scale; 200 000 people, 1 000 companies, in memory. E1-mem.',
+          [(r['case'], [num(r['before_ms']), num(r['after_ms'])], None) for r in rows],
+          ' ms', log=True, series=['before 12.2', 'after 12.2'], note='The written-first case was already right; it now starts from a smaller index. Data: docs/data/planner_plans.csv')
+    rows = read('read_concurrency.csv')
+    pick = lambda build, writer: [(num(r['readers']), num(r['queries_per_s'])) for r in rows if r['build'] == build and r['writer'] == writer]
+    lines('read-concurrency', 'Read queries per second against concurrent readers',
+          'A point lookup and two hops (about 200 rows) per query, 200 000 people; best of three runs. E1-mem.',
+          [('after 12.2, no writer', pick('after 12.2', 'none')),
+           ('after 12.2, busy writer', pick('after 12.2', 'busy')),
+           ('before 12.2, no writer', pick('before 12.2', 'none'))],
+          'concurrent readers', 'queries per second', logx=True, logy=False,
+          note='The busy writer commits 10 nodes per transaction as fast as it can. Data: docs/data/read_concurrency.csv')
+
     print('charts written to', OUT)
 
 

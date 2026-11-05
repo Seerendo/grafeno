@@ -229,6 +229,7 @@ max_reads = 50000000        # nodes, edges and index entries read
 max_rows = 1000000          # rows held at once
 max_memory_mb = 512         # one value a query builds, or the rows it holds at once
 max_cost = 0                # refuse queries EXPLAIN estimates above this (0: off)
+scan_threads = 0            # threads large read scans share, over every query (0: one per CPU; 1: off)
 
 [writer]                    # the group commit (see "Monitoring" below)
 max_batch = 512             # writes per transaction at most

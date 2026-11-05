@@ -2,18 +2,18 @@
 //! counts: how many rows each step makes, and how much work (rows touched,
 //! records read, items computed) it takes to make them.
 //!
-//! The estimate is rough by design: it knows the nodes per label and the
-//! edges per label, not how values are distributed, so it assumes a
-//! condition keeps half the rows and an index lookup by equality finds a
-//! tenth of the label. It is good for telling a query that touches
-//! thousands of rows from one that touches billions, which is what
-//! `max_cost` needs.
+//! The estimate is rough by design. Starts come from the planner (index
+//! lookups estimated from the planner's statistics and the values the
+//! query gives), expansions from each edge label's average degree in the
+//! direction followed; a condition is assumed to keep half the rows. It is
+//! good for telling a query that touches thousands of rows from one that
+//! touches billions, which is what `max_cost` needs.
 
 use std::collections::HashSet;
 
 use crate::ast::{Clause, Expr, Pattern, ProcedureCall, Projection, Query, Statement};
 use crate::exec::MAX_PATH_LENGTH;
-use crate::plan::{PlanInfo, Seek, Source, conjuncts, plan_anchor};
+use crate::plan::{PlanInfo, ValueOf, conjuncts, order_patterns, plan_anchor};
 use crate::value::Value;
 
 /// Rows and work, estimated, after one step.
@@ -36,7 +36,11 @@ fn capped(value: f64) -> f64 {
 
 /// The estimate after each clause of each part, in order (a `UNION` adds
 /// a step of its own), and the total cost.
-pub(crate) fn estimate(statement: &Statement, info: &PlanInfo) -> (Vec<Estimate>, f64) {
+pub(crate) fn estimate(
+    statement: &Statement,
+    info: &PlanInfo,
+    value_of: ValueOf,
+) -> (Vec<Estimate>, f64) {
     let mut steps = Vec::new();
     let mut total = 0.0;
     let mut union_rows = 0.0;
@@ -47,7 +51,7 @@ pub(crate) fn estimate(statement: &Statement, info: &PlanInfo) -> (Vec<Estimate>
                 cost: capped(total),
             });
         }
-        let mut model = Model::new(info);
+        let mut model = Model::new(info, value_of);
         let part_steps = model.query(part);
         union_rows = capped(union_rows + model.rows);
         total = capped(total + model.cost);
@@ -62,15 +66,17 @@ pub(crate) fn estimate(statement: &Statement, info: &PlanInfo) -> (Vec<Estimate>
 
 struct Model<'i> {
     info: &'i PlanInfo,
+    value_of: ValueOf<'i>,
     rows: f64,
     cost: f64,
     bound: HashSet<String>,
 }
 
 impl<'i> Model<'i> {
-    fn new(info: &'i PlanInfo) -> Self {
+    fn new(info: &'i PlanInfo, value_of: ValueOf<'i>) -> Self {
         Self {
             info,
+            value_of,
             rows: 1.0,
             cost: 0.0,
             bound: HashSet::new(),
@@ -89,21 +95,6 @@ impl<'i> Model<'i> {
                 (count / self.nodes()).clamp(1.0 / self.nodes(), 1.0)
             })
             .fold(1.0, f64::min)
-    }
-
-    /// Edges followed from one node, for a step over edges with `labels`
-    /// (any label when empty), both directions counted when undirected.
-    fn degree(&self, labels: &[String], undirected: bool) -> f64 {
-        let edges = if labels.is_empty() {
-            self.info.edges as f64
-        } else {
-            labels
-                .iter()
-                .map(|label| self.info.edge_labels.get(label).copied().unwrap_or(0) as f64)
-                .sum()
-        };
-        let degree = edges / self.nodes();
-        if undirected { 2.0 * degree } else { degree }
     }
 
     fn add(&mut self, work: f64) {
@@ -137,8 +128,16 @@ impl<'i> Model<'i> {
                 let conditions: Vec<&Expr> = filter.as_ref().map(conjuncts).unwrap_or_default();
                 let before = self.rows;
                 let mut rows = self.rows;
-                for pattern in patterns {
-                    rows = self.pattern(pattern, rows, &conditions);
+                let bound = self.bound.clone();
+                let order = order_patterns(
+                    patterns,
+                    &|var| bound.contains(var),
+                    &conditions,
+                    self.info,
+                    self.value_of,
+                );
+                for index in order {
+                    rows = self.pattern(&patterns[index], rows, &conditions);
                 }
                 if let Some(filter) = filter {
                     self.add(rows * self.expr(filter));
@@ -176,7 +175,7 @@ impl<'i> Model<'i> {
                 self.add(self.rows * items.len() as f64)
             }
             Clause::Subquery(query) => {
-                let mut inner = Model::new(self.info);
+                let mut inner = Model::new(self.info, self.value_of);
                 inner.bound = self.bound.clone();
                 for clause in &query.clauses {
                     inner.clause(clause);
@@ -187,7 +186,7 @@ impl<'i> Model<'i> {
             }
             Clause::Foreach { var, list, body } => {
                 let items = self.rows * list_length(list);
-                let mut inner = Model::new(self.info);
+                let mut inner = Model::new(self.info, self.value_of);
                 inner.rows = items;
                 inner.bound = self.bound.clone();
                 inner.bound.insert(var.clone());
@@ -209,39 +208,25 @@ impl<'i> Model<'i> {
         let nodes = pattern.nodes();
         let bound = self.bound.clone();
         let is_bound = |var: &str| bound.contains(var);
-        let (anchor, source) = plan_anchor(&nodes, &is_bound, conditions, self.info);
-        let start = match &source {
-            Source::Bound | Source::Id(_) => 1.0,
-            Source::Index { seek, name, .. } => {
-                let def = self.info.indexes.iter().find(|def| &def.name == name);
-                let label = def
-                    .and_then(|def| self.info.label_counts.get(&def.label))
-                    .copied()
-                    .unwrap_or(self.info.nodes) as f64;
-                let unique = def.is_some_and(|def| def.unique);
-                match seek {
-                    Seek::Equal(_) if unique => 1.0,
-                    Seek::Equal(_) => (label / 10.0).max(1.0),
-                    Seek::In(list) => {
-                        list_length(list) * if unique { 1.0 } else { (label / 10.0).max(1.0) }
-                    }
-                    Seek::Prefix(_) | Seek::Range { .. } => (label / 4.0).max(1.0),
-                }
-            }
-            Source::Label { count, .. } => (*count as f64).max(1.0),
-            Source::Scan => self.info.nodes as f64,
-        };
+        let (anchor, source, _) =
+            plan_anchor(pattern, &is_bound, conditions, self.info, self.value_of);
+        let start = source.rows();
         let mut rows = capped(rows * start);
         self.add(rows);
         // Steps away from the anchor, both ways: each multiplies the rows
         // by the edges followed and keeps the share of targets that fit.
         let order = (anchor..pattern.steps.len())
-            .map(|step| (step, step + 1))
-            .chain((0..anchor).rev().map(|step| (step, step)));
-        for (step, target) in order {
+            .map(|step| (step, step + 1, false))
+            .chain((0..anchor).rev().map(|step| (step, step, true)));
+        for (step, target, backwards) in order {
             let rel = &pattern.steps[step].0;
             let node = nodes[target];
-            let degree = self.degree(&rel.labels, rel.direction == grafeno::Direction::Both);
+            let direction = match (rel.direction, backwards) {
+                (grafeno::Direction::Out, true) => grafeno::Direction::In,
+                (grafeno::Direction::In, true) => grafeno::Direction::Out,
+                (direction, _) => direction,
+            };
+            let degree = self.info.degree(&rel.labels, direction);
             let reach = match rel.length {
                 None => degree,
                 Some((min, max)) => {
@@ -348,7 +333,7 @@ impl<'i> Model<'i> {
                 init, list, expr, ..
             } => self.expr(init) + self.expr(list) + list_length(list) * (1.0 + self.expr(expr)),
             Expr::Exists { patterns, .. } | Expr::PatternQuery { patterns, .. } => {
-                let mut model = Model::new(self.info);
+                let mut model = Model::new(self.info, self.value_of);
                 model.bound = self.bound.clone();
                 let mut rows = 1.0;
                 for pattern in patterns {

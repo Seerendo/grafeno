@@ -189,6 +189,7 @@ CALL db.search('borrow checker', 5) YIELD node, score RETURN node.title, score;
 | `db.propertyKeys()` | `key` | property names of nodes and edges (reads every record) |
 | `db.stats()` | `nodes`, `edges`, `texts`, `vectors`, `dimension` | counts of the namespace |
 | `db.indexes()` | `name`, `label`, `property`, `unique`, `entries`, `fuzzy` | property and fuzzy indexes (also `SHOW INDEXES`); a fuzzy index counts trigram entries |
+| `db.analyze()` | `kind`, `name`, `count`, `distinct`, `out_degree`, `in_degree`, `common` | rebuilds the planner's statistics now and lists them: per index its entries, distinct values and ten most common values (`[value, nodes]`); per edge label its edges and average degree each way |
 | `db.searchFuzzy(label, property, text, limit = 10, measure = 'dice')` | `node`, `score` | nodes whose property looks like the text, through its fuzzy index (see *Similar text and entity resolution*) |
 | `db.match(label, properties, limit = 10)` | `node`, `score`, `decision`, `fields` | nodes that may be the record described, by the label's match rule |
 | `db.search(text, limit = 10)` | `node`, `score` | full-text search (BM25), best first |
@@ -289,13 +290,16 @@ cancelled.
 
 `EXPLAIN` before a statement returns its plan as a table (step, operation,
 details: where each pattern starts and how it expands) without running it.
-Its last two columns are estimates from the namespace's counts of nodes
-and edges per label: `rows`, the rows after the step, and `cost`, the work
-so far (rows touched, records read, items computed in loops such as
-`reduce` or a comprehension). They are rough, assuming for instance that a
-condition keeps half the rows, but they tell a query that touches thousands
-of rows from one that touches billions; the cost of the last step is the
-statement's total, which `max_cost` compares.
+Its last two columns are estimates from the namespace's counts and the
+planner's statistics (see *Indexes and performance*): `rows`, the rows
+after the step, and `cost`, the work so far (rows touched, records read,
+items computed in loops such as `reduce` or a comprehension). They are
+rough, assuming for instance that a condition keeps half the rows, but
+they tell a query that touches thousands of rows from one that touches
+billions; the cost of the last step is the statement's total, which
+`max_cost` compares. Literal values and the statement's parameters are
+looked up in the statistics; values from earlier rows are not known yet,
+so they count as an average value.
 `PROFILE` runs the statement and adds, per step, the rows it produced and
 the milliseconds it took (`profile` in the JSON result, a second table in
 the shell, the *Profile* view in the Studio).
@@ -635,12 +639,41 @@ DROP CONSTRAINT Person_email_unique IF EXISTS;
   match (literals, parameters, variables of earlier clauses). It compares
   numbers as numbers (`= 7` finds `7.0`). A comparison with a time value,
   or a property stored as another type, falls back to scanning the label.
-- Without a usable index, a pattern starts from its label with the fewest
-  nodes, or from a node bound by an earlier clause.
+- A pattern starts from a node bound by an earlier clause or given by
+  `@id`. Otherwise each node's best way in (an index, its smallest label,
+  or every node) is estimated, together with the edges followed from it,
+  and the cheapest start wins: `status = 'blocked'` (1% of the nodes)
+  over `city = 'big'` (half of them) whichever is written first, and a
+  label of 1 000 companies over a range that holds every person.
+- The estimates come from the **planner's statistics**: for each index,
+  its entries, distinct values, the 64 most common values with their
+  counts and 64 buckets of equal size (for ranges); for each edge label,
+  its edges and the distinct nodes they leave and reach (so 200 people per
+  company inward, one company per person outward). They are built from a
+  snapshot the first time a namespace is planned, kept in memory, and
+  rebuilt when its nodes or edges change by more than a tenth or an index
+  is created or dropped (`CALL db.analyze()` rebuilds them at once and
+  lists them). They are not stored.
+- The patterns of one `MATCH` run in the order that costs least, not as
+  written: `MATCH (p:Person)-->(c), (o:Owner {name: 'x'})-->(c)` finds the
+  one owner first, then reaches `c` from it and `p` from `c`. A pattern
+  that shares a variable with the ones before it goes next, so patterns
+  are joined through the variables they share.
+- Repeated statements (the same text, any parameters) are parsed once and
+  kept in a cache of 1 024; the plan is still made at each run, from the
+  current statistics, so a cached statement never uses a dropped index.
+- A read-only `MATCH` that starts from 4 096 nodes or more (a label, or an
+  index range) and needs every row (no `LIMIT` right after it) splits the
+  candidates across threads: the rows, and their order, are the same as on
+  one thread, and the query's limits count every thread's reads. The
+  process shares at most one thread per CPU among all queries
+  (`scan_threads` in `[query]`; 1 turns it off); a query that finds none
+  free runs on its own.
 - `MATCH … RETURN … LIMIT n` without `ORDER BY`, `DISTINCT` or aggregates
   stops after the rows it needs.
-- `EXPLAIN` shows where each pattern starts (`index Person_age: … < age`,
-  `scan of :Person, 2000 nodes`); `PROFILE` adds the records each step read.
+- `EXPLAIN` shows where each pattern starts and how many nodes that is
+  estimated to find (`index Person_age: … < age, ~420 nodes`, `scan of
+  :Person, 2000 nodes`); `PROFILE` adds the records each step read.
 - Indexes travel with exports and survive `rebuild`; `check` verifies them.
 
 **Limits.** Over HTTP and MCP, each query runs within limits, so one query

@@ -24,6 +24,9 @@ pub struct ServerSettings {
     pub options: Options,
     /// Limits for each GQ query.
     pub limits: grafeno_query::Limits,
+    /// Threads parallel scans may use at once, over every query (0: one
+    /// per CPU; 1: none).
+    pub scan_threads: usize,
     pub durability: grafeno::Durability,
     /// Requests served at once.
     pub max_requests: usize,
@@ -79,6 +82,7 @@ impl ServerSettings {
                 cors_origins,
             },
             limits: config.query.limits(),
+            scan_threads: config.query.scan_threads.unwrap_or(0),
             durability: config.durability.map(Into::into).unwrap_or_default(),
             max_requests: config.max_requests.unwrap_or(http::MAX_REQUESTS),
             memory: config.memory.options(),
@@ -103,6 +107,7 @@ pub fn run(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = Arc::new(settings.open()?);
+    grafeno_query::set_parallelism(settings.scan_threads);
     db.set_durability(settings.durability);
     db.set_change_retention(settings.changes);
     let state = AppState::with_writer(db, settings.token.as_deref(), settings.writer)

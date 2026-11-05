@@ -188,9 +188,36 @@ pub(crate) fn encode_value(value: &Json) -> Option<Vec<u8>> {
     }
 }
 
+/// The value encoded by [`encode_value`] (numbers come back as `f64`
+/// unless they are whole and fit an `i64`).
+pub(crate) fn decode_value(bytes: &[u8]) -> Option<Json> {
+    let (&tag, rest) = bytes.split_first()?;
+    match tag {
+        BOOL => Some(Json::Bool(*rest.first()? == 1)),
+        NUMBER => {
+            let bits = u64::from_be_bytes(rest.try_into().ok()?);
+            let bits = if bits >> 63 == 1 {
+                bits ^ (1 << 63)
+            } else {
+                !bits
+            };
+            let f = f64::from_bits(bits);
+            if f.fract() == 0.0 && f.abs() < 9.0e15 {
+                Some(Json::from(f as i64))
+            } else {
+                serde_json::Number::from_f64(f).map(Json::Number)
+            }
+        }
+        STRING => std::str::from_utf8(rest)
+            .ok()
+            .map(|s| Json::String(s.to_owned())),
+        _ => None,
+    }
+}
+
 /// The byte range a lookup covers. Bounds are always inclusive: exclusion
 /// is left to the caller's own check (numbers are compared as `f64` here).
-fn byte_range(range: &IndexRange) -> Option<(Vec<u8>, Vec<u8>)> {
+pub(crate) fn byte_range(range: &IndexRange) -> Option<(Vec<u8>, Vec<u8>)> {
     match range {
         IndexRange::Equal(value) => {
             let bytes = encode_value(value)?;

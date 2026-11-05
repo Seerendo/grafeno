@@ -521,6 +521,52 @@ A commit reaches a server-sent events stream in 0.15 ms at the median and
 went at 3 000 lines a second: each line was cut from the front of the
 buffer (quadratic).
 
+## The planner and concurrent reads (`crates/grafeno-query/examples/planner_bench.rs`)
+
+200 000 `:Person` nodes (99% `active`, half in one city, ages 0 to 99,
+indexes on `status`, `city`, `age` and `uid`), 1 000 companies, each person
+working at one, and one owner of three companies; in memory, release
+build, 2026-11-05. "Before" is a build of 12.1 run in the same session,
+alternating with this one, because the laptop's speed varied by more than
+a factor of two that afternoon.
+
+| Query | Before 12.2 | After | Start after |
+| --- | --- | --- | --- |
+| `city = 'big' AND status = 'blocked'` (the rare value second) | 354.7 ms | 11.1 ms | index on `status`, ~2 080 nodes |
+| `status = 'blocked' AND city = 'city1'` (the rare value first) | 3.3 ms | 3.7 ms | index on `city`, ~963 nodes |
+| `(p:Person)-[:works_at]->(c:Company {name: 'c7'}) WHERE p.age >= 0` | 1 770.5 ms | 2.7 ms | the 1 000 companies |
+| `(p:Person)-[:works_at]->(c), (o:Owner {name: 'x'})-[:owns]->(c)` | 2 593.1 ms | 1.8 ms | the owner, then `c` bound |
+| 50 000 point queries with a parameter | 17 682 /s | 18 616 /s | index on `uid` |
+
+Before, a start was picked by kind (an equality on any index over a range,
+a range over any label), so the first equality written won and a range
+holding every person beat a label of 1 000; patterns ran as written. The
+statistics took 0.3 s to build. Caching the parse gains about 5% on a
+point query, whose time is mostly reading.
+
+| Scan of every person (`age > 50 AND name CONTAINS '7'`, 40 000 rows) | ms |
+| --- | --- |
+| before 12.2 | 738 |
+| after, one thread | 706 |
+| after, 16 threads | 161 |
+
+With `readers` (`planner_bench 200000 readers`), 1 to 16 threads run, for
+3 s each, a query per `uid` that goes two hops (about 200 rows), without
+and with a writer committing 10 nodes per transaction as fast as it can.
+Best of three runs per cell (`read_concurrency.csv`):
+
+| Readers | Before, alone | After, alone | After, busy writer | Writes/s meanwhile | p99 after (alone / busy) |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 1 111 | 1 259 | 657 | 26 357 | 1.3 / 1.9 ms |
+| 4 | 3 053 | 3 322 | 3 622 | 25 733 | 2.3 / 1.8 ms |
+| 8 | 5 893 | 6 850 | 5 288 | 16 500 | 1.8 / 2.6 ms |
+| 16 | 9 221 | 9 168 | 7 960 | 10 553 | 4.3 / 8.5 ms |
+
+The query already started from its index, so 12.2 does not change it;
+differences between builds are within the runs' noise. Reads scale about
+8 times from 1 to 16 threads (8 cores, 16 hardware threads), and a busy
+writer costs them 5 to 15%; the writer slows as readers take the CPU.
+
 ## Remaining limits
 
 - **Vector search reads each visited vector from redb** (about 0.4 µs per

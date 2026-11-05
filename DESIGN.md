@@ -1419,13 +1419,78 @@ As built:
   at 397 000 records a second and imports at 27 600; GraphML at 341 000 and
   25 900.
 
-**12.2 Query optimization and performance under concurrency.**
+**12.2 Query optimization and performance under concurrency** (done).
 
 - Statistics for the planner (value histograms per index, label and edge
   label counts by direction) and join ordering for patterns with several
   parts; plan caching for repeated queries with parameters.
 - Parallel scans for large read queries, and read throughput measured
   with many concurrent readers and a busy writer.
+
+As built:
+
+- `crates/grafeno/src/planstats.rs`: `PlannerStats` per namespace. Per
+  value index: entries, distinct values, the 64 most common values with
+  their counts, and 64 equal-depth buckets (encoded bounds, so a range is
+  estimated by the buckets it covers, half for one it crosses); an
+  equality with a value outside the common list gets the remaining entries
+  over the remaining distinct values, and nothing when the list holds
+  every value. Per edge label: edges, distinct sources and distinct
+  targets, so the average degree out and in (one employer per person, 200
+  people per company). Two passes over each index and one over each
+  adjacency table; 0.3 s for 200 000 people, 4 indexes and 201 000 edges.
+- They live in memory, in the `Shared` state every transaction of a
+  database holds, and are not stored (no layout change). `ReadTx::
+  planner_stats` builds them from the snapshot the first time and again
+  when the namespace drifts (nodes or edges off by a tenth and at least
+  100, an index created or dropped); while one reader rebuilds, the others
+  plan with the previous ones. Statements that write use only what is in
+  memory (`cached_planner_stats`), so a build never runs under the write
+  lock. `ReadTx::analyze` and `CALL db.analyze()` rebuild them at once.
+  An index's estimate is scaled by how much its label grew since.
+- `plan.rs`: a pattern starts from a bound node or an `@id` as before;
+  otherwise every node's best source (index, label, scan) is estimated in
+  rows, with the values the query gives (literals and parameters while
+  planning; at run time, the row's values too), and the whole pattern is
+  costed from each node: candidates read, then rows × degree at each step
+  (by direction, from the statistics) × the share of targets that fit. The
+  cheapest wins. `EXPLAIN` shows the estimate (`~2 080 nodes`), and
+  `cost.rs` uses the same sources and degrees.
+- Join ordering: `order_patterns` runs the patterns of one `MATCH`
+  greedily, a pattern sharing a bound variable first, otherwise the
+  cheapest. Rows are the same (edge uniqueness was already per pattern);
+  their order without `ORDER BY` can change.
+- Plan caching: `cache.rs` keeps 1 024 parsed statements by text (least
+  recently used out, an eighth at a time; texts over 16 KiB are not kept;
+  syntax errors are not kept). Plans are not cached: anchors are chosen
+  per run from current statistics, so a cached statement never plans with
+  a dropped index or stale counts. `statement_cache_stats()` reports hits.
+- Parallel scans: `parallel.rs`. A read-only match whose start is a label
+  or an index lookup estimated at 4 096 nodes or more, with no row cap from
+  a `LIMIT`, splits the candidate ids into chunks (eight per thread, at
+  least 512 ids) that threads take in turn; each chunk's rows return in
+  chunk order, so rows and their order equal one thread's. Threads share
+  the snapshot (`ReadTx` is `Sync`) and the `Budget`, whose counters are
+  now atomic, so reads, time and cancellation count across them. At most
+  one thread per CPU works at once over the whole process
+  (`set_parallelism`, `scan_threads` in `[query]`); a query that gets none
+  runs alone, and work inside a worker never splits again.
+- Tests: `grafeno-query/tests/planner.rs` (statistics against known
+  distributions and degrees, `db.analyze`, starts by value distribution
+  and parameters, a range against a small label, join order, statistics
+  rebuilt after drift and new or dropped indexes, the cache with
+  parameters, parallel rows equal to serial and limits across threads).
+- Measured (`examples/planner_bench.rs`, 200 000 people, against a build of
+  12.1 in the same session, alternating): two equalities with the rare
+  one written second 354.7 ms → 11.1 ms; a range holding every person
+  against a label of 1 000 companies 1 770 ms → 2.7 ms; the big pattern
+  written first 2 593 ms → 1.8 ms; 50 000 point queries with a parameter
+  17 682 → 18 616 a second; a scan of 200 000 people 743 ms → 161 ms on 16
+  threads (706 ms on one). Reads with many readers did not change, as the
+  query measured (a point lookup and two hops, about 200 rows) already
+  started from its index: best of three runs, 1 reader 1 259 queries a
+  second, 16 readers 9 168 (8.5 ms p99 at most), and 7 960 with a busy
+  writer committing 10 500 nodes a second meanwhile.
 
 **12.3 Vectorized storage and execution.**
 
@@ -1517,6 +1582,8 @@ spinning disk, on ARM, or for days at a time.
 | NDJSON ingestion of 100 000 lines | 25 000 lines/s; a retry 360 000 lines/s, nothing written; commit to event 0.15 ms | E1-mem | `ingest_runs.csv` |
 | Community summaries of 50 000 nodes in 4 levels | 3.2 s first, 1.35 s unchanged; teams and departments found (purity 0.999); global search 0.06 ms | E1-mem | `community_*.csv` |
 | Extraction of 20 000 memories naming 5 000 entities | 3 200 texts/s; 99.4% of mentions linked right, none wrong; 0.06 s when nothing changed | E1-mem | `extract_*.csv` |
+| Queries a planner without statistics got wrong (200 000 people) | 355 ms → 11 ms, 1.8 s → 2.7 ms, 2.6 s → 1.8 ms; a scan 4.4 times faster on 16 threads | E1-mem | `planner_plans.csv`, `parallel_scan.csv` |
+| Read queries with 16 readers and a busy writer | 9 200 a second alone, 8 000 with 10 500 writes a second; p99 under 9 ms | E1-mem | `read_concurrency.csv` |
 
 ### Guarantees and the tests that hold them
 
@@ -1544,6 +1611,7 @@ real binary. The ones that carry each guarantee:
 | Merges are right and reversible | `grafeno/tests/merges.rs`, `grafeno-memory/tests/maintenance.rs` | strong keys, labels, conflicting facts and functional edges; namesakes, typos, nicknames, translations; a merge undone exactly (indexes, counters and the check agree) |
 | Isolation between principals | `grafeno-server/tests/access.rs` | a matrix of keys, grants and endpoints: no read or write outside a key's grants, `own_only` keys change only their own records |
 | GQ follows Cypher | `grafeno-query/tests/cypher.rs`, `queries.rs`, `statistics.rs`, `indexes.rs`, `algorithms.rs` | clauses, functions, aggregates, indexes, planner choices and algorithms on known graphs |
+| The planner estimates from the data, and parallel scans change nothing | `grafeno-query/tests/planner.rs` | statistics against known distributions and degrees; starts chosen by value distribution, parameters and pattern cost; join order; statistics rebuilt after drift and index changes; a cached statement after its index is dropped; parallel rows and order equal one thread's, and limits hold across threads |
 | Costly queries stop | `grafeno-query/tests/adversarial.rs` | 32 hostile queries within their limits; nesting just under the limit runs on a 2 MiB stack; `max_cost` refuses; procedure rows count against `max_memory` |
 | Nothing a client sends crashes the parser | `grafeno-query/tests/fuzz.rs` | proptest: random tokens, valid queries with random edits, arbitrary text, through the lexer, parser, planner, `EXPLAIN` and executor |
 | The API keeps its contract | `grafeno-server/tests/http.rs`, `mcp.rs`, `shell.rs`, `clients/typescript/test` | every endpoint and MCP tool, limits, conflicts (409 with details), metrics, the CLI shell, and the client against the real binary |
@@ -1564,6 +1632,7 @@ cargo run --release -p grafeno-memory --example extract_bench -- 5000 20000
 cargo run --release -p grafeno --example constraint_bench -- 10000 50000
 cargo run --release -p grafeno-memory --example community_bench -- 1000 50
 cargo run --release -p grafeno --example interchange_bench -- 100000
+cargo run --release -p grafeno-query --example planner_bench -- 200000
 cargo run --release -p grafeno --example changes_bench -- 100000
 cargo run --release -p grafeno-server --example events_bench -- 100000
 cargo test --release -p grafeno-query --test adversarial -- --nocapture
@@ -1595,9 +1664,11 @@ docker run --rm --memory 512m --memory-swap 512m -e CACHE_MB=128 -e PROJECTION_C
   (461 s for 6.4 GB in E2).
 - With eventual durability, the flush every 500 ms holds the writer for
   10 to 25 ms, which is the p99 of a write.
-- Not yet measured: Linux bare metal, spinning disks, ARM, readers at
-  high concurrency against a busy writer (12.2), multi-day runs, and HTTP
-  end to end under load.
+- A parallel scan of 200 000 candidates gains about 4.4 times on 16
+  threads, not 16: each candidate still decodes its node and clones its
+  row one at a time (12.3 is the lever).
+- Not yet measured: Linux bare metal, spinning disks, ARM, multi-day
+  runs, and HTTP end to end under load.
 
 ## Open decisions
 

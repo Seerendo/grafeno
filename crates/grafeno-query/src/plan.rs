@@ -1,19 +1,28 @@
-//! Planning a pattern match: where each pattern starts.
+//! Planning a pattern match: where each pattern starts, and in which order
+//! the patterns of a `MATCH` run.
 //!
-//! The start (anchor) is the most selective node of the pattern: a variable
-//! bound by an earlier clause, then an `@id`, then a property index (from
-//! the pattern's own properties or the `WHERE` conditions), then the label
-//! with the fewest nodes. Everything else is reached by expanding edges.
+//! The start (anchor) of a pattern is a variable bound by an earlier
+//! clause, then an `@id`; otherwise the way to its nodes estimated to find
+//! the fewest of them: a property index (from the pattern's own properties
+//! or the `WHERE` conditions), a label, or every node. Estimates come from
+//! the planner's statistics (`grafeno::PlannerStats`: the most common
+//! values and equal-depth buckets of each index) with the values the query
+//! gives, so `city = 'big'` (half the nodes) loses to `status = 'blocked'`
+//! (one in a hundred). Everything else is reached by expanding edges.
+//!
+//! The patterns of one `MATCH` run cheapest start first; each one's
+//! variables are then bound, so a pattern that shares one starts from it.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Bound;
+use std::sync::Arc;
 
-use grafeno::{IndexDef, IndexRange};
+use grafeno::{IndexDef, IndexRange, PlannerStats};
 use serde_json::Value as Json;
 
 use crate::QueryError;
-use crate::ast::{BinOp, Expr, Key, NodePattern};
-use crate::eval::{Context, Row, Scope, eval};
+use crate::ast::{BinOp, Expr, Key, NodePattern, Pattern, UnOp};
+use crate::eval::{Context, Params, Row, Scope, eval};
 use crate::value::Value;
 
 /// What the planner knows about the namespace, read once per statement.
@@ -24,6 +33,139 @@ pub(crate) struct PlanInfo {
     pub(crate) edge_labels: HashMap<String, u64>,
     pub(crate) nodes: u64,
     pub(crate) edges: u64,
+    /// Value distributions and degrees, when they have been built.
+    pub(crate) stats: Option<Arc<PlannerStats>>,
+}
+
+/// The value of an expression when it can be known while planning.
+pub(crate) type ValueOf<'a> = &'a dyn Fn(&Expr) -> Option<Value>;
+
+/// The value of an expression that reads no variable: literals, parameters
+/// and lists of them.
+pub(crate) fn constant(expr: &Expr, params: Option<&Params>) -> Option<Value> {
+    match expr {
+        Expr::Literal(value) => Some(value.clone()),
+        Expr::Param(name) => params?.get(name).cloned(),
+        Expr::List(items) => items
+            .iter()
+            .map(|item| constant(item, params))
+            .collect::<Option<Vec<_>>>()
+            .map(Value::List),
+        Expr::Unary(UnOp::Neg, inner) => match constant(inner, params)? {
+            Value::Int(i) => i.checked_neg().map(Value::Int),
+            Value::Float(f) => Some(Value::Float(-f)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+impl PlanInfo {
+    fn label_count(&self, label: &str) -> u64 {
+        self.label_counts.get(label).copied().unwrap_or(0)
+    }
+
+    /// Nodes a lookup of `seek` in index `def` is estimated to find.
+    fn seek_rows(&self, def: &IndexDef, seek: &Seek, value_of: ValueOf) -> f64 {
+        let label = self.label_count(&def.label) as f64;
+        let stats = self
+            .stats
+            .as_ref()
+            .and_then(|stats| stats.index(&def.name))
+            .filter(|stats| stats.label_nodes > 0);
+        let Some(stats) = stats else {
+            // Without statistics: an equality finds a tenth of the label,
+            // a range or a prefix a quarter.
+            return match seek {
+                Seek::Equal(_) if def.unique => 1.0,
+                Seek::Equal(_) => (label / 10.0).max(1.0),
+                Seek::In(list) => {
+                    let items = match value_of(list) {
+                        Some(Value::List(items)) => items.len() as f64,
+                        _ => 10.0,
+                    };
+                    items
+                        * if def.unique {
+                            1.0
+                        } else {
+                            (label / 10.0).max(1.0)
+                        }
+                }
+                Seek::Prefix(_) | Seek::Range { .. } => (label / 4.0).max(1.0),
+            };
+        };
+        // The label grew or shrank since the statistics were built.
+        let scale = label / stats.label_nodes as f64;
+        let equal = |value: &Value| match indexable(value) {
+            Some(json) => stats.estimate(&IndexRange::Equal(json)),
+            None if value.is_null() => 0.0,
+            None => stats.per_value(),
+        };
+        let wide = stats.entries as f64 / 4.0;
+        let rows = match seek {
+            Seek::Equal(expr) => value_of(expr).map_or(stats.per_value(), |value| equal(&value)),
+            Seek::In(list) => match value_of(list) {
+                Some(Value::List(items)) => items.iter().map(equal).sum(),
+                Some(Value::Null) => 0.0,
+                _ => 10.0 * stats.per_value(),
+            },
+            Seek::Prefix(expr) => match value_of(expr) {
+                Some(Value::Str(prefix)) => stats.estimate(&IndexRange::Prefix(prefix)),
+                Some(Value::Null) => 0.0,
+                _ => wide,
+            },
+            Seek::Range { lower, upper } => {
+                let side = |side: Option<(&Expr, bool)>| -> Option<Bound<Json>> {
+                    match side {
+                        None => Some(Bound::Unbounded),
+                        Some((expr, _)) => indexable(&value_of(expr)?).map(Bound::Included),
+                    }
+                };
+                match (side(*lower), side(*upper)) {
+                    (Some(lower), Some(upper)) => {
+                        stats.estimate(&IndexRange::Between { lower, upper })
+                    }
+                    _ => wide,
+                }
+            }
+        };
+        if def.unique {
+            rows.min(label)
+        } else {
+            rows * scale
+        }
+    }
+
+    /// Edges followed from one node over edges with `labels` (any when
+    /// empty) in `direction`: each label's average degree that way, from
+    /// the statistics, or its edges over all nodes without them.
+    pub(crate) fn degree(&self, labels: &[String], direction: grafeno::Direction) -> f64 {
+        let nodes = (self.nodes as f64).max(1.0);
+        let plain = |edges: f64| match direction {
+            grafeno::Direction::Both => 2.0 * edges / nodes,
+            _ => edges / nodes,
+        };
+        if labels.is_empty() {
+            return plain(self.edges as f64);
+        }
+        labels
+            .iter()
+            .map(|label| {
+                let stats = self
+                    .stats
+                    .as_ref()
+                    .and_then(|stats| stats.edge_label(label));
+                match stats {
+                    Some(stats) => match direction {
+                        grafeno::Direction::Out => stats.out_degree(),
+                        grafeno::Direction::In => stats.in_degree(),
+                        grafeno::Direction::Both => stats.out_degree() + stats.in_degree(),
+                    },
+                    None => plain(self.edge_labels.get(label).copied().unwrap_or(0) as f64),
+                }
+            })
+            .sum()
+    }
 }
 
 /// The parts of a condition joined by `AND`.
@@ -84,38 +226,67 @@ pub(crate) enum Source<'q> {
         name: String,
         key: String,
         seek: Seek<'q>,
+        /// Nodes it is estimated to find.
+        rows: f64,
     },
     Label {
         label: String,
         count: u64,
     },
-    Scan,
+    Scan {
+        nodes: u64,
+    },
 }
 
 impl Source<'_> {
-    /// Higher is more selective; ties between labels go to the smaller one.
-    fn score(&self) -> (u8, i64) {
+    /// Nodes this start is estimated to find.
+    pub(crate) fn rows(&self) -> f64 {
         match self {
-            Source::Bound => (7, 0),
-            Source::Id(_) => (6, 0),
+            Source::Bound | Source::Id(_) => 1.0,
+            Source::Index { rows, .. } => *rows,
+            Source::Label { count, .. } => *count as f64,
+            Source::Scan { nodes } => *nodes as f64,
+        }
+    }
+
+    /// Lower is better: a bound node, an `@id`, then the fewest nodes
+    /// estimated, then (on a tie) an index over a label over a scan.
+    fn rank(&self) -> (u8, f64, u8) {
+        let kind = match self {
+            Source::Bound => return (0, 0.0, 0),
+            Source::Id(_) => return (1, 0.0, 0),
             Source::Index {
                 seek: Seek::Equal(_),
                 ..
-            } => (5, 0),
+            } => 0,
             Source::Index {
                 seek: Seek::In(_), ..
-            } => (4, 0),
-            Source::Index { .. } => (3, 0),
-            Source::Label { count, .. } => (1, -(*count as i64)),
-            Source::Scan => (0, 0),
-        }
+            } => 1,
+            Source::Index { .. } => 2,
+            Source::Label { .. } => 3,
+            Source::Scan { .. } => 4,
+        };
+        (2, self.rows(), kind)
+    }
+
+    pub(crate) fn better_than(&self, other: &Source) -> bool {
+        let (a, b) = (self.rank(), other.rank());
+        a.0.cmp(&b.0)
+            .then(a.1.total_cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+            .is_lt()
     }
 
     pub(crate) fn describe(&self, node: &str) -> String {
         match self {
             Source::Bound => format!("start at {node} (the bound node)"),
             Source::Id(_) => format!("start at {node} (lookup by @id)"),
-            Source::Index { name, key, seek } => {
+            Source::Index {
+                name,
+                key,
+                seek,
+                rows,
+            } => {
                 let how = match seek {
                     Seek::Equal(_) => format!("{key} = …"),
                     Seek::In(_) => format!("{key} IN […]"),
@@ -132,12 +303,17 @@ impl Source<'_> {
                         format!("{low}{key}{high}")
                     }
                 };
-                format!("start at {node} (index {name}: {how})")
+                format!(
+                    "start at {node} (index {name}: {how}, ~{} nodes)",
+                    rows.ceil() as u64
+                )
             }
             Source::Label { label, count } => {
                 format!("start at {node} (scan of :{label}, {count} nodes)")
             }
-            Source::Scan => format!("start at {node} (scan of every node)"),
+            Source::Scan { nodes } => {
+                format!("start at {node} (scan of every node, {nodes} nodes)")
+            }
         }
     }
 }
@@ -148,6 +324,7 @@ fn source_for<'q>(
     is_bound: &dyn Fn(&str) -> bool,
     conditions: &[&'q Expr],
     info: &PlanInfo,
+    value_of: ValueOf,
 ) -> Source<'q> {
     if node.var.as_deref().is_some_and(is_bound) {
         return Source::Bound;
@@ -163,7 +340,7 @@ fn source_for<'q>(
     let mut consider = |candidate: Source<'q>| {
         if best
             .as_ref()
-            .is_none_or(|current| candidate.score() > current.score())
+            .is_none_or(|current| candidate.better_than(current))
         {
             best = Some(candidate);
         }
@@ -177,6 +354,7 @@ fn source_for<'q>(
             consider(Source::Index {
                 name: def.name.clone(),
                 key: def.key.clone(),
+                rows: info.seek_rows(def, &seek, value_of),
                 seek,
             });
         }
@@ -184,10 +362,10 @@ fn source_for<'q>(
     for label in &node.labels {
         consider(Source::Label {
             label: label.clone(),
-            count: info.label_counts.get(label).copied().unwrap_or(0),
+            count: info.label_count(label),
         });
     }
-    best.unwrap_or(Source::Scan)
+    best.unwrap_or(Source::Scan { nodes: info.nodes })
 }
 
 /// A way to read the index on `key`: the pattern's own `{key: value}`, or
@@ -246,22 +424,139 @@ fn seek_for<'q>(
     other.or_else(|| (lower.is_some() || upper.is_some()).then_some(Seek::Range { lower, upper }))
 }
 
-/// Where to start a pattern: the position of its anchor node and how to
-/// find it.
+/// Where to start a pattern: the position of its anchor node, how to find
+/// it, and the work the whole match is estimated to take from there.
+///
+/// A node bound by an earlier clause or given by `@id` starts the pattern;
+/// otherwise every node's best start is tried, and the one whose start and
+/// expansions are estimated to take the least work wins: a label of five
+/// companies loses to an index that finds twenty people when each company
+/// employs hundreds.
 pub(crate) fn plan_anchor<'q>(
-    nodes: &[&'q NodePattern],
+    pattern: &'q Pattern,
     is_bound: &dyn Fn(&str) -> bool,
     conditions: &[&'q Expr],
     info: &PlanInfo,
-) -> (usize, Source<'q>) {
-    let mut best = (0, source_for(nodes[0], is_bound, conditions, info));
-    for (index, node) in nodes.iter().enumerate().skip(1) {
-        let source = source_for(node, is_bound, conditions, info);
-        if source.score() > best.1.score() {
-            best = (index, source);
+    value_of: ValueOf,
+) -> (usize, Source<'q>, f64) {
+    let nodes = pattern.nodes();
+    let mut best: Option<(usize, Source<'q>, f64)> = None;
+    for (index, node) in nodes.iter().enumerate() {
+        let source = source_for(node, is_bound, conditions, info, value_of);
+        let cost = pattern_cost(pattern, &nodes, index, &source, is_bound, info);
+        let wins = best.as_ref().is_none_or(|(_, current, current_cost)| {
+            let (a, b) = (source.rank(), current.rank());
+            a.0.cmp(&b.0)
+                .then(cost.total_cmp(current_cost))
+                .then(a.2.cmp(&b.2))
+                .is_lt()
+        });
+        if wins {
+            best = Some((index, source, cost));
         }
     }
-    best
+    best.expect("a pattern has at least one node")
+}
+
+/// Far beyond any real count, and still finite.
+const CAP: f64 = 1e18;
+
+/// The share of nodes reached that fit `node`: its labels, its properties
+/// (a tenth each), and one node when it is already bound.
+fn keep(node: &NodePattern, is_bound: &dyn Fn(&str) -> bool, info: &PlanInfo) -> f64 {
+    let nodes = (info.nodes as f64).max(1.0);
+    let mut share = node
+        .labels
+        .iter()
+        .map(|label| (info.label_count(label) as f64 / nodes).clamp(1.0 / nodes, 1.0))
+        .fold(1.0, f64::min);
+    if node.var.as_deref().is_some_and(is_bound) {
+        share = share.min(1.0 / nodes);
+    }
+    share * 0.1f64.powi(node.props.len().min(8) as i32)
+}
+
+/// The work of matching `pattern` from node `anchor` found by `source`:
+/// the candidates read, then the edges followed at each step, both ways
+/// from the anchor.
+fn pattern_cost(
+    pattern: &Pattern,
+    nodes: &[&NodePattern],
+    anchor: usize,
+    source: &Source,
+    is_bound: &dyn Fn(&str) -> bool,
+    info: &PlanInfo,
+) -> f64 {
+    let start = nodes[anchor];
+    let mut cost = source.rows();
+    // The candidates' own properties not used to find them.
+    let used = |key: &Key| match source {
+        Source::Id(_) => *key == Key::Meta("id".into()),
+        Source::Index { key: index_key, .. } => *key == Key::Prop(index_key.clone()),
+        _ => false,
+    };
+    let extra = start.props.iter().filter(|(key, _)| !used(key)).count();
+    let mut rows = source.rows() * 0.1f64.powi(extra.min(8) as i32);
+    let order = (anchor..pattern.steps.len())
+        .map(|step| (step, step + 1, false))
+        .chain((0..anchor).rev().map(|step| (step, step, true)));
+    for (step, target, backwards) in order {
+        let rel = &pattern.steps[step].0;
+        let direction = match (rel.direction, backwards) {
+            (grafeno::Direction::Out, true) => grafeno::Direction::In,
+            (grafeno::Direction::In, true) => grafeno::Direction::Out,
+            (direction, _) => direction,
+        };
+        let degree = info.degree(&rel.labels, direction);
+        let reach = match rel.length {
+            None => degree,
+            Some((min, max)) => {
+                let max = max.unwrap_or(crate::exec::MAX_PATH_LENGTH);
+                (min..=max)
+                    .map(|hops| degree.powi(hops as i32))
+                    .sum::<f64>()
+            }
+        };
+        cost = (cost + rows * reach.max(1.0)).min(CAP);
+        rows = (rows * reach * keep(nodes[target], is_bound, info)).min(CAP);
+    }
+    cost
+}
+
+/// The order to run the patterns of one `MATCH` in: each time, a pattern
+/// that shares a variable bound so far if there is one, the one estimated
+/// to take the least work otherwise. Ties keep the written order.
+pub(crate) fn order_patterns(
+    patterns: &[Pattern],
+    is_bound: &dyn Fn(&str) -> bool,
+    conditions: &[&Expr],
+    info: &PlanInfo,
+    value_of: ValueOf,
+) -> Vec<usize> {
+    if patterns.len() < 2 {
+        return (0..patterns.len()).collect();
+    }
+    let mut bound: HashSet<String> = HashSet::new();
+    let mut left: Vec<usize> = (0..patterns.len()).collect();
+    let mut order = Vec::with_capacity(patterns.len());
+    while !left.is_empty() {
+        let known = |var: &str| is_bound(var) || bound.contains(var);
+        let mut pick: Option<(usize, (u8, f64))> = None;
+        for (slot, &index) in left.iter().enumerate() {
+            let (_, source, cost) =
+                plan_anchor(&patterns[index], &known, conditions, info, value_of);
+            let key = (source.rank().0.min(2), cost);
+            if pick
+                .is_none_or(|(_, best)| key.0.cmp(&best.0).then(key.1.total_cmp(&best.1)).is_lt())
+            {
+                pick = Some((slot, key));
+            }
+        }
+        let index = left.remove(pick.map_or(0, |(slot, _)| slot));
+        bound.extend(patterns[index].variables().into_iter().map(str::to_owned));
+        order.push(index);
+    }
+    order
 }
 
 /// A value the index can look up: numbers, strings and booleans.

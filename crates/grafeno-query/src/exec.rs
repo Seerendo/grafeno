@@ -17,8 +17,10 @@ use crate::ast::{
 };
 use crate::eval::{Context, Params, Row, Scope, eval, property, to_time, truth};
 use crate::limits::{Budget, Limits};
-use crate::parser::parse;
-use crate::plan::{PlanInfo, Source, conjuncts, free_vars, plan_anchor, seek_ranges};
+use crate::plan::{
+    PlanInfo, Source, ValueOf, conjuncts, constant, free_vars, order_patterns, plan_anchor,
+    seek_ranges,
+};
 use crate::procedures;
 use crate::value::{Value, equals, sort_order};
 
@@ -117,10 +119,10 @@ pub fn execute_with(
     params: &Params,
     limits: &Limits,
 ) -> Result<QueryResult, QueryError> {
-    let statement = parse(query)?;
+    let statement = crate::cache::parsed(query)?;
     validate(&statement)?;
     if statement.mode == Mode::Explain {
-        return explain(&statement, &plan_info(&db.begin_read()?, ns)?);
+        return explain(&statement, &plan_info(&db.begin_read()?, ns)?, params);
     }
     if statement.writes() {
         // Holding the write lock first makes the snapshot the latest state.
@@ -159,10 +161,10 @@ pub fn execute_in(
     params: &Params,
     limits: &Limits,
 ) -> Result<QueryResult, QueryError> {
-    let statement = parse(query)?;
+    let statement = crate::cache::parsed(query)?;
     validate(&statement)?;
     if statement.mode == Mode::Explain {
-        return explain(&statement, &plan_info(read, ns)?);
+        return explain(&statement, &plan_info(read, ns)?, params);
     }
     match &statement.schema {
         Some(schema) => run_schema(read, Some(tx), ns, schema, limits),
@@ -188,10 +190,10 @@ pub fn execute_read_with(
     params: &Params,
     limits: &Limits,
 ) -> Result<QueryResult, QueryError> {
-    let statement = parse(query)?;
+    let statement = crate::cache::parsed(query)?;
     validate(&statement)?;
     if statement.mode == Mode::Explain {
-        return explain(&statement, &plan_info(read, ns)?);
+        return explain(&statement, &plan_info(read, ns)?, params);
     }
     if statement.writes() {
         return Err(QueryError::runtime(
@@ -204,7 +206,14 @@ pub fn execute_read_with(
     Runner::new(read, None, ns, params, statement.mode, limits)?.run(&statement)
 }
 
+/// What the planner knows about `ns`. Statements that write (`building`
+/// false) use the statistics in memory, however old, so that they do not
+/// build them while holding the write lock.
 fn plan_info(read: &ReadTx, ns: &str) -> Result<PlanInfo, QueryError> {
+    plan_info_with(read, ns, true)
+}
+
+fn plan_info_with(read: &ReadTx, ns: &str, building: bool) -> Result<PlanInfo, QueryError> {
     let stats = read.stats(ns)?;
     Ok(PlanInfo {
         indexes: read.index_defs(ns)?,
@@ -212,6 +221,11 @@ fn plan_info(read: &ReadTx, ns: &str) -> Result<PlanInfo, QueryError> {
         edge_labels: stats.edge_labels.into_iter().collect(),
         nodes: stats.nodes,
         edges: stats.edges,
+        stats: if building {
+            read.planner_stats(ns)?
+        } else {
+            read.cached_planner_stats(ns)
+        },
     })
 }
 
@@ -443,7 +457,7 @@ fn run_schema(
 
 /// Whether the statement writes when run (`EXPLAIN` never does).
 pub fn is_write(query: &str) -> Result<bool, QueryError> {
-    let statement = parse(query)?;
+    let statement = crate::cache::parsed(query)?;
     Ok(statement.mode != Mode::Explain && statement.writes())
 }
 
@@ -459,7 +473,7 @@ pub enum StatementKind {
 }
 
 pub fn statement_kind(query: &str) -> Result<StatementKind, QueryError> {
-    let statement = parse(query)?;
+    let statement = crate::cache::parsed(query)?;
     Ok(if statement.mode == Mode::Explain || !statement.writes() {
         StatementKind::Read
     } else if statement.schema.is_some() {
@@ -596,6 +610,7 @@ impl<'a> Runner<'a> {
         mode: Mode,
         limits: &Limits,
     ) -> Result<Self, QueryError> {
+        let info = plan_info_with(read, ns, tx.is_none())?;
         Ok(Self {
             read,
             tx,
@@ -605,7 +620,7 @@ impl<'a> Runner<'a> {
             deleted_nodes: HashSet::new(),
             deleted_edges: HashSet::new(),
             profile: (mode == Mode::Profile).then(Vec::new),
-            info: plan_info(read, ns)?,
+            info,
             budget: Budget::new(limits),
             reads_seen: 0,
         })
@@ -625,7 +640,9 @@ impl<'a> Runner<'a> {
 
     fn run(mut self, statement: &Statement) -> Result<QueryResult, QueryError> {
         if let Some(max) = self.budget.max_cost() {
-            let (_, cost) = crate::cost::estimate(statement, &self.info);
+            let params = self.params;
+            let value_of = |expr: &Expr| constant(expr, Some(params));
+            let (_, cost) = crate::cost::estimate(statement, &self.info, &value_of);
             if cost > max {
                 return Err(QueryError::limit(format!(
                     "the query's estimated cost {} is above {} (limit max_cost); EXPLAIN shows where it comes from",
@@ -693,10 +710,12 @@ impl<'a> Runner<'a> {
         let mut bound: HashSet<String> = HashSet::new();
         for (index, clause) in query.clauses.iter().enumerate() {
             let started = Instant::now();
-            let details = self
-                .profile
-                .is_some()
-                .then(|| describe(clause, &bound, &self.info));
+            let details = self.profile.is_some().then(|| {
+                let params = self.params;
+                describe(clause, &bound, &self.info, &|expr: &Expr| {
+                    constant(expr, Some(params))
+                })
+            });
             if let Clause::Return(projection) = clause {
                 let edges = EdgeFilter::any();
                 let ctx = self.ctx(&edges);
@@ -806,6 +825,15 @@ impl<'a> Runner<'a> {
                     self.time_filter(valid_at.as_ref(), known_at.as_ref(), &Row::new())?
                 };
                 let conditions: Vec<&Expr> = filter.as_ref().map(conjuncts).unwrap_or_default();
+                // Cheapest start first; the variables are the same in every row.
+                let params = self.params;
+                let order = order_patterns(
+                    patterns,
+                    &|var| flow.vars.iter().any(|bound| bound == var),
+                    &conditions,
+                    &self.info,
+                    &|expr: &Expr| constant(expr, Some(params)),
+                );
                 let mut out = Vec::new();
                 for row in flow.rows {
                     if cap.is_some_and(|cap| out.len() >= cap) {
@@ -818,8 +846,9 @@ impl<'a> Runner<'a> {
                     };
                     let ctx = self.ctx(&edges);
                     let mut rows = vec![row.clone()];
-                    for (index, pattern) in patterns.iter().enumerate() {
-                        let last = index + 1 == patterns.len();
+                    for (position, &index) in order.iter().enumerate() {
+                        let pattern = &patterns[index];
+                        let last = position + 1 == order.len();
                         let matcher = Matcher {
                             conditions: &conditions,
                             filter: if last { filter.as_ref() } else { None },
@@ -1262,11 +1291,13 @@ fn match_pattern(
     let nodes = pattern.nodes();
     let mut out = Vec::new();
     for row in rows {
-        let (anchor, source) = plan_anchor(
-            &nodes,
+        let value_of = |expr: &Expr| eval(ctx, expr, Scope::Row(&row)).ok();
+        let (anchor, source, _) = plan_anchor(
+            pattern,
             &|var| row.contains_key(var),
             matcher.conditions,
             ctx.info,
+            &value_of,
         );
         let anchor_var = nodes[anchor].var.as_deref();
         // Conditions on the anchor alone run before expanding from it.
@@ -1281,78 +1312,40 @@ fn match_pattern(
                 })
             })
             .collect();
+        let start = Start {
+            pattern,
+            nodes: &nodes,
+            anchor,
+            early: &early,
+            filter: matcher.filter,
+        };
+        if let Some(ids) = parallel_candidates(ctx, &source, &row, matcher)? {
+            out.extend(crate::parallel::map_chunks(
+                ctx,
+                &ids,
+                |ctx, chunk| -> Result<Vec<Row>, QueryError> {
+                    let mut rows = Vec::new();
+                    for id in chunk {
+                        let Some(node) = ctx.node(*id)? else {
+                            continue;
+                        };
+                        let node = Arc::new(node);
+                        if node_fits(ctx, &node, nodes[anchor], &row)? {
+                            start.extend(ctx, &row, node, &mut rows, None)?;
+                        }
+                    }
+                    Ok(rows)
+                },
+            )?);
+            ctx.budget.rows(out.len())?;
+            continue;
+        }
         let mut cursor = None;
         loop {
             let (page, next) = candidates(ctx, nodes[anchor], &source, &row, cursor)?;
             for node in page {
-                let mut start = Partial {
-                    row: row.clone(),
-                    used: Vec::new(),
-                    nodes: vec![None; nodes.len()],
-                    steps: vec![Vec::new(); pattern.steps.len()],
-                };
-                start.nodes[anchor] = Some(node.id);
-                if let Some(var) = anchor_var {
-                    start.row.insert(var.to_owned(), Value::Node(node));
-                }
-                if !early.is_empty() && !all_true(ctx, &early, &start.row)? {
-                    continue;
-                }
-                let mut states = vec![start];
-                // Right of the anchor, in the written direction…
-                for step in anchor..pattern.steps.len() {
-                    let (rel, target) = &pattern.steps[step];
-                    let mut next = Vec::new();
-                    for state in states {
-                        let from = state.nodes[step].expect("bound while extending");
-                        next.extend(expand(
-                            ctx,
-                            state,
-                            from,
-                            rel,
-                            rel.direction,
-                            target,
-                            step + 1,
-                            (step, false),
-                        )?);
-                    }
-                    ctx.budget.rows(next.len())?;
-                    states = next;
-                }
-                // …and left of it, against the written direction.
-                for step in (0..anchor).rev() {
-                    let (rel, _) = &pattern.steps[step];
-                    let mut next = Vec::new();
-                    for state in states {
-                        let from = state.nodes[step + 1].expect("bound while extending");
-                        next.extend(expand(
-                            ctx,
-                            state,
-                            from,
-                            rel,
-                            reverse(rel.direction),
-                            nodes[step],
-                            step,
-                            (step, true),
-                        )?);
-                    }
-                    ctx.budget.rows(next.len())?;
-                    states = next;
-                }
-                for mut state in states {
-                    if let Some(var) = &pattern.path {
-                        let path = build_path(ctx, &state.nodes, &state.steps)?;
-                        state.row.insert(var.clone(), path);
-                    }
-                    if let Some(filter) = matcher.filter
-                        && truth(&eval(ctx, filter, Scope::Row(&state.row))?)? != Some(true)
-                    {
-                        continue;
-                    }
-                    out.push(state.row);
-                    if matcher.cap.is_some_and(|cap| out.len() >= cap) {
-                        return Ok(out);
-                    }
+                if start.extend(ctx, &row, node, &mut out, matcher.cap)? {
+                    return Ok(out);
                 }
                 ctx.budget.rows(out.len())?;
             }
@@ -1363,6 +1356,146 @@ fn match_pattern(
         }
     }
     Ok(out)
+}
+
+/// A pattern bound at its anchor, ready to grow from each candidate.
+struct Start<'s, 'q> {
+    pattern: &'q Pattern,
+    nodes: &'s [&'q NodePattern],
+    anchor: usize,
+    /// Conditions that need only the anchor (and earlier variables).
+    early: &'s [&'q Expr],
+    /// The filter for complete rows.
+    filter: Option<&'q Expr>,
+}
+
+impl Start<'_, '_> {
+    /// Every match of the pattern with its anchor at `node`, appended to
+    /// `out`; whether `out` reached `cap`.
+    fn extend(
+        &self,
+        ctx: &Context,
+        row: &Row,
+        node: Arc<Node>,
+        out: &mut Vec<Row>,
+        cap: Option<usize>,
+    ) -> Result<bool, QueryError> {
+        let (pattern, nodes, anchor) = (self.pattern, self.nodes, self.anchor);
+        let mut start = Partial {
+            row: row.clone(),
+            used: Vec::new(),
+            nodes: vec![None; nodes.len()],
+            steps: vec![Vec::new(); pattern.steps.len()],
+        };
+        start.nodes[anchor] = Some(node.id);
+        if let Some(var) = nodes[anchor].var.as_deref() {
+            start.row.insert(var.to_owned(), Value::Node(node));
+        }
+        if !self.early.is_empty() && !all_true(ctx, self.early, &start.row)? {
+            return Ok(false);
+        }
+        let mut states = vec![start];
+        // Right of the anchor, in the written direction…
+        for step in anchor..pattern.steps.len() {
+            let (rel, target) = &pattern.steps[step];
+            let mut next = Vec::new();
+            for state in states {
+                let from = state.nodes[step].expect("bound while extending");
+                next.extend(expand(
+                    ctx,
+                    state,
+                    from,
+                    rel,
+                    rel.direction,
+                    target,
+                    step + 1,
+                    (step, false),
+                )?);
+            }
+            ctx.budget.rows(next.len())?;
+            states = next;
+        }
+        // …and left of it, against the written direction.
+        for step in (0..anchor).rev() {
+            let (rel, _) = &pattern.steps[step];
+            let mut next = Vec::new();
+            for state in states {
+                let from = state.nodes[step + 1].expect("bound while extending");
+                next.extend(expand(
+                    ctx,
+                    state,
+                    from,
+                    rel,
+                    reverse(rel.direction),
+                    nodes[step],
+                    step,
+                    (step, true),
+                )?);
+            }
+            ctx.budget.rows(next.len())?;
+            states = next;
+        }
+        for mut state in states {
+            if let Some(var) = &pattern.path {
+                let path = build_path(ctx, &state.nodes, &state.steps)?;
+                state.row.insert(var.clone(), path);
+            }
+            if let Some(filter) = self.filter
+                && truth(&eval(ctx, filter, Scope::Row(&state.row))?)? != Some(true)
+            {
+                continue;
+            }
+            out.push(state.row);
+            if cap.is_some_and(|cap| out.len() >= cap) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// The candidates of a start worth splitting across threads: a read-only
+/// query, no row cap (a `LIMIT` wants the first rows, in order), and a
+/// label or an index lookup estimated to find at least
+/// [`crate::parallel::MIN_CANDIDATES`] nodes. `None` otherwise, or when
+/// the query runs on one thread.
+fn parallel_candidates(
+    ctx: &Context,
+    source: &Source,
+    row: &Row,
+    matcher: &Matcher,
+) -> Result<Option<Vec<NodeId>>, QueryError> {
+    if ctx.write.is_some()
+        || matcher.cap.is_some()
+        || source.rows() < crate::parallel::MIN_CANDIDATES as f64
+        || !crate::parallel::available()
+    {
+        return Ok(None);
+    }
+    let ids = match source {
+        Source::Label { label, .. } => {
+            let ids = ctx.read.nodes_with_label(ctx.ns, label)?;
+            ctx.budget.read(ids.len().max(1))?;
+            ids
+        }
+        Source::Index { name, seek, .. } => match seek_ranges(ctx, *seek, row)? {
+            Some(ranges) => {
+                let mut ids = Vec::new();
+                let mut seen = HashSet::new();
+                for range in &ranges {
+                    for id in ctx.index_lookup(name, range)? {
+                        if seen.insert(id) {
+                            ids.push(id);
+                        }
+                    }
+                }
+                ids
+            }
+            None => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    Ok(Some(ids))
 }
 
 fn all_true(ctx: &Context, conditions: &[&Expr], row: &Row) -> Result<bool, QueryError> {
@@ -1485,7 +1618,7 @@ fn candidates(
             ),
         },
         Source::Label { label, .. } => scan(Some(label)),
-        Source::Scan => scan(None),
+        Source::Scan { .. } => scan(None),
     }
 }
 
@@ -2268,7 +2401,12 @@ fn project(
 // ---------------------------------------------------------------- EXPLAIN
 
 /// The plan as a table: one row per step.
-fn explain(statement: &Statement, info: &PlanInfo) -> Result<QueryResult, QueryError> {
+fn explain(
+    statement: &Statement,
+    info: &PlanInfo,
+    params: &Params,
+) -> Result<QueryResult, QueryError> {
+    let value_of = |expr: &Expr| constant(expr, Some(params));
     if let Some(schema) = &statement.schema {
         let details = match schema {
             Schema::Create {
@@ -2306,7 +2444,7 @@ fn explain(statement: &Statement, info: &PlanInfo) -> Result<QueryResult, QueryE
             profile: None,
         });
     }
-    let (estimates, _) = crate::cost::estimate(statement, info);
+    let (estimates, _) = crate::cost::estimate(statement, info, &value_of);
     let mut steps: Vec<(String, String)> = Vec::new();
     for (index, part) in statement.parts.iter().enumerate() {
         if index > 0 {
@@ -2322,7 +2460,10 @@ fn explain(statement: &Statement, info: &PlanInfo) -> Result<QueryResult, QueryE
         }
         let mut bound = HashSet::new();
         for clause in &part.clauses {
-            steps.push((clause.name().into(), describe(clause, &bound, info)));
+            steps.push((
+                clause.name().into(),
+                describe(clause, &bound, info, &value_of),
+            ));
             bound.extend(clause_variables(clause));
         }
     }
@@ -2442,10 +2583,11 @@ fn describe_pattern(
     bound: &HashSet<String>,
     conditions: &[&Expr],
     info: &PlanInfo,
+    value_of: ValueOf,
 ) -> String {
     let nodes = pattern.nodes();
     let is_bound = |var: &str| bound.contains(var);
-    let (anchor, source) = plan_anchor(&nodes, &is_bound, conditions, info);
+    let (anchor, source, _) = plan_anchor(pattern, &is_bound, conditions, info, value_of);
     let mut parts = vec![source.describe(&node_text(nodes[anchor]))];
     for step in anchor..pattern.steps.len() {
         let (rel, target) = &pattern.steps[step];
@@ -2466,7 +2608,12 @@ fn describe_pattern(
     parts.join(", ")
 }
 
-fn describe(clause: &Clause, bound: &HashSet<String>, info: &PlanInfo) -> String {
+fn describe(
+    clause: &Clause,
+    bound: &HashSet<String>,
+    info: &PlanInfo,
+    value_of: ValueOf,
+) -> String {
     let projection_text = |projection: &Projection| {
         let mut parts = Vec::new();
         if projection.star {
@@ -2506,8 +2653,22 @@ fn describe(clause: &Clause, bound: &HashSet<String>, info: &PlanInfo) -> String
             let mut bound = bound.clone();
             let mut parts = Vec::new();
             let conditions: Vec<&Expr> = filter.as_ref().map(conjuncts).unwrap_or_default();
-            for pattern in patterns {
-                parts.push(describe_pattern(pattern, &bound, &conditions, info));
+            let order = order_patterns(
+                patterns,
+                &|var| bound.contains(var),
+                &conditions,
+                info,
+                value_of,
+            );
+            for index in order {
+                let pattern = &patterns[index];
+                parts.push(describe_pattern(
+                    pattern,
+                    &bound,
+                    &conditions,
+                    info,
+                    value_of,
+                ));
                 bound.extend(pattern.variables().into_iter().map(str::to_owned));
             }
             let mut text = parts.join("; ");
@@ -2547,7 +2708,7 @@ fn describe(clause: &Clause, bound: &HashSet<String>, info: &PlanInfo) -> String
             on_match,
         } => format!(
             "match or create: {}; {} ON CREATE, {} ON MATCH item(s)",
-            describe_pattern(pattern, bound, &[], info),
+            describe_pattern(pattern, bound, &[], info, value_of),
             on_create.len(),
             on_match.len()
         ),

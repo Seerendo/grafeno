@@ -16,6 +16,7 @@
 //! max_rows = 1000000     # rows held at once
 //! max_memory_mb = 512    # one value built, or the rows held at once
 //! max_cost = 0           # refuse queries EXPLAIN estimates above this (off)
+//! scan_threads = 0       # threads large scans may share; 0 one per CPU, 1 none
 //!
 //! [writer]               # the group commit
 //! max_batch = 512        # writes per transaction at most
@@ -213,6 +214,10 @@ pub struct QueryConfig {
     pub max_memory_mb: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_cost: Option<f64>,
+    /// Threads parallel scans may use at once, over every query: 0 is one
+    /// per CPU, 1 turns them off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_threads: Option<usize>,
 }
 
 impl QueryConfig {

@@ -1,0 +1,6 @@
+case,query,before_ms,after_ms,start_after
+"two equalities, the rare one written second","MATCH (p:Person) WHERE p.city = 'big' AND p.status = 'blocked' RETURN count(*)",354.66,11.11,"index Person_status (~2 080 nodes)"
+"two equalities, the rare one written first","MATCH (p:Person) WHERE p.status = 'blocked' AND p.city = 'city1' RETURN count(*)",3.29,3.70,"index Person_city (~963 nodes)"
+"a range that holds everyone, and a small label","MATCH (p:Person)-[:works_at]->(c:Company {name: 'c7'}) WHERE p.age >= 0 RETURN count(*)",1770.52,2.72,"scan of :Company (1 000 nodes)"
+"the big pattern written first","MATCH (p:Person)-[:works_at]->(c), (o:Owner {name: 'x'})-[:owns]->(c) RETURN count(*)",2593.06,1.79,"scan of :Owner (1 node), then c bound"
+"50 000 point queries with a parameter (queries per second)","MATCH (p:Person {uid: $u})-[:works_at]->(c) RETURN p.name, c.name",17682,18616,"index Person_uid"

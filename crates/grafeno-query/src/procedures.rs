@@ -64,6 +64,20 @@ pub(crate) const PROCEDURES: &[Procedure] = &[
         description: "Counts of the namespace.",
     },
     Procedure {
+        name: "db.analyze",
+        args: "",
+        columns: &[
+            "kind",
+            "name",
+            "count",
+            "distinct",
+            "out_degree",
+            "in_degree",
+            "common",
+        ],
+        description: "Rebuilds the planner's statistics now and lists them: per index its entries, distinct values and most common values; per edge label its edges and average degree each way. They are otherwise rebuilt on their own when the data drifts.",
+    },
+    Procedure {
         name: "db.search",
         args: "text, limit = 10",
         columns: &["node", "score"],
@@ -176,6 +190,45 @@ pub(crate) fn call(
                     .vector_dimension
                     .map_or(Value::Null, |dimension| Value::Int(dimension as i64)),
             ]]
+        }
+        "db.analyze" => {
+            let stats = read.analyze(ns)?;
+            let mut rows = Vec::new();
+            for index in &stats.indexes {
+                rows.push(vec![
+                    Value::Str("index".into()),
+                    Value::Str(index.name.clone()),
+                    Value::Int(index.entries as i64),
+                    Value::Int(index.distinct as i64),
+                    Value::Null,
+                    Value::Null,
+                    Value::List(
+                        index
+                            .common
+                            .iter()
+                            .take(10)
+                            .map(|(value, count)| {
+                                Value::List(vec![
+                                    Value::from_json(value),
+                                    Value::Int(*count as i64),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                ]);
+            }
+            for edge in &stats.edge_labels {
+                rows.push(vec![
+                    Value::Str("edge".into()),
+                    Value::Str(edge.label.clone()),
+                    Value::Int(edge.edges as i64),
+                    Value::Null,
+                    Value::Float(edge.out_degree()),
+                    Value::Float(edge.in_degree()),
+                    Value::Null,
+                ]);
+            }
+            rows
         }
         "db.search" | "db.searchVector" => {
             let limit = limit_arg(args, 1)?;

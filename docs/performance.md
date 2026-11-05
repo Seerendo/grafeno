@@ -26,6 +26,8 @@ test environments").
 | Following writes: change log, streams, ingestion | 20% write cost; a commit reaches a stream in 0.15 ms; 25 000 NDJSON lines/s |
 | Community summaries of 50 000 nodes | 3.2 s, teams and departments found; a topic finds its summary in 0.06 ms |
 | Linking what memories mention to known entities | 3 200 texts/s, 99.4% linked right, none wrong |
+| Planning by value distribution (200 000 people) | 355 ms → 11 ms where the rare condition was written second |
+| Reads with 16 readers and a busy writer | 8 000 queries/s, p99 under 9 ms |
 
 ## Test environments
 
@@ -39,8 +41,7 @@ Release builds of Rust 1.99 and redb 4.4, one run per configuration, in
 November 2026. The laptop varies by about ±20% between runs, so only
 larger differences mean something; E2's times are pessimistic and its
 memory numbers are the point. Not yet measured: Linux on bare metal,
-spinning disks, ARM, many concurrent readers against a busy writer, and
-runs of several days.
+spinning disks, ARM, and runs of several days.
 
 ## Writes
 
@@ -180,6 +181,27 @@ stays visible with `KNOWN AT`. With 50 000 job changes for 10 000 people,
 every person ended with exactly one current employer and every earlier
 job in history, at a third of the write speed (each new fact looks at
 the person's other ones).
+
+## Planning and concurrent reads
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/charts/planner-plans-dark.svg">
+  <img alt="Queries a planner without statistics got wrong: 355 ms to 11 ms, 1.8 s to 2.7 ms, 2.6 s to 1.8 ms" src="assets/charts/planner-plans-light.svg">
+</picture>
+
+The planner knows how values spread in each index and how many edges of
+each label leave and reach a node, so it starts where the fewest rows
+are, whichever condition or pattern is written first. A large read scan
+splits across threads: 161 ms on 16 threads against 706 ms on one.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/charts/read-concurrency-dark.svg">
+  <img alt="Read queries per second against readers: 1 259 with one reader, 9 168 with 16, 7 960 with 16 and a busy writer" src="assets/charts/read-concurrency-light.svg">
+</picture>
+
+Reads run on snapshots and never wait for the writer: 16 readers do about
+9 200 queries a second (a point lookup and two hops each), and 8 000 while
+a writer commits 10 500 nodes a second, with p99 under 9 ms.
 
 ## Moving graphs in and out
 

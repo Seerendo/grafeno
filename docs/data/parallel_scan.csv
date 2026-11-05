@@ -1,0 +1,6 @@
+build,threads,ms,rows
+before 12.2,1,738,39959
+before 12.2,16 (no parallel scans),743,39959
+after 12.2,1,706,39959
+after 12.2,16,161,39959
+after 12.2,"16, standard limits",163,39959

@@ -2,9 +2,8 @@
 //! read, rows held at once, memory of the values it builds, estimated cost,
 //! and cancellation.
 
-use std::cell::Cell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::QueryError;
@@ -82,11 +81,11 @@ impl Limits {
 pub(crate) struct Budget {
     limits: Limits,
     started: Instant,
-    reads: Cell<u64>,
-    work: Cell<u64>,
+    reads: AtomicU64,
+    work: AtomicU64,
     /// Bytes of rows being built by one step (a procedure), until the step
     /// ends and its rows are checked with [`Budget::held`].
-    building: Cell<usize>,
+    building: AtomicUsize,
 }
 
 impl Budget {
@@ -94,17 +93,19 @@ impl Budget {
         Self {
             limits: limits.clone(),
             started: Instant::now(),
-            reads: Cell::new(0),
-            work: Cell::new(0),
-            building: Cell::new(0),
+            reads: AtomicU64::new(0),
+            work: AtomicU64::new(0),
+            building: AtomicUsize::new(0),
         }
     }
 
     /// Counts `bytes` more of rows a step is building, and checks the
     /// memory limit before the step ends.
     pub(crate) fn build(&self, bytes: usize) -> Result<(), QueryError> {
-        let total = self.building.get().saturating_add(bytes);
-        self.building.set(total);
+        let total = self
+            .building
+            .fetch_add(bytes, Ordering::Relaxed)
+            .saturating_add(bytes);
         self.memory(total, "built rows")
     }
 
@@ -116,9 +117,8 @@ impl Budget {
     /// copied) and checks time and cancellation every thousand or so, so
     /// that queries that compute without reading still stop.
     pub(crate) fn work(&self, n: u64) -> Result<(), QueryError> {
-        let before = self.work.get();
+        let before = self.work.fetch_add(n, Ordering::Relaxed);
         let after = before.saturating_add(n);
-        self.work.set(after);
         if before >> 10 != after >> 10 {
             self.tick()?;
         }
@@ -157,7 +157,7 @@ impl Budget {
         rows: &'r [R],
         values: impl Fn(&'r R) -> Box<dyn Iterator<Item = &'r Value> + 'r>,
     ) -> Result<(), QueryError> {
-        self.building.set(0);
+        self.building.store(0, Ordering::Relaxed);
         self.rows(rows.len())?;
         if self.limits.max_memory.is_none() || rows.is_empty() {
             return Ok(());
@@ -176,13 +176,15 @@ impl Budget {
     }
 
     pub(crate) fn reads(&self) -> u64 {
-        self.reads.get()
+        self.reads.load(Ordering::Relaxed)
     }
 
     /// Counts `n` records read, and checks every limit.
     pub(crate) fn read(&self, n: usize) -> Result<(), QueryError> {
-        let reads = self.reads.get().saturating_add(n as u64);
-        self.reads.set(reads);
+        let reads = self
+            .reads
+            .fetch_add(n as u64, Ordering::Relaxed)
+            .saturating_add(n as u64);
         if let Some(max) = self.limits.max_reads
             && reads > max
         {

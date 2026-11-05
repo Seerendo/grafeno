@@ -40,12 +40,14 @@
 
 mod algorithms;
 mod ast;
+mod cache;
 mod cost;
 mod eval;
 mod exec;
 mod lexer;
 mod limits;
 mod morefns;
+mod parallel;
 mod parser;
 mod plan;
 mod procedures;
@@ -55,12 +57,16 @@ mod value;
 
 use std::fmt;
 
+pub use cache::{
+    STATEMENT_CACHE, StatementCacheStats, clear_statement_cache, statement_cache_stats,
+};
 pub use eval::Params;
 pub use exec::{
     MAX_PATH_LENGTH, PlanStep, QueryResult, StatementKind, WriteStats, execute, execute_in,
     execute_read, execute_read_with, execute_with, is_write, statement_kind,
 };
 pub use limits::{Limits, NamespaceFilter};
+pub use parallel::{MIN_CANDIDATES, parallelism, set_parallelism};
 pub use temporal::Duration;
 pub use value::Value;
 

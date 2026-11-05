@@ -39,6 +39,9 @@ build unless the file says otherwise; on E1, runs vary by about ±20%.
 | `extract_runs.csv` | Extraction runs: first, unchanged, 1% changed | `crates/grafeno-memory/examples/extract_bench.rs` | E1-mem | 2026-11-05 | bars, log scale |
 | `extract_quality.csv` | Links against the known mentions of 20 000 memories | `extract_bench.rs` | E1-mem | 2026-11-05 | a table, or stat tiles |
 | `import_interference.csv` | An agent's write latency during a 300 000-node import | `saturation.rs` | E1-disk | 2026-11-05 | bars of p99 per import mode, log scale |
+| `planner_plans.csv` | Queries a planner without statistics got wrong, before and after 12.2, and a repeated query | `crates/grafeno-query/examples/planner_bench.rs` | E1-mem | 2026-11-05 | paired bars, log scale |
+| `parallel_scan.csv` | A scan of 200 000 people on one thread and on 16, before and after 12.2 | `planner_bench.rs` | E1-mem | 2026-11-05 | bars |
+| `read_concurrency.csv` | Read queries per second and latency with 1 to 16 readers, without and with a busy writer, before and after 12.2 (best of three runs) | `planner_bench.rs readers` | E1-mem | 2026-11-05 | queries per second against readers, a line per build and writer |
 
 `python docs/charts/build.py` draws the charts of
 [performance](../performance.md) from these files (light and dark SVG in
