@@ -259,6 +259,7 @@ impl WriteTx {
             (end.as_str(), "")
         );
         clear!(crate::state::STATE, (ns, "", ""), (end.as_str(), "", ""));
+        clear!(crate::changes::CHANGES, (ns, 0u64), (end.as_str(), 0u64));
         let empty: &[u8] = &[];
         clear!(
             INDEX_ENTRIES,

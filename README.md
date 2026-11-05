@@ -145,6 +145,12 @@ measured speed, memory and limits, with charts, in
   distinctive terms, label mix, key facts, time span) as a `Community`
   node; refreshes rewrite only what changed and keep an agent's own text;
   `overview` answers broad questions and drills down.
+- **Phase 11.4, following the writes:** a change log numbered per
+  namespace (layout 12), streamed as server-sent events
+  (`GET /v1/{ns}/changes`), pushed to signed webhooks, polled by the MCP
+  `changes` tool; NDJSON ingestion with idempotency keys; extraction and
+  community summaries can follow the log in the background
+  (`[background]`).
 
 ## Installing
 

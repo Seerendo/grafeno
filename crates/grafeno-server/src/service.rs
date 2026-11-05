@@ -32,6 +32,10 @@ pub struct ServerSettings {
     /// The group-commit writer, and records per bulk-import transaction.
     pub writer: grafeno::WriterOptions,
     pub import_chunk: usize,
+    /// The change log's window.
+    pub changes: grafeno::Retention,
+    /// Work that runs from the change log.
+    pub background: crate::events::BackgroundConfig,
 }
 
 /// Values given on the command line (or in the environment), if any.
@@ -80,6 +84,8 @@ impl ServerSettings {
             memory: config.memory.options(),
             writer: config.writer.options(),
             import_chunk: config.writer.import_chunk(),
+            changes: config.changes.retention(),
+            background: config.background.clone(),
         }
     }
 
@@ -98,7 +104,9 @@ pub fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = Arc::new(settings.open()?);
     db.set_durability(settings.durability);
+    db.set_change_retention(settings.changes);
     let state = AppState::with_writer(db, settings.token.as_deref(), settings.writer)
+        .with_background(settings.background.clone())
         .with_import_chunk(settings.import_chunk)
         .with_limits(settings.limits.clone())
         .with_max_requests(settings.max_requests);

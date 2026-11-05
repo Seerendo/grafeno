@@ -181,7 +181,7 @@ pub fn need(method: &str, path: &str) -> Need {
         ),
         // Export checks each namespace it writes out.
         ["export"] => Need::Caller,
-        ["import"] | ["keys", ..] | ["backup"] => Need::Owner,
+        ["import"] | ["keys", ..] | ["backup"] | ["background"] => Need::Owner,
         [ns, rest @ ..] => {
             let ns = decode(ns);
             let reads = matches!(
@@ -198,6 +198,8 @@ pub fn need(method: &str, path: &str) -> Need {
             );
             let role = if rest == ["rebuild"]
                 || rest == ["compact"]
+                // A webhook makes the server send requests: admins only.
+                || rest.first() == Some(&"webhooks")
                 || (rest.first() == Some(&"match-rules") && method != "GET")
             {
                 Role::Admin

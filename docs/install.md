@@ -219,6 +219,17 @@ import_chunk = 2000         # records per transaction of an import with ?bulk=tr
 cache_mb = 256              # pages of the database file
 projection_cache_mb = 256   # graphs kept for graph algorithms
 vector_cache_mb = 128       # vectors decoded while inserting embeddings
+
+[changes]                   # the change log that streams and webhooks follow
+enabled = true
+max_entries = 1000000       # per namespace; 0 for no limit
+max_age_days = 7            # 0 for no limit
+
+[background]                # work that follows the change log
+extract = ["notes"]         # link what new and changed texts mention
+communities = ["notes"]     # keep community summaries fresh
+communities_every_secs = 300
+communities_min_changes = 50
 ```
 
 Flags and environment variables (`GRAFENO_DB`, `GRAFENO_ADDR`,

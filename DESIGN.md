@@ -89,10 +89,11 @@ short-lived agents.
 | `principals`   | key name                      | secret hash, grants, owner, `own_only` (JSON) |
 | `merges`       | `(ns, merge_id)`              | merge record: who, when, both nodes before, edges moved and dropped |
 | `match_rules`  | `(ns, label)`                 | match rule: strong keys, fields with measures and weights, thresholds (JSON) |
+| `changes`      | `(ns, seq)`                   | the change log: what a commit changed (a node or edge, created, updated or deleted, its labels, which parts) |
 | `constraints`  | `(ns, name)`                  | a constraint on facts (one per source, target or pair) or a functional property (JSON) |
 | `state`        | `(ns, kind, key)`             | bytes kept by features on the engine (extraction's text hashes, review queue and decisions) |
 
-- The layout has a version (`SCHEMA_VERSION`, now 11) in `meta`. Opening an
+- The layout has a version (`SCHEMA_VERSION`, now 12) in `meta`. Opening an
   older file upgrades it in one transaction: version 1 gets its counters
   computed, version 2 gets the new adjacency and posting tables (built from
   the records) and loses the old ones, version 3 gets the names index,
@@ -101,7 +102,8 @@ short-lived agents.
   version 7 the (empty) merge records, and version 8 the (empty) match
   rules and the possibility of fuzzy indexes (whose trigram entries an
   older Grafeno would read as values), version 9 the (empty) state
-  table, and version 10 the (empty) constraints. A newer layout is
+  table, version 10 the (empty) constraints, and version 11 the (empty)
+  change log, which starts with the first commit after. A newer layout is
   refused.
 - Adjacency entries hold the edge's record time and valid time
   (`recorded_at`, `expired_at`, `valid_from`, `valid_to`), so traversals
@@ -1295,7 +1297,7 @@ ordinary nodes):
   0.999); a team's topic word finds its summary first for 200 of 200
   teams, in 0.06 ms.
 
-**11.4 Continuous ingestion and events.**
+**11.4 Continuous ingestion and events** (done).
 
 - A change log: every commit appends its changes with a sequence number
   (layout change), kept for a configurable window.
@@ -1305,6 +1307,58 @@ ordinary nodes):
   so a retried event is not written twice.
 - Extraction (11.1), invalidation (11.2) and summaries (11.3) run from the
   log, in the background, at their own pace.
+
+As built (`crates/grafeno/src/changes.rs`, table `changes`, layout version
+12; `crates/grafeno-server/src/events.rs`):
+
+- Every write (`put_node`, `put_edge`, deletes, texts, embeddings) adds
+  to the transaction's pending changes, folded per record: created then
+  changed stays `created`, anything then deleted is `deleted`, the parts
+  (`record`, `text`, `embedding`) add up. At commit they get sequence
+  numbers per namespace (after the last one in the table), the commit's
+  time and the actor, and are written in the same transaction, so the log
+  and the graph never disagree; an aborted or failed write (a job dropped
+  from a group commit) leaves nothing. Entries name the record, not its
+  content: a follower reads it.
+- The window (`Retention`: on, a million entries and seven days per
+  namespace by default; `[changes]` in `grafeno.toml`) is kept at commit,
+  at most 10 000 entries pruned per commit. `changes(ns, since, limit)`
+  returns a page with `last`, `oldest` and `gap` (changes after `since`
+  were pruned: start over from the graph). `on_commit` listeners hear each
+  commit that appended, with the namespaces and their last numbers.
+- `GET /v1/{ns}/changes?since=` is a page, or with `Accept:
+  text/event-stream` (or `?stream=true`) a stream of server-sent events:
+  `id` is the sequence number (a client resumes with `Last-Event-ID`),
+  `event: change`, and one `gap` event when it started behind the window.
+  It wakes on each commit (a watch channel fed by `on_commit`). MCP agents
+  poll with the `changes` tool.
+- Webhooks (`POST /v1/{ns}/webhooks {url, secret, labels, since}`, admin
+  role, since a webhook makes the server send requests): a task delivers
+  each one's changes in order, 200 at a time, after each commit and every
+  2 s, as `{namespace, webhook, changes, last, gap}`, signed with
+  HMAC-SHA256 (`X-Grafeno-Signature: sha256=…`) when it has a secret; only
+  labels it asks for (the others move its cursor). Its cursor moves only
+  on a 2xx; failures wait 2, 4, … up to 600 s and are recorded
+  (`failures`, `last_error`).
+- `POST /v1/{ns}/ingest` reads NDJSON as it arrives, a node or an edge per
+  line, and writes 500 lines per transaction in the writer's bulk lane. A
+  line's `key` is kept (state kind `ingest.key`): sent again it is a
+  duplicate and writes nothing, and an edge's ends may be `$key` of nodes
+  ingested before. Each line fails alone, with its number in `errors`.
+- `[background]` names namespaces where extraction and community
+  summaries follow the log: a task per namespace and job reads the changes
+  after its cursor (state kind `runner`), runs extraction when a source
+  text changed and summaries when enough of the graph changed (not their
+  own `Community`, `member_of`, `part_of` writes) and the last refresh is
+  old enough, then moves its cursor; `GET /v1/background` says what each
+  did. Invalidation (11.2) stays in the write: a constraint that held only
+  later would let a reader see two current employers.
+- Measured: the log costs about 20% of write throughput (35 000 to 29 500
+  records a second, `examples/changes_bench.rs`); it reads back at 1.4
+  million entries a second; a commit reaches a server-sent events stream
+  in 0.15 ms (p99 0.36 ms); 100 000 NDJSON lines ingest at 25 000 a
+  second, and sent again at 360 000 a second, all duplicates
+  (`grafeno-server/examples/events_bench.rs`).
 
 #### Phase 12: compatibility and speed
 
@@ -1412,6 +1466,8 @@ spinning disk, on ARM, or for days at a time.
 | Fuzzy search for a damaged name among 100 000 people | 20 ms p50 (469 ms comparing with every node) | E1-mem | `resolve_speed.csv` |
 | Entity resolution by a match rule (2 000 damaged duplicates, 2 000 namesakes) | 95% found as same or review, precision of `same` 0.994 | E1-mem | `resolve_quality.csv` |
 | One current fact per source (50 000 job changes) | 14 000 facts/s (44 000 without); every person one current employer | E1-mem | `constraint_cost.csv` |
+| Change log on 200 000 records | 29 500 records/s (35 000 without); reads 1.4 M entries/s | E1-mem | `change_log_cost.csv` |
+| NDJSON ingestion of 100 000 lines | 25 000 lines/s; a retry 360 000 lines/s, nothing written; commit to event 0.15 ms | E1-mem | `ingest_runs.csv` |
 | Community summaries of 50 000 nodes in 4 levels | 3.2 s first, 1.35 s unchanged; teams and departments found (purity 0.999); global search 0.06 ms | E1-mem | `community_*.csv` |
 | Extraction of 20 000 memories naming 5 000 entities | 3 200 texts/s; 99.4% of mentions linked right, none wrong; 0.06 s when nothing changed | E1-mem | `extract_*.csv` |
 
@@ -1433,6 +1489,7 @@ real binary. The ones that carry each guarantee:
 | Vector search keeps its quality | `grafeno/tests/vector_churn.rs` | deletes, reinserts, three rounds of churn and a compaction keep recall@10 at 0.95 or more, and reinserted vectors are found |
 | Records are matched by rule, with reasons | `grafeno/tests/resolve.rs`, `property_index.rs` (fuzzy), `src/textsim.rs` tests | measures against published values; strong keys decide either way; typos, swapped dates and namesakes; neighbors as evidence (and no links as no evidence); scans without indexes; pairs for deduplication; fuzzy indexes through updates, check and export |
 | Contradicting facts are ended, not lost | `grafeno/tests/constraints.rs` | invalidation as a new version (`KNOWN AT` sees what was believed), late facts shortened, facts without dates starting now, the same fact again, flag, reject, target and pair scopes, `own_only` agents flagged, existing contradictions, property history |
+| Every write is in the change log | `grafeno/tests/changes.rs`, `grafeno-server/tests/events.rs`, `upgrade.rs` | entries folded per record and numbered per namespace, nothing from aborted or failed writes in a group commit, the window and the gap, listeners; pages and server-sent events resuming after `Last-Event-ID`; NDJSON with keys, references and failing lines, retries as duplicates; signed webhooks, label filters, failures kept in place; extraction and summaries from the log; layout 11 upgrades with an empty log |
 | Communities summarize themselves | `grafeno-memory/tests/communities.rs`, `grafeno-server/tests/http.rs` and `mcp.rs` community tests | a summary per community naming its center and topic, refreshes that change nothing, members joining in place, an agent's text kept and marked stale, levels as communities of communities, global search, drill-down, recall without summaries, context with an overview |
 | Texts link to what they mention | `grafeno-memory/tests/extraction.rs`, `src/extract.rs` tests | patterns and their normalized values and offsets, phrases and sentence openers, the gazetteer on normalized text; known names, emails by index, value nodes, new names after two texts, namesakes settled by context or queued, decisions that last, dismissals, incremental runs, an agent's mentions through match rules |
 | Merges are right and reversible | `grafeno/tests/merges.rs`, `grafeno-memory/tests/maintenance.rs` | strong keys, labels, conflicting facts and functional edges; namesakes, typos, nicknames, translations; a merge undone exactly (indexes, counters and the check agree) |
@@ -1457,6 +1514,8 @@ cargo run --release -p grafeno --example resolve_bench -- 100000
 cargo run --release -p grafeno-memory --example extract_bench -- 5000 20000
 cargo run --release -p grafeno --example constraint_bench -- 10000 50000
 cargo run --release -p grafeno-memory --example community_bench -- 1000 50
+cargo run --release -p grafeno --example changes_bench -- 100000
+cargo run --release -p grafeno-server --example events_bench -- 100000
 cargo test --release -p grafeno-query --test adversarial -- --nocapture
 ```
 

@@ -102,11 +102,16 @@ fn verify(db: &Grafeno, version: u64) {
         assert_eq!(principals[0].name, "reader");
     }
     assert!(read.merges(NS, None).unwrap().is_empty());
+    if version >= 11 {
+        assert_eq!(read.constraints(NS).unwrap().len(), 1, "v{version}");
+    }
+    // The change log starts empty and fills from the first commit after.
+    assert_eq!(read.changes(NS, 0, 10).unwrap().last, 0, "v{version}");
 }
 
 #[test]
 fn every_past_layout_upgrades() {
-    for version in 1..=10 {
+    for version in 1..=11 {
         let path = fixture(version);
         {
             let db = Grafeno::open(&path).unwrap_or_else(|e| panic!("v{version}: {e}"));
@@ -119,6 +124,7 @@ fn every_past_layout_upgrades() {
         let db = Grafeno::open(&path).unwrap();
         let read = db.begin_read().unwrap();
         assert_eq!(read.stats(NS).unwrap().nodes, 42, "v{version}");
+        assert_eq!(read.changes(NS, 0, 10).unwrap().last, 1, "v{version}");
         assert!(read.check(NS).unwrap().is_ok());
         assert_eq!(read.search_text(NS, "upgrade", 5).unwrap().len(), 1);
         drop((read, db));

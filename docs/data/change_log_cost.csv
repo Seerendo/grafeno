@@ -1,0 +1,4 @@
+writes,records,seconds,records_per_s
+change log off,199999,5.67,35266
+change log on,199999,6.78,29510
+"on, window of 10 000 entries",199999,6.8,29415

@@ -247,6 +247,13 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `GET`    | `/v1/{ns}/constraints`                |                                                         | constraints on facts and functional properties (`CREATE CONSTRAINT` in GQ) |
 | `GET`    | `/v1/{ns}/contradictions`             | `?limit=`                                               | `[{constraint, action, new_edge, old_edge, replacement, at, by}]`, newest first |
 | `GET`    | `/v1/{ns}/nodes/{id}/history/{key}`   |                                                         | `[{value, from, to, by}]`: earlier values of a functional property |
+| `GET`    | `/v1/{ns}/changes`                    | `?since=&limit=`; `Accept: text/event-stream` or `?stream=true` for a stream | `{changes, last, oldest, gap}`, or server-sent events (`id` = sequence number; resume with `Last-Event-ID`) |
+| `POST`   | `/v1/{ns}/ingest`                     | NDJSON: `{"key", "node": {…}}` or `{"key", "edge": {from, label, to, …}}` per line; ends may be `$key` | `{lines, nodes, edges, duplicates, failed, errors}`; a key sent again writes nothing |
+| `GET`    | `/v1/{ns}/webhooks`                   |                                                         | the namespace's webhooks (admin) |
+| `POST`   | `/v1/{ns}/webhooks`                   | `{url, secret, labels, since}`                          | a URL that receives the changes in order, signed with `X-Grafeno-Signature: sha256=<HMAC>` |
+| `GET`    | `/v1/{ns}/webhooks/{id}`              |                                                         | its cursor, deliveries, failures and last error |
+| `DELETE` | `/v1/{ns}/webhooks/{id}`              |                                                         | stops it |
+| `GET`    | `/v1/background`                      |                                                         | what the `[background]` tasks did (owner) |
 | `POST`   | `/v1/{ns}/communities/refresh`        | `{min_size, resolution, max_levels, labels, edge_labels, weight, central, terms, facts}`, all optional | `{nodes, levels, communities, created, updated, unchanged, removed, stale, modularity}` |
 | `GET`    | `/v1/{ns}/communities`                | `?q=&level=&limit=`                                     | community summaries matching `q`, or the top ones without it |
 | `GET`    | `/v1/{ns}/communities/{id}`           | `?limit=`                                               | `{community, children, members}`: drill down |
@@ -342,6 +349,7 @@ Syncing a note and replacing its links in one request:
 | `overview` | For broad questions: community summaries that match a topic, or the top ones; with `id`, a community's parts and members. |
 | `summarize_communities` | Finds the communities (and communities of communities) and writes or refreshes their summaries. |
 | `set_summary` | Replaces a community summary's text with the agent's own (or undoes it). |
+| `changes`  | What was written since a sequence number: created, updated and deleted nodes and facts. |
 
 Every tool takes an optional `namespace`, which defaults to `--namespace`.
 

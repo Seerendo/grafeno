@@ -491,6 +491,8 @@ pub(crate) struct Shared {
     projections: Mutex<Vec<Cached>>,
     /// The bytes the cached projections may take.
     projection_budget: std::sync::atomic::AtomicUsize,
+    /// The change log's window and commit listeners.
+    pub(crate) changes: crate::changes::Hub,
 }
 
 impl Default for Shared {
@@ -499,6 +501,7 @@ impl Default for Shared {
             generation: AtomicU64::new(0),
             projections: Mutex::default(),
             projection_budget: std::sync::atomic::AtomicUsize::new(DEFAULT_PROJECTION_CACHE),
+            changes: crate::changes::Hub::default(),
         }
     }
 }

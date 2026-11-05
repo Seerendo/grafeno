@@ -79,6 +79,7 @@ fn handshake_and_tool_list() {
             "merge",
             "undo_merge",
             "overview",
+            "changes",
             "summarize_communities",
             "set_summary",
             "extract",
@@ -560,6 +561,11 @@ fn community_tools() {
         json!({ "id": id, "text": "The garden team." }),
     );
     assert_eq!(structured(&set)["custom"], true);
+    let changes = call(&server, "changes", json!({ "since": 0 }));
+    assert!(
+        structured(&changes)["last"].as_u64().unwrap() > 0,
+        "{changes}"
+    );
     // Context puts matching summaries first.
     let context = call(&server, "context", json!({ "query": "garden team" }));
     let text = context["content"][0]["text"].as_str().unwrap();

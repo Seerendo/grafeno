@@ -28,7 +28,7 @@ grafeno-memory = { path = "../grafeno-memory" }
 grafeno-query.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 uuid.workspace = true
 rustyline = "15"
 ureq = { version = "3", features = ["json"] }
@@ -37,6 +37,7 @@ tower-http = { version = "0.6", features = ["cors", "catch-panic"] }
 toml = "0.9"
 getrandom = "0.3"
 sha2 = "0.10"
+futures-util = { version = "0.3", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"

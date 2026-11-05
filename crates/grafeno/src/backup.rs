@@ -10,6 +10,7 @@ use redb::{
 use serde::Serialize;
 
 use crate::access::PRINCIPALS;
+use crate::changes::CHANGES;
 use crate::constraints::CONSTRAINTS;
 use crate::db::ReadTx;
 use crate::index::{INDEX_ENTRIES, INDEXES};
@@ -91,6 +92,7 @@ impl ReadTx {
                 MATCH_RULES.name(),
                 STATE.name(),
                 CONSTRAINTS.name(),
+                CHANGES.name(),
             ];
             for table in from.list_tables().map_err(storage)? {
                 if !known.contains(&table.name()) {
@@ -127,6 +129,7 @@ impl ReadTx {
             entries += copy(from, &tx, MATCH_RULES)?;
             entries += copy(from, &tx, STATE)?;
             entries += copy(from, &tx, CONSTRAINTS)?;
+            entries += copy(from, &tx, CHANGES)?;
             tx.commit().map_err(storage)?;
             drop(db);
             Ok(entries)

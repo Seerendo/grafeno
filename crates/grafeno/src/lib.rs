@@ -24,6 +24,7 @@
 mod access;
 pub mod algo;
 mod backup;
+mod changes;
 mod check;
 mod constraints;
 mod db;
@@ -44,6 +45,7 @@ mod writer;
 
 pub use access::{Grant, Principal, Role, check_principal_name};
 pub use backup::BackupStats;
+pub use changes::{Change, ChangeOp, ChangePage, Part, Retention};
 pub use check::{CheckReport, CompactReport, RebuildReport};
 pub use constraints::{Action, Constraint, ConstraintEvent, HistoryEntry, OnConflict, Scope};
 pub use db::{

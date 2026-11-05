@@ -1,0 +1,3 @@
+run,lines,seconds,lines_per_s,written
+first time,100000,4.02,24902,100000
+sent again (a retry),100000,0.28,359978,0

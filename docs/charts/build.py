@@ -529,6 +529,16 @@ def main():
           [(f"{r['run']} ({int(r['created']) + int(r['updated'])} written)", [num(r['seconds'])], 0 if r['run'] == 'first refresh' else 2) for r in rows],
           ' s', note='Louvain and the summaries are recomputed each time; only changed summaries are written. Data: docs/data/community_refresh.csv')
 
+    # The change log and ingestion.
+    rows = read('change_log_cost.csv')
+    hbars('change-log-cost', 'Writing with the change log on and off', 'Records per second; 100 000 nodes with text and 99 999 edges, transactions of 1 000 nodes. E1-mem.',
+          [(r['writes'], [num(r['records_per_s'])], 0 if r['writes'] == 'change log on' else False) for r in rows],
+          '', note='One entry per record changed; the log can be turned off. Data: docs/data/change_log_cost.csv')
+    rows = read('ingest_runs.csv')
+    hbars('ingest-runs', 'Ingesting 100 000 NDJSON lines over HTTP', 'Lines per second, log scale; 50 000 nodes, then 50 000 edges between them by key. E1-mem, in process.',
+          [(r['run'], [num(r['lines_per_s'])], 0 if r['run'] == 'first time' else 2) for r in rows],
+          '', log=True, note='Sent again, every line is a duplicate of its idempotency key and nothing is written. Data: docs/data/ingest_runs.csv')
+
     print('charts written to', OUT)
 
 

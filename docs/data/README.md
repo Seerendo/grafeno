@@ -31,6 +31,8 @@ build unless the file says otherwise; on E1, runs vary by about ±20%.
 | `resolve_speed.csv` | Fuzzy index against a scan, and `find_matches`, 100 000 people | `crates/grafeno/examples/resolve_bench.rs` | E1-mem | 2026-11-05 | bars, log scale |
 | `resolve_quality.csv` | A match rule's decisions on 2 000 damaged duplicates and 2 000 namesakes | `resolve_bench.rs` | E1-mem | 2026-11-05 | grouped bars of shares per kind |
 | `constraint_cost.csv` | 50 000 job changes with and without an edge constraint | `crates/grafeno/examples/constraint_bench.rs` | E1-mem | 2026-11-05 | bars |
+| `change_log_cost.csv` | Writes with the change log off, on, and with a small window | `crates/grafeno/examples/changes_bench.rs` | E1-mem | 2026-11-05 | bars |
+| `ingest_runs.csv` | NDJSON ingestion over HTTP: first time, and the same lines again | `crates/grafeno-server/examples/events_bench.rs` | E1-mem | 2026-11-05 | bars, log scale |
 | `community_refresh.csv` | Refreshes of community summaries: first, unchanged, 1% new nodes | `crates/grafeno-memory/examples/community_bench.rs` | E1-mem | 2026-11-05 | bars |
 | `community_levels.csv` | Summaries per level and their purity against planted teams and departments | `community_bench.rs` | E1-mem | 2026-11-05 | table |
 | `extract_runs.csv` | Extraction runs: first, unchanged, 1% changed | `crates/grafeno-memory/examples/extract_bench.rs` | E1-mem | 2026-11-05 | bars, log scale |

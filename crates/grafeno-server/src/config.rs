@@ -27,6 +27,17 @@
 //! cache_mb = 256         # pages of the file
 //! projection_cache_mb = 256  # graphs kept for algorithms
 //! vector_cache_mb = 128  # vectors decoded while inserting
+//!
+//! [changes]              # the change log, per namespace
+//! enabled = true
+//! max_entries = 1000000  # 0 for no limit
+//! max_age_days = 7       # 0 for no limit
+//!
+//! [background]           # work that runs from the change log
+//! extract = ["notes"]    # extract mentions as texts change (11.1)
+//! communities = ["notes"]  # keep community summaries fresh (11.3)
+//! communities_every_secs = 300
+//! communities_min_changes = 50
 //! ```
 
 use std::net::SocketAddr;
@@ -60,6 +71,43 @@ pub struct Config {
     pub memory: MemoryConfig,
     #[serde(default, skip_serializing_if = "WriterConfig::is_empty")]
     pub writer: WriterConfig,
+    #[serde(default, skip_serializing_if = "ChangesConfig::is_empty")]
+    pub changes: ChangesConfig,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::events::BackgroundConfig::is_empty"
+    )]
+    pub background: crate::events::BackgroundConfig,
+}
+
+/// How much of the change log is kept; missing values take
+/// [`grafeno::Retention`]'s defaults.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChangesConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_entries: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age_days: Option<u64>,
+}
+
+impl ChangesConfig {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn retention(&self) -> grafeno::Retention {
+        let base = grafeno::Retention::default();
+        grafeno::Retention {
+            enabled: self.enabled.unwrap_or(base.enabled),
+            max_entries: self.max_entries.unwrap_or(base.max_entries),
+            max_age_secs: self
+                .max_age_days
+                .map_or(base.max_age_secs, |days| days.saturating_mul(86_400)),
+        }
+    }
 }
 
 /// The group-commit writer; missing values take
@@ -280,6 +328,8 @@ pub fn init(path: &Path, db: &Path, addr: SocketAddr, force: bool) -> Result<Con
         query: QueryConfig::default(),
         memory: MemoryConfig::default(),
         writer: WriterConfig::default(),
+        changes: ChangesConfig::default(),
+        background: crate::events::BackgroundConfig::default(),
     };
     let text = format!(
         "# Grafeno server settings. Restart the service after changing them.\n\

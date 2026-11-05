@@ -486,6 +486,29 @@ finds its summary first (level 0) for 200 of 200 teams, 0.06 ms a query.
 Every refresh recomputes Louvain and the summaries; what it saves is
 writes. With 100 teams (4 000 nodes) the first refresh takes 0.25 s.
 
+## Change log and streaming ingestion (`changes_bench.rs`, `grafeno-server/examples/events_bench.rs`)
+
+In memory, release build, 2026-11-05.
+
+| Writes of 100 000 nodes with text and 99 999 edges | Seconds | Records per second |
+| --- | --- | --- |
+| change log off | 5.67 | 35 266 |
+| change log on | 6.78 | 29 510 |
+| on, with a window of 10 000 entries (pruned at each commit) | 6.80 | 29 415 |
+
+The log adds one entry per record changed (about 20% of write
+throughput) and reads back at 1.45 million entries a second.
+
+| NDJSON over HTTP (in process), 100 000 lines | Seconds | Lines per second |
+| --- | --- | --- |
+| 50 000 nodes, then 50 000 edges by key | 4.02 | 24 902 |
+| the same request again: all duplicates | 0.28 | 359 978 |
+
+A commit reaches a server-sent events stream in 0.15 ms at the median and
+0.36 ms at p99 (300 commits). Before reading lines in place, ingestion
+went at 3 000 lines a second: each line was cut from the front of the
+buffer (quadratic).
+
 ## Remaining limits
 
 - **Vector search reads each visited vector from redb** (about 0.4 µs per

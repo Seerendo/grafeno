@@ -22,6 +22,7 @@ test environments").
 | Finding a person by a misspelled name among 100 000 | 20 ms with a fuzzy index |
 | Telling duplicates from namesakes (match rule) | 95% of duplicates found, 99.4% of "same" right |
 | One current fact per person (constraint) | 14 000 facts/s, every person one current employer |
+| Following writes: change log, streams, ingestion | 20% write cost; a commit reaches a stream in 0.15 ms; 25 000 NDJSON lines/s |
 | Community summaries of 50 000 nodes | 3.2 s, teams and departments found; a topic finds its summary in 0.06 ms |
 | Linking what memories mention to known entities | 3 200 texts/s, 99.4% linked right, none wrong |
 
@@ -178,6 +179,26 @@ stays visible with `KNOWN AT`. With 50 000 job changes for 10 000 people,
 every person ended with exactly one current employer and every earlier
 job in history, at a third of the write speed (each new fact looks at
 the person's other ones).
+
+## Following the writes
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/charts/change-log-cost-dark.svg">
+  <img alt="200 000 records written: 35 000 per second without the change log, 29 500 with it" src="assets/charts/change-log-cost-light.svg">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/charts/ingest-runs-dark.svg">
+  <img alt="100 000 NDJSON lines: 25 000 per second the first time, 360 000 per second sent again as duplicates" src="assets/charts/ingest-runs-light.svg">
+</picture>
+
+Every commit appends what it changed to a change log, numbered per
+namespace, at about a fifth of the write speed. Agents and services
+follow it with `GET /v1/{ns}/changes` as server-sent events (a commit
+arrives in 0.15 ms), with webhooks, or with the MCP `changes` tool.
+Events posted as NDJSON with idempotency keys can be retried safely: a
+retry of 100 000 lines writes nothing and takes a quarter of a second.
+Extraction and community summaries can follow the log in the background.
 
 ## Communities that summarize themselves
 

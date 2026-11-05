@@ -11,6 +11,7 @@ use redb::{
 
 use crate::access::PRINCIPALS;
 use crate::algo::Shared;
+use crate::changes::{CHANGES, ChangeOp, Part};
 use crate::constraints::CONSTRAINTS;
 use crate::index::{INDEX_ENTRIES, INDEXES, IndexKey};
 use crate::memory::names_of;
@@ -49,7 +50,9 @@ use crate::{Hit, text, vector};
 ///    older Grafeno would read as values, and adds `match_rules`.
 /// 10. Adds `state` (what extraction read, its review queue), empty.
 /// 11. Adds `constraints` (on facts and properties), empty.
-pub const SCHEMA_VERSION: u64 = 11;
+/// 12. Adds `changes` (the change log), empty: it starts with the first
+///     commit after the upgrade.
+pub const SCHEMA_VERSION: u64 = 12;
 
 /// The tables replaced in version 3, by name (their types no longer matter).
 const OLD_ADJ_OUT: TableDefinition<AdjKey, u128> = TableDefinition::new("adj_out");
@@ -131,7 +134,7 @@ pub struct Grafeno {
     /// Commits with eventual durability since the last flush.
     unflushed: AtomicBool,
     /// The commit counter and the projections cached for algorithms.
-    shared: Arc<Shared>,
+    pub(crate) shared: Arc<Shared>,
     vector_cache: usize,
 }
 
@@ -222,6 +225,7 @@ impl Grafeno {
         tx.open_table(MATCH_RULES).map_err(storage)?;
         tx.open_table(STATE).map_err(storage)?;
         tx.open_table(CONSTRAINTS).map_err(storage)?;
+        tx.open_table(CHANGES).map_err(storage)?;
 
         let stored = tx
             .open_table(META)
@@ -331,6 +335,7 @@ impl Grafeno {
             match_rules: tx.open_table(MATCH_RULES).map_err(storage)?,
             state: tx.open_table(STATE).map_err(storage)?,
             constraints: tx.open_table(CONSTRAINTS).map_err(storage)?,
+            changes: tx.open_table(CHANGES).map_err(storage)?,
             tx,
         })
     }
@@ -354,6 +359,8 @@ impl Grafeno {
             actor: None,
             constraint_cache: None,
             constraint_log: Vec::new(),
+            log_changes: self.shared.changes.retention().enabled,
+            pending_changes: crate::changes::Pending::default(),
         })
     }
 
@@ -565,6 +572,7 @@ pub struct ReadTx {
     pub(crate) match_rules: ReadOnlyTable<(&'static str, &'static str), &'static [u8]>,
     pub(crate) state: ReadOnlyTable<crate::state::StateKey, &'static [u8]>,
     pub(crate) constraints: ReadOnlyTable<(&'static str, &'static str), &'static [u8]>,
+    pub(crate) changes: ReadOnlyTable<(&'static str, u64), &'static [u8]>,
     pub(crate) shared: Arc<Shared>,
     /// The commit this snapshot sees, when known (for the projection cache).
     pub(crate) generation: Option<u64>,
@@ -741,6 +749,10 @@ pub struct WriteTx {
     pub(crate) constraint_cache: Option<(String, Vec<crate::constraints::Constraint>)>,
     /// What constraints did in this transaction.
     pub(crate) constraint_log: Vec<crate::constraints::ConstraintEvent>,
+    /// Whether commits append to the change log.
+    pub(crate) log_changes: bool,
+    /// What this transaction changed, for the log.
+    pub(crate) pending_changes: crate::changes::Pending,
 }
 
 impl WriteTx {
@@ -796,9 +808,14 @@ impl WriteTx {
         Ok(edge)
     }
 
-    pub fn commit(self) -> Result<()> {
+    pub fn commit(mut self) -> Result<()> {
+        let touched = self.write_changes()?;
         let Self { tx, shared, .. } = self;
-        shared.committing(|| tx.commit().map_err(storage))
+        shared.committing(|| tx.commit().map_err(storage))?;
+        if !touched.is_empty() {
+            shared.changes.notify(&touched);
+        }
+        Ok(())
     }
 
     pub fn abort(self) -> Result<()> {
@@ -910,17 +927,25 @@ impl WriteTx {
         text: Option<&str>,
         embedding: Option<&[f32]>,
     ) -> Result<()> {
-        match text {
-            Some(text) => text::index(&self.tx, ns, id, text)?,
-            None => {
-                text::remove(&self.tx, ns, id)?;
+        let changed_text = match text {
+            Some(text) => {
+                text::index(&self.tx, ns, id, text)?;
+                true
             }
+            None => text::remove(&self.tx, ns, id)?,
+        };
+        let changed_embedding = match embedding {
+            Some(embedding) => {
+                vector::insert(&self.tx, &mut self.vectors, ns, id, embedding)?;
+                true
+            }
+            None => vector::remove(&self.tx, &mut self.vectors, ns, id)?,
+        };
+        if changed_text {
+            self.log_node_part(ns, id, Part::Text)?;
         }
-        match embedding {
-            Some(embedding) => vector::insert(&self.tx, &mut self.vectors, ns, id, embedding)?,
-            None => {
-                vector::remove(&self.tx, &mut self.vectors, ns, id)?;
-            }
+        if changed_embedding {
+            self.log_node_part(ns, id, Part::Embedding)?;
         }
         Ok(())
     }
@@ -969,7 +994,8 @@ impl WriteTx {
     /// Indexes `text` for full-text search, replacing the previous text.
     pub fn set_text(&mut self, ns: &str, id: NodeId, text: &str) -> Result<()> {
         self.node_to_change(ns, id)?;
-        text::index(&self.tx, ns, id, text)
+        text::index(&self.tx, ns, id, text)?;
+        self.log_node_part(ns, id, Part::Text)
     }
 
     /// Indexes the texts of many nodes at once, replacing any they had: for
@@ -978,7 +1004,11 @@ impl WriteTx {
         for (node, _) in texts {
             self.node_to_change(ns, *node)?;
         }
-        text::index_many(&self.tx, ns, texts)
+        text::index_many(&self.tx, ns, texts)?;
+        for (node, _) in texts {
+            self.log_node_part(ns, *node, Part::Text)?;
+        }
+        Ok(())
     }
 
     /// Removes the node's text from the index. Returns whether it had any.
@@ -986,14 +1016,19 @@ impl WriteTx {
         if let Some(node) = self.node(ns, id)? {
             self.guard_node(&node)?;
         }
-        text::remove(&self.tx, ns, id)
+        let removed = text::remove(&self.tx, ns, id)?;
+        if removed {
+            self.log_node_part(ns, id, Part::Text)?;
+        }
+        Ok(removed)
     }
 
     /// Indexes `embedding` for vector search, replacing the previous one. All
     /// embeddings of a namespace must have the same dimension.
     pub fn set_embedding(&mut self, ns: &str, id: NodeId, embedding: &[f32]) -> Result<()> {
         self.node_to_change(ns, id)?;
-        vector::insert(&self.tx, &mut self.vectors, ns, id, embedding)
+        vector::insert(&self.tx, &mut self.vectors, ns, id, embedding)?;
+        self.log_node_part(ns, id, Part::Embedding)
     }
 
     /// Removes the node's embedding from the index. Returns whether it had one.
@@ -1001,7 +1036,11 @@ impl WriteTx {
         if let Some(node) = self.node(ns, id)? {
             self.guard_node(&node)?;
         }
-        vector::remove(&self.tx, &mut self.vectors, ns, id)
+        let removed = vector::remove(&self.tx, &mut self.vectors, ns, id)?;
+        if removed {
+            self.log_node_part(ns, id, Part::Embedding)?;
+        }
+        Ok(removed)
     }
 
     /// Deletes the node, its edges and its indexed text and embedding, without
@@ -1051,6 +1090,7 @@ impl WriteTx {
         let mut nodes = self.tx.open_table(NODES).map_err(storage)?;
         nodes.remove((ns, id.as_u128())).map_err(storage)?;
         drop(nodes);
+        self.log_node(ns, &node, ChangeOp::Deleted, None);
         bump_namespace(&self.tx, ns, -1, 0)
     }
 
@@ -1161,6 +1201,7 @@ impl WriteTx {
             .map_err(storage)?
             .remove((ns, edge_id))
             .map_err(storage)?;
+        self.log_edge(ns, &edge, ChangeOp::Deleted);
         bump_namespace(&self.tx, ns, 0, -1)?;
         bump_edge_label(&self.tx, ns, label, -1)
     }
@@ -1183,6 +1224,12 @@ impl WriteTx {
 
         self.index_node(ns, Some(node), previous)?;
         self.record_history(ns, node, previous)?;
+        let op = if previous.is_some() {
+            ChangeOp::Updated
+        } else {
+            ChangeOp::Created
+        };
+        self.log_node(ns, node, op, Some(Part::Record));
 
         let old_names = previous.map(names_of).unwrap_or_default();
         let new_names = names_of(node);
@@ -1226,11 +1273,22 @@ impl WriteTx {
         let bytes = encode(edge)?;
         let (from, to, id) = (edge.from.as_u128(), edge.to.as_u128(), edge.id.as_u128());
         let label = edge.label.as_str();
-        self.tx
+        let existed = self
+            .tx
             .open_table(EDGES)
             .map_err(storage)?
             .insert((ns, id), bytes.as_slice())
-            .map_err(storage)?;
+            .map_err(storage)?
+            .is_some();
+        self.log_edge(
+            ns,
+            edge,
+            if existed {
+                ChangeOp::Updated
+            } else {
+                ChangeOp::Created
+            },
+        );
         self.tx
             .open_table(ADJ_OUT)
             .map_err(storage)?

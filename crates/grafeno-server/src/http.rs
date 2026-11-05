@@ -47,6 +47,11 @@ pub struct AppState {
     pub metrics: Arc<crate::metrics::ServerMetrics>,
     /// Records per transaction of a bulk import.
     pub import_chunk: usize,
+    /// Commit notifications, for change streams and background work.
+    pub events: Arc<crate::events::Events>,
+    /// Work that runs from the change log.
+    pub background: crate::events::BackgroundConfig,
+    pub runners: Arc<std::sync::Mutex<Vec<crate::events::RunnerStatus>>>,
 }
 
 /// Requests served at once under `/v1` by default.
@@ -71,6 +76,7 @@ impl AppState {
         options: grafeno::WriterOptions,
     ) -> Self {
         Self {
+            events: crate::events::Events::attach(&db),
             writer: Arc::new(grafeno::Writer::new(db.clone(), options)),
             keys: Arc::new(Keyring::load(&db).unwrap_or_default()),
             db,
@@ -79,7 +85,14 @@ impl AppState {
             in_flight: Arc::new(tokio::sync::Semaphore::new(MAX_REQUESTS)),
             metrics: Arc::default(),
             import_chunk: IMPORT_CHUNK,
+            background: crate::events::BackgroundConfig::default(),
+            runners: Arc::default(),
         }
+    }
+
+    pub fn with_background(mut self, background: crate::events::BackgroundConfig) -> Self {
+        self.background = background;
+        self
     }
 
     pub fn with_import_chunk(mut self, chunk: usize) -> Self {
@@ -135,6 +148,7 @@ pub async fn serve_until(
     if options.studio && crate::studio::INCLUDED {
         eprintln!("Grafeno Studio at http://{local}/studio/");
     }
+    crate::events::start(&state);
     axum::serve(listener, router_with(state, &options))
         .with_graceful_shutdown(shutdown)
         .await
@@ -214,6 +228,14 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/{ns}/constraints", get(constraints))
         .route("/{ns}/contradictions", get(contradictions))
         .route("/{ns}/nodes/{id}/history/{key}", get(property_history))
+        .route("/{ns}/changes", get(changes))
+        .route("/{ns}/ingest", post(ingest))
+        .route("/{ns}/webhooks", get(list_webhooks).post(create_webhook))
+        .route(
+            "/{ns}/webhooks/{id}",
+            get(get_webhook).delete(delete_webhook),
+        )
+        .route("/background", get(background))
         .route("/{ns}/communities", get(communities))
         .route("/{ns}/communities/refresh", post(refresh_communities))
         .route("/{ns}/communities/{id}", get(community))
@@ -2050,6 +2072,239 @@ async fn property_history(
     })
     .await?;
     Ok(Json(entries))
+}
+
+#[derive(Deserialize)]
+struct ChangesParams {
+    since: Option<u64>,
+    limit: Option<usize>,
+    /// Keep the response open and send changes as they are committed
+    /// (server-sent events); also with `Accept: text/event-stream`.
+    stream: Option<bool>,
+}
+
+/// The namespace's change log after `since`: a page of JSON, or a stream
+/// of server-sent events (`id` is the sequence number, so a reconnecting
+/// client resumes with `Last-Event-ID`; a `gap` event says changes were
+/// pruned before it read them).
+async fn changes(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Params(params): Params<ChangesParams>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult<Response> {
+    let wants_stream = params.stream.unwrap_or(false)
+        || headers
+            .get(header::ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("text/event-stream"));
+    let resume = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    let since = resume.or(params.since).unwrap_or(0);
+    if !wants_stream {
+        let limit = params.limit.unwrap_or(500).min(MAX_PAGE);
+        let page = blocking(&state, move |db| {
+            db.begin_read()?.changes(&ns, since, limit)
+        })
+        .await?;
+        return Ok(Json(page).into_response());
+    }
+    let feed = crate::events::Feed {
+        db: state.db.clone(),
+        ns,
+        cursor: since,
+        commits: state.events.subscribe(),
+        queue: Default::default(),
+        gap_told: false,
+    };
+    let stream = futures_util::stream::unfold(feed, |feed| async move {
+        feed.next()
+            .await
+            .map(|(event, feed)| (Ok::<_, std::convert::Infallible>(event), feed))
+    });
+    Ok(axum::response::sse::Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+        .into_response())
+}
+
+/// Lines of NDJSON per transaction while ingesting.
+const INGEST_BATCH: usize = 500;
+
+/// Streaming ingestion: NDJSON, one node or edge per line, read as it
+/// arrives and written in batches in the writer's bulk lane. A line's
+/// `key` makes it idempotent: sent again (a retry), it writes nothing.
+async fn ingest(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    request: Request,
+) -> ApiResult<Json<crate::events::IngestReport>> {
+    use futures_util::StreamExt;
+    let mut body = request.into_body().into_data_stream();
+    let mut report = crate::events::IngestReport::default();
+    let mut pending: Vec<u8> = Vec::new();
+    let mut lines: Vec<Result<crate::events::IngestLine, String>> = Vec::new();
+    let mut number = 1usize;
+    let actor = auth::current().actor();
+    let flush = |lines: Vec<Result<crate::events::IngestLine, String>>, first: usize| {
+        let (writer, ns, actor) = (state.writer.clone(), ns.clone(), actor.clone());
+        let lines = Arc::new(lines);
+        async move {
+            tokio::task::spawn_blocking(move || {
+                writer.write_bulk(move |tx| {
+                    tx.act_as(actor.clone());
+                    let result = crate::events::ingest_batch(tx, &ns, first, &lines);
+                    tx.act_as(None);
+                    result
+                })
+            })
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .map_err(ApiError::from)
+        }
+    };
+    let mut done = false;
+    while !done {
+        match body.next().await {
+            Some(Ok(chunk)) => pending.extend_from_slice(&chunk),
+            Some(Err(error)) => return Err(ApiError::bad_request(error.to_string())),
+            None => {
+                done = true;
+                pending.push(b'\n');
+            }
+        }
+        // Whole lines of what has arrived; the rest waits for more.
+        let mut start = 0;
+        while let Some(length) = pending[start..].iter().position(|b| *b == b'\n') {
+            let parsed = {
+                let text = String::from_utf8_lossy(&pending[start..start + length]);
+                let text = text.trim();
+                (!text.is_empty()).then(|| serde_json::from_str(text).map_err(|e| e.to_string()))
+            };
+            start += length + 1;
+            let Some(parsed) = parsed else {
+                continue;
+            };
+            lines.push(parsed);
+            if lines.len() >= INGEST_BATCH {
+                let first = number;
+                number += lines.len();
+                report.add(flush(std::mem::take(&mut lines), first).await?);
+            }
+        }
+        pending.drain(..start);
+    }
+    if !lines.is_empty() {
+        report.add(flush(lines, number).await?);
+    }
+    Ok(Json(report))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebhookInput {
+    url: String,
+    #[serde(default)]
+    secret: Option<String>,
+    #[serde(default)]
+    labels: Vec<String>,
+    /// Deliver from after this change; from now when not given.
+    #[serde(default)]
+    since: Option<u64>,
+}
+
+async fn list_webhooks(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+) -> ApiResult<Json<Vec<Value>>> {
+    let hooks = blocking(&state, move |db| {
+        crate::events::webhooks(&db.begin_read()?, &ns)
+    })
+    .await?;
+    Ok(Json(
+        hooks.iter().map(crate::events::Webhook::public).collect(),
+    ))
+}
+
+/// Registers a URL that receives the namespace's changes (POSTed as
+/// `{namespace, webhook, changes, last, gap}`), signed when a secret is
+/// given.
+async fn create_webhook(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Body(input): Body<WebhookInput>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    if !(input.url.starts_with("http://") || input.url.starts_with("https://")) {
+        return Err(ApiError::bad_request("the url must be http:// or https://"));
+    }
+    let since = match input.since {
+        Some(since) => since,
+        None => {
+            let ns = ns.clone();
+            blocking(&state, move |db| {
+                Ok(db.begin_read()?.changes(&ns, 0, 0)?.last)
+            })
+            .await?
+        }
+    };
+    let hook = crate::events::Webhook {
+        id: grafeno::NodeId::new().to_string(),
+        url: input.url,
+        secret: input.secret.filter(|s| !s.is_empty()),
+        labels: input.labels,
+        cursor: since,
+        created_at: Timestamp::now(),
+        delivered: 0,
+        failures: 0,
+        last_error: None,
+        last_delivery: None,
+    };
+    let public = hook.public();
+    write(&state, move |tx| {
+        crate::events::save_webhook(tx, &ns, &hook)
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(public)))
+}
+
+async fn get_webhook(
+    State(state): State<AppState>,
+    Path((ns, id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let hook = blocking(&state, move |db| {
+        crate::events::webhooks(&db.begin_read()?, &ns)?
+            .into_iter()
+            .find(|hook| hook.id == id)
+            .ok_or_else(|| Error::Invalid(format!("no webhook {id:?}")))
+    })
+    .await?;
+    Ok(Json(hook.public()))
+}
+
+async fn delete_webhook(
+    State(state): State<AppState>,
+    Path((ns, id)): Path<(String, String)>,
+) -> ApiResult<StatusCode> {
+    let found = write(&state, move |tx| {
+        tx.delete_state(&ns, crate::events::WEBHOOK, &id)
+    })
+    .await?;
+    Ok(if found {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    })
+}
+
+/// What the background tasks have done.
+async fn background(State(state): State<AppState>) -> Json<Value> {
+    let runners = state
+        .runners
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    Json(json!({ "config": state.background, "tasks": runners }))
 }
 
 /// Recomputes the community hierarchy and brings its summaries up to date

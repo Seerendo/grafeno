@@ -249,6 +249,7 @@ impl McpServer {
             "resolve_review" => self.resolve_review(arguments),
             "consolidate" => self.consolidate(arguments),
             "overview" => self.overview(arguments),
+            "changes" => self.changes(arguments),
             "summarize_communities" => self.summarize_communities(arguments),
             "set_summary" => self.set_summary(arguments),
             _ => return Err((-32602, format!("unknown tool: {name}"))),
@@ -867,6 +868,28 @@ impl McpServer {
             ));
         }
         Ok(ToolOutput::Json(json!({ "communities": hits })))
+    }
+
+    fn changes(&self, arguments: Value) -> ToolResult {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            #[serde(default)]
+            since: u64,
+            #[serde(default)]
+            limit: Option<usize>,
+            #[serde(default)]
+            namespace: Option<String>,
+        }
+        let args: Args = parse_args(arguments)?;
+        let ns = self.ns(&args.namespace);
+        let page = self
+            .db
+            .begin_read()
+            .map_err(describe)?
+            .changes(ns, args.since, args.limit.unwrap_or(100).min(1_000))
+            .map_err(describe)?;
+        Ok(ToolOutput::Json(json!(page)))
     }
 
     fn summarize_communities(&self, arguments: Value) -> ToolResult {
@@ -1573,6 +1596,19 @@ fn tools() -> Value {
                     "id": id("A community to open."),
                     "level": { "type": "integer", "minimum": 0, "description": "Only this level (0 is the finest)." },
                     "limit": { "type": "integer", "minimum": 1, "description": "Default: 10." },
+                    "namespace": namespace
+                }
+            }
+        },
+        {
+            "name": "changes",
+            "title": "Changes",
+            "description": "What was written since you last looked: the change log after `since` (a sequence                 number; 0 for the start), oldest first, with `last` to pass next time. Each entry says which                 node or fact was created, updated or deleted; read it with get_node. `gap` means older                 changes were pruned.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "since": { "type": "integer", "minimum": 0, "description": "The last sequence number seen. Default: 0." },
+                    "limit": { "type": "integer", "minimum": 1, "description": "Default: 100." },
                     "namespace": namespace
                 }
             }
