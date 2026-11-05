@@ -238,6 +238,10 @@ println!("{}", context.rendered);
 
 ## Development
 
+Guía de contribución: [Español](CONTRIBUTING.md) | [English](CONTRIBUTING.en.md).
+Incluye requisitos, compilación de escritorio y comprobaciones de cada PR.
+The contribution guide covers prerequisites, desktop builds and PR checks.
+
 On Windows, install Visual Studio Build Tools (C++ workload) and use the MSVC
 Rust toolchain.
 
