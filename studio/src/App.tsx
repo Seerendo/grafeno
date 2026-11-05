@@ -623,7 +623,7 @@ export function App() {
 
   return (
     <StudioContext.Provider value={studio}>
-      <div className={collapsed ? "app collapsed" : "app"}>
+      <div className={collapsed ? "app collapsed" : "app"} aria-busy={checking}>
         <nav className="sidebar">
           <a className="sidebar-brand" href="#/overview">
             <Logo size={30} />

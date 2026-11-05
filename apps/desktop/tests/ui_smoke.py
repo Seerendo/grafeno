@@ -84,7 +84,8 @@ class Window:
     def open_file(self, path):
         result = self.promise("await window.__TAURI__.event.emit('open-path', arguments[0]);", str(path))
         assert result["ok"], result
-        self.wait(lambda: path.name in self.text(".server-pill"), f"abrir {path.name}")
+        self.wait(lambda: path.name in self.text(".server-pill")
+                  and self.exists('.app[aria-busy="false"]'), f"abrir {path.name}")
 
     def query(self, query):
         session = self.invoke("session")
@@ -170,7 +171,8 @@ def scenario(window, files, artifacts):
     selector = f".recent-open[title={json.dumps(str(first))}]"
     window.wait(lambda: window.exists(selector), "archivo en la lista de recientes")
     window.click(selector)
-    window.wait(lambda: first.name in window.text(".server-pill"), "reabrir desde recientes")
+    window.wait(lambda: first.name in window.text(".server-pill")
+                and window.exists('.app[aria-busy="false"]'), "reabrir desde recientes")
     assert window.query("MATCH (p:Person) RETURN p.name") == [["Ana de prueba"]]
     window.capture(artifacts, "05-base-reabierta")
     checks.append("Cerrar y reabrir desde recientes conservando los datos confirmados.")
