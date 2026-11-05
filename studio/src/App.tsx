@@ -377,6 +377,12 @@ export function App() {
   // The database file open in the desktop app, when the Studio runs there.
   const [local, setLocal] = useState<DesktopSession | null>(null);
 
+  const toast = useCallback((message: string, kind: Toast["kind"] = "info") => {
+    const id = Date.now() + Math.random();
+    setToasts((list) => [...list.slice(-3), { id, message, kind }]);
+    window.setTimeout(() => setToasts((list) => list.filter((item) => item.id !== id)), kind === "error" ? 7000 : 3500);
+  }, []);
+
   const connect = useCallback(async (candidate: Connection, remember?: boolean) => {
     setChecking(true);
     try {
@@ -427,13 +433,14 @@ export function App() {
         setLocal(session);
         await connect({ url: LOCAL_URL, token: "" });
       } catch (problem) {
-        setError(describeError(problem));
-        setLocal(null);
-        setConnection(null);
+        // La apertura fallida conserva la sesión anterior en el motor y la UI.
+        const message = describeError(problem);
+        setError(message);
+        toast(message, "error");
         setChecking(false);
       }
     },
-    [connect],
+    [connect, toast],
   );
 
   const closeLocal = useCallback(async () => {
@@ -461,12 +468,6 @@ export function App() {
 
   const client = useMemo(() => (connection ? clientFor(connection) : null), [connection]);
   const current = namespace || "default";
-
-  const toast = useCallback((message: string, kind: Toast["kind"] = "info") => {
-    const id = Date.now() + Math.random();
-    setToasts((list) => [...list.slice(-3), { id, message, kind }]);
-    window.setTimeout(() => setToasts((list) => list.filter((item) => item.id !== id)), kind === "error" ? 7000 : 3500);
-  }, []);
 
   useEffect(() => {
     if (!client) return;

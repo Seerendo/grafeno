@@ -1,5 +1,7 @@
 # Grafeno desktop
 
+[Español](README.es.md) | **English**
+
 Grafeno as a desktop application: Grafeno Studio in a native window, built
 with [Tauri](https://tauri.app). It works two ways:
 
@@ -63,3 +65,24 @@ Tauri bundler (phase 9.5).
 - Recent databases are kept in `recent.json` in the app's configuration
   folder (`%APPDATA%\dev.grafeno.desktop` on Windows,
   `~/.config/dev.grafeno.desktop` on Linux).
+
+## Local database sessions
+
+Opening another file only replaces the current session after the new database
+and its router are ready. If opening fails, the current database remains usable
+and the interface reports the error without disconnecting. Reopening the same
+canonical path (including a symbolic link) reuses its session and owner token.
+
+`src/local_database.rs` keeps this lifecycle separate from the window. Its tests
+cover persistence after closing, switching between files, equivalent paths,
+invalid and truncated files, missing directories, Unix file permissions and a lock held by a
+child process:
+
+```bash
+cargo test --locked -p grafeno-desktop local_database::tests
+```
+
+The ignored helper test is executed by the lock test in a child process. Unix
+permission checks require an unprivileged user; the test reports when its user
+can bypass read-only permissions. These tests do not launch the window and do
+not replace a full checksum scan of a potentially damaged database.

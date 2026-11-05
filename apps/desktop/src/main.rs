@@ -11,12 +11,14 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+#[cfg(test)]
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use axum::Router;
 use axum::body::Body;
+#[cfg(test)]
 use grafeno::Grafeno;
-use grafeno_server::http::{AppState, Options, router_with};
 use http_body_util::BodyExt;
 use serde::Serialize;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
@@ -25,34 +27,19 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tower::ServiceExt;
 
-/// The address the Studio uses for the database opened in the app. Requests
-/// to it never leave the process.
-const LOCAL_URL: &str = "http://grafeno.local";
+mod local_database;
+#[cfg(test)]
+use local_database::router_for;
+use local_database::{LOCAL_URL, Session, SessionInfo, file_name, info, open_session};
+
 /// Recent databases kept in the menu and on the start screen.
 const RECENT: usize = 10;
-
-/// An open database and the router that serves it.
-struct Session {
-    path: PathBuf,
-    db: Arc<Grafeno>,
-    router: Router,
-    /// The app is the owner of the files it opens: its requests carry this
-    /// token, so keys created in the file never lock the app out.
-    token: String,
-}
 
 #[derive(Default)]
 struct Desktop {
     session: Mutex<Option<Session>>,
     recent: Mutex<Vec<PathBuf>>,
     agent: Mutex<Option<ureq::Agent>>,
-}
-
-#[derive(Serialize)]
-struct SessionInfo {
-    url: &'static str,
-    path: String,
-    name: String,
 }
 
 #[derive(Serialize)]
@@ -67,21 +54,6 @@ struct Reply {
     status: u16,
     headers: BTreeMap<String, String>,
     body: String,
-}
-
-fn file_name(path: &Path) -> String {
-    path.file_name().map_or_else(
-        || path.display().to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    )
-}
-
-fn info(session: &Session) -> SessionInfo {
-    SessionInfo {
-        url: LOCAL_URL,
-        path: session.path.display().to_string(),
-        name: file_name(&session.path),
-    }
 }
 
 fn recent_file(app: &AppHandle) -> Option<PathBuf> {
@@ -112,34 +84,14 @@ fn set_title(app: &AppHandle, title: &str) {
     }
 }
 
-/// Opens (or creates) a database file and makes it the session.
+/// Cambia de base solo si la nueva apertura tiene éxito.
 fn open_path(app: &AppHandle, desktop: &Desktop, path: PathBuf) -> Result<SessionInfo, String> {
-    let path = std::path::absolute(&path).unwrap_or(path);
-    // A second open of the same file would fail on redb's lock: close first.
-    let previous = desktop.session.lock().expect("not poisoned").take();
-    drop(previous);
-    let db = Grafeno::open(&path).map_err(|error| {
-        let text = error.to_string();
-        if text.contains("lock") || text.contains("already open") {
-            format!(
-                "{} is open in another program (a Grafeno service or another window)",
-                path.display()
-            )
-        } else {
-            format!("cannot open {}: {text}", path.display())
-        }
-    })?;
-    let token = grafeno_server::auth::new_secret();
-    let db = Arc::new(db);
-    let router = router_for(db.clone(), Some(&token));
-    let session = Session {
-        path: path.clone(),
-        db,
-        router,
-        token,
+    let (reply, path) = {
+        let mut current = desktop.session.lock().expect("not poisoned");
+        let reply = open_session(&mut current, path)?;
+        let path = current.as_ref().expect("sesión abierta").path.clone();
+        (reply, path)
     };
-    let reply = info(&session);
-    *desktop.session.lock().expect("not poisoned") = Some(session);
     let mut recent = desktop.recent.lock().expect("not poisoned");
     recent.retain(|other| other != &path);
     recent.insert(0, path.clone());
@@ -558,17 +510,6 @@ fn path_argument(args: &[String]) -> Option<String> {
         .skip(1)
         .find(|arg| !arg.starts_with('-') && (arg.ends_with(".redb") || arg.ends_with(".grafeno")))
         .cloned()
-}
-
-/// The router for a database, as the app serves it (no Studio).
-fn router_for(db: Arc<Grafeno>, token: Option<&str>) -> Router {
-    router_with(
-        AppState::new(db, token),
-        &Options {
-            studio: false,
-            cors_origins: Vec::new(),
-        },
-    )
 }
 
 fn main() {
