@@ -1,0 +1,4 @@
+run,seconds,summaries,created,updated,unchanged,removed
+first refresh,3.23,9131,9131,0,0,0
+nothing changed,1.35,9131,0,0,9131,0
+after 1% new nodes,2.15,9146,1013,1220,6913,998

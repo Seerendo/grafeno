@@ -1228,7 +1228,7 @@ version 11):
   label); every person ends with exactly one current employer, and 40 069
   earlier jobs stay in valid time.
 
-**11.3 Hierarchical community summaries.**
+**11.3 Hierarchical community summaries** (done).
 
 - Louvain levels kept as a hierarchy (communities of communities).
 - A summary per community without a model: its most central nodes, its
@@ -1238,6 +1238,62 @@ version 11):
 - Recall and context use them for broad questions (global search over
   summaries, then drill down); an agent may replace a summary's text with
   its own.
+
+As built (`crates/grafeno-memory/src/communities.rs`, and
+`algo::louvain_levels` in the engine; no layout change, summaries are
+ordinary nodes):
+
+- `louvain_levels` returns the communities after each aggregation of
+  Louvain, finest first; each level is a union of communities of the one
+  below. `louvain` returns the last of them, as before.
+- `refresh_communities` projects the namespace (every node but summaries
+  and archived memories, or the labels asked for; every current fact, or
+  the edge labels asked for, optionally weighted) and runs it. A community
+  gets a summary when it has at least `min_size` (3) nodes and is not the
+  same as the one community under it; levels without any are left out and
+  the rest numbered from 0.
+- A summary is a `Community` node: `name` (its three most central
+  members), `level`, `size`, `central` (members by weighted degree inside
+  the community), `terms` (TF-IDF of the members' words against the
+  namespace; a word in every node is left out), `labels` (the label mix),
+  `facts` (the edges inside it between its most central members),
+  `from`/`to` (its time span, from the members and the facts' valid
+  dates), and a text that says all that, indexed for full-text search.
+  Each node links to the lowest summary that holds it (`member_of`); a
+  summary to its parent (`part_of`).
+- Incremental: the work is split in `plan_communities` (on a read
+  transaction: Louvain, centrality, terms) and `apply_communities` (one
+  write transaction), so the server runs the plan off the writer. New
+  communities are matched to stored summaries by the members they share
+  (Jaccard of at least one half, best pairs first, at any level, so a
+  community keeps its summary when the levels around it move); a
+  fingerprint of the members, their update times and the facts inside
+  decides whether a matched summary is rewritten; unmatched summaries are
+  deleted; `member_of` and `part_of` edges are written only where they
+  differ.
+- `set_community_text` puts an agent's own text on a summary (`custom`);
+  refreshes keep it, update the rest, and mark it `stale` when the
+  community changed; `None` goes back to the generated text.
+- `overview` is the global search: BM25 over summaries (`level` to keep
+  one), or the top of the hierarchy, biggest first, without a query;
+  `community_members` drills down into the communities a summary is made
+  of and its direct members, central ones first. Recall leaves summaries
+  out unless asked for by label; `ContextOptions::communities` puts the
+  ones that match first, as an `## Overview`, in the items' budget (the
+  MCP `context` tool uses 3).
+- Server: `POST /v1/{ns}/communities/refresh`, `GET
+  /v1/{ns}/communities?q=&level=`, `GET /v1/{ns}/communities/{id}`, `PUT
+  /v1/{ns}/communities/{id}/text`; MCP `overview`, `summarize_communities`
+  and `set_summary`.
+- Measured (`examples/community_bench.rs`, 1 000 teams of 50 in 125
+  departments, 160 000 edges): the first refresh takes 3.2 s for about
+  9 100 summaries in 4 levels; with nothing changed 1.35 s and nothing
+  written; after 1% new nodes 2.2 s, with three quarters of the summaries
+  untouched (Louvain moves some boundaries, so some communities split or
+  merge). Level 1 matches the teams (purity 0.84 against teams, 0.999
+  against departments), level 2 the departments (167 summaries, purity
+  0.999); a team's topic word finds its summary first for 200 of 200
+  teams, in 0.06 ms.
 
 **11.4 Continuous ingestion and events.**
 
@@ -1356,6 +1412,7 @@ spinning disk, on ARM, or for days at a time.
 | Fuzzy search for a damaged name among 100 000 people | 20 ms p50 (469 ms comparing with every node) | E1-mem | `resolve_speed.csv` |
 | Entity resolution by a match rule (2 000 damaged duplicates, 2 000 namesakes) | 95% found as same or review, precision of `same` 0.994 | E1-mem | `resolve_quality.csv` |
 | One current fact per source (50 000 job changes) | 14 000 facts/s (44 000 without); every person one current employer | E1-mem | `constraint_cost.csv` |
+| Community summaries of 50 000 nodes in 4 levels | 3.2 s first, 1.35 s unchanged; teams and departments found (purity 0.999); global search 0.06 ms | E1-mem | `community_*.csv` |
 | Extraction of 20 000 memories naming 5 000 entities | 3 200 texts/s; 99.4% of mentions linked right, none wrong; 0.06 s when nothing changed | E1-mem | `extract_*.csv` |
 
 ### Guarantees and the tests that hold them
@@ -1376,6 +1433,7 @@ real binary. The ones that carry each guarantee:
 | Vector search keeps its quality | `grafeno/tests/vector_churn.rs` | deletes, reinserts, three rounds of churn and a compaction keep recall@10 at 0.95 or more, and reinserted vectors are found |
 | Records are matched by rule, with reasons | `grafeno/tests/resolve.rs`, `property_index.rs` (fuzzy), `src/textsim.rs` tests | measures against published values; strong keys decide either way; typos, swapped dates and namesakes; neighbors as evidence (and no links as no evidence); scans without indexes; pairs for deduplication; fuzzy indexes through updates, check and export |
 | Contradicting facts are ended, not lost | `grafeno/tests/constraints.rs` | invalidation as a new version (`KNOWN AT` sees what was believed), late facts shortened, facts without dates starting now, the same fact again, flag, reject, target and pair scopes, `own_only` agents flagged, existing contradictions, property history |
+| Communities summarize themselves | `grafeno-memory/tests/communities.rs`, `grafeno-server/tests/http.rs` and `mcp.rs` community tests | a summary per community naming its center and topic, refreshes that change nothing, members joining in place, an agent's text kept and marked stale, levels as communities of communities, global search, drill-down, recall without summaries, context with an overview |
 | Texts link to what they mention | `grafeno-memory/tests/extraction.rs`, `src/extract.rs` tests | patterns and their normalized values and offsets, phrases and sentence openers, the gazetteer on normalized text; known names, emails by index, value nodes, new names after two texts, namesakes settled by context or queued, decisions that last, dismissals, incremental runs, an agent's mentions through match rules |
 | Merges are right and reversible | `grafeno/tests/merges.rs`, `grafeno-memory/tests/maintenance.rs` | strong keys, labels, conflicting facts and functional edges; namesakes, typos, nicknames, translations; a merge undone exactly (indexes, counters and the check agree) |
 | Isolation between principals | `grafeno-server/tests/access.rs` | a matrix of keys, grants and endpoints: no read or write outside a key's grants, `own_only` keys change only their own records |
@@ -1398,6 +1456,7 @@ cargo run --release -p grafeno-query --example index_bench
 cargo run --release -p grafeno --example resolve_bench -- 100000
 cargo run --release -p grafeno-memory --example extract_bench -- 5000 20000
 cargo run --release -p grafeno --example constraint_bench -- 10000 50000
+cargo run --release -p grafeno-memory --example community_bench -- 1000 50
 cargo test --release -p grafeno-query --test adversarial -- --nocapture
 ```
 

@@ -140,6 +140,11 @@ measured speed, memory and limits, with charts, in
   one contradicts it, as a new version so `KNOWN AT` keeps what was
   believed; or flag, or reject; functional properties keep their
   earlier values (`history(n, 'city')`).
+- **Phase 11.3, community summaries:** Louvain levels kept as a
+  hierarchy, each community summarized without a model (central members,
+  distinctive terms, label mix, key facts, time span) as a `Community`
+  node; refreshes rewrite only what changed and keep an agent's own text;
+  `overview` answers broad questions and drills down.
 
 ## Installing
 

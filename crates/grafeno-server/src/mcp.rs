@@ -81,6 +81,8 @@ const WRITING_TOOLS: &[&str] = &[
     "merge",
     "undo_merge",
     "consolidate",
+    "summarize_communities",
+    "set_summary",
 ];
 
 /// Serves MCP on stdin and stdout until stdin closes.
@@ -246,6 +248,9 @@ impl McpServer {
             "review" => self.review(arguments),
             "resolve_review" => self.resolve_review(arguments),
             "consolidate" => self.consolidate(arguments),
+            "overview" => self.overview(arguments),
+            "summarize_communities" => self.summarize_communities(arguments),
+            "set_summary" => self.set_summary(arguments),
             _ => return Err((-32602, format!("unknown tool: {name}"))),
         };
         Ok(match outcome {
@@ -462,7 +467,9 @@ impl McpServer {
         let args: QueryArgs = parse_args(arguments)?;
         let ns = self.ns(&args.namespace);
         let query = args.query(20)?;
-        let options = ContextOptions::with_budget(args.budget.unwrap_or(1_500));
+        let mut options = ContextOptions::with_budget(args.budget.unwrap_or(1_500));
+        // Community summaries that match go first, as an overview.
+        options.communities = 3;
         let read = self.db.begin_read().map_err(describe)?;
         let context = context_for(&read, ns, &query, &options).map_err(describe)?;
         drop(read);
@@ -804,6 +811,114 @@ impl McpServer {
             "kept": record.kept,
             "merge_id": record.id,
         })))
+    }
+
+    fn overview(&self, arguments: Value) -> ToolResult {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            #[serde(default)]
+            query: Option<String>,
+            #[serde(default)]
+            id: Option<String>,
+            #[serde(default)]
+            level: Option<i64>,
+            #[serde(default)]
+            limit: Option<usize>,
+            #[serde(default)]
+            namespace: Option<String>,
+        }
+        let args: Args = parse_args(arguments)?;
+        let ns = self.ns(&args.namespace);
+        let read = self.db.begin_read().map_err(describe)?;
+        let limit = args.limit.unwrap_or(10).min(100);
+        if let Some(id) = &args.id {
+            let opened = grafeno_memory::community_members(
+                &read,
+                ns,
+                parse_id(id).map_err(describe)?,
+                limit,
+            )
+            .map_err(describe)?;
+            let members: Vec<Value> = opened
+                .members
+                .iter()
+                .map(|node| json!({ "id": node.id, "name": node.display_name(), "labels": node.labels }))
+                .collect();
+            return Ok(ToolOutput::Json(json!({
+                "community": opened.community,
+                "children": opened.children,
+                "members": members,
+            })));
+        }
+        let hits = grafeno_memory::overview(
+            &read,
+            ns,
+            args.query.as_deref(),
+            &grafeno_memory::OverviewOptions {
+                limit,
+                level: args.level,
+            },
+        )
+        .map_err(describe)?;
+        if hits.is_empty() {
+            return Ok(ToolOutput::Text(
+                "No community summaries. Run summarize_communities first.".into(),
+            ));
+        }
+        Ok(ToolOutput::Json(json!({ "communities": hits })))
+    }
+
+    fn summarize_communities(&self, arguments: Value) -> ToolResult {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            #[serde(default)]
+            min_size: Option<usize>,
+            #[serde(default)]
+            resolution: Option<f64>,
+            #[serde(default)]
+            namespace: Option<String>,
+        }
+        let args: Args = parse_args(arguments)?;
+        let ns = self.ns(&args.namespace);
+        let mut options = grafeno_memory::CommunityOptions::default();
+        if let Some(min_size) = args.min_size {
+            options.min_size = min_size;
+        }
+        if let Some(resolution) = args.resolution {
+            options.resolution = resolution;
+        }
+        let plan = grafeno_memory::plan_communities(
+            &self.db.begin_read().map_err(describe)?,
+            ns,
+            &options,
+        )
+        .map_err(describe)?;
+        let report = self
+            .write(|tx| grafeno_memory::apply_communities(tx, ns, &plan))
+            .map_err(describe)?;
+        Ok(ToolOutput::Json(json!(report)))
+    }
+
+    fn set_summary(&self, arguments: Value) -> ToolResult {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            id: String,
+            #[serde(default)]
+            text: Option<String>,
+            #[serde(default)]
+            namespace: Option<String>,
+        }
+        let args: Args = parse_args(arguments)?;
+        let ns = self.ns(&args.namespace);
+        let id = parse_id(&args.id).map_err(describe)?;
+        self.write(|tx| grafeno_memory::set_community_text(tx, ns, id, args.text.as_deref()))
+            .map_err(describe)?;
+        Ok(ToolOutput::Json(
+            json!({ "id": id, "custom": args.text.is_some() }),
+        ))
     }
 
     fn extract(&self, arguments: Value) -> ToolResult {
@@ -1443,6 +1558,53 @@ fn tools() -> Value {
                     "namespace": namespace
                 },
                 "required": ["merge_id"]
+            }
+        },
+        {
+            "name": "overview",
+            "title": "Overview",
+            "description": "For broad questions (what is this memory about, what are the main topics or groups): \
+                summaries of the communities of the graph that match a query, or the top ones without one. \
+                Pass a community's id to open it: the smaller communities it is made of and its members.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "The topic. Omit for the biggest communities." },
+                    "id": id("A community to open."),
+                    "level": { "type": "integer", "minimum": 0, "description": "Only this level (0 is the finest)." },
+                    "limit": { "type": "integer", "minimum": 1, "description": "Default: 10." },
+                    "namespace": namespace
+                }
+            }
+        },
+        {
+            "name": "summarize_communities",
+            "title": "Summarize communities",
+            "description": "Find the communities of the graph (and communities of communities) and write or refresh \
+                a summary of each: central members, distinctive terms, label mix, key facts and time span. \
+                Only changed communities are rewritten.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "min_size": { "type": "integer", "minimum": 2, "description": "Smallest community summarized. Default: 3." },
+                    "resolution": { "type": "number", "description": "Above 1 for smaller communities. Default: 1." },
+                    "namespace": namespace
+                }
+            }
+        },
+        {
+            "name": "set_summary",
+            "title": "Set summary",
+            "description": "Replace a community summary's text with your own (refreshes keep it and mark it stale \
+                when the community changes); omit text to go back to the generated summary.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": id("The community summary."),
+                    "text": { "type": "string", "description": "Your summary. Omit to undo." },
+                    "namespace": namespace
+                },
+                "required": ["id"]
             }
         },
         {

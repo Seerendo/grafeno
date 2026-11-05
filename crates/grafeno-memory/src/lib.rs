@@ -4,6 +4,9 @@
 //! fusion, then spreads part of each top result's score to its graph
 //! neighbors. [`context_for`] packs the recalled nodes, and the facts that
 //! connect them, into a prompt-ready text that fits a token budget.
+//! [`refresh_communities`] summarizes the communities of the graph, at
+//! every level, without a model; [`overview`] searches those summaries
+//! for broad questions.
 //!
 //! ```no_run
 //! use grafeno::{Grafeno, NewNode};
@@ -21,12 +24,18 @@
 //! # Ok::<(), grafeno::Error>(())
 //! ```
 
+pub mod communities;
 mod context;
 pub mod extract;
 mod maintenance;
 mod recall;
 mod reconcile;
 
+pub use communities::{
+    COMMUNITY, CommunityHit, CommunityMembers, CommunityOptions, CommunityPlan, CommunityReport,
+    MEMBER_OF, OverviewOptions, PART_OF, apply_communities, community_members, overview,
+    plan_communities, refresh_communities, set_community_text,
+};
 pub use context::{
     Context, ContextFact, ContextItem, ContextOptions, context_for, estimate_tokens,
 };

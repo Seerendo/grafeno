@@ -295,6 +295,9 @@ pub struct ContextInput {
     pub max_facts: usize,
     #[serde(default)]
     pub facts: FilterInput,
+    /// Community summaries that match, put first (0 for none).
+    #[serde(default)]
+    pub communities: usize,
 }
 
 fn default_budget() -> usize {
@@ -316,6 +319,7 @@ impl ContextInput {
         options.fact_share = self.fact_share;
         options.max_facts = self.max_facts;
         options.facts = self.facts.resolve()?;
+        options.communities = self.communities;
         Ok((query, options))
     }
 }

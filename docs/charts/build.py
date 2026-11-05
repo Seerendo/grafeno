@@ -523,6 +523,12 @@ def main():
           [(r['writes'], [num(r['facts_per_s'])], 0 if 'one employer' in r['writes'] else False) for r in rows],
           '', note='With the constraint every person ends with one current employer and 40 069 earlier jobs in valid time. Data: docs/data/constraint_cost.csv')
 
+    # Community summaries.
+    rows = read('community_refresh.csv')
+    hbars('community-refresh', 'Refreshing community summaries of 50 000 nodes', 'Seconds; 1 000 teams in 125 departments, 160 000 edges, about 9 100 summaries in 4 levels. E1-mem.',
+          [(f"{r['run']} ({int(r['created']) + int(r['updated'])} written)", [num(r['seconds'])], 0 if r['run'] == 'first refresh' else 2) for r in rows],
+          ' s', note='Louvain and the summaries are recomputed each time; only changed summaries are written. Data: docs/data/community_refresh.csv')
+
     print('charts written to', OUT)
 
 

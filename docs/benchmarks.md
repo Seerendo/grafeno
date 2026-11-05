@@ -459,6 +459,33 @@ earlier jobs stay as facts that ended in valid time, each invalidation
 recorded. Each write reads the source's other facts of the label to find
 contradictions, and an invalidation writes a new version of the old fact.
 
+## Community summaries (`crates/grafeno-memory/examples/community_bench.rs`)
+
+1 000 teams of 50 (people and notes on the team's own topic), three
+links inside the team per node, one in four to another team of the same
+department of eight, one in fifty to anyone: 50 000 nodes and 160 430
+edges, in memory, release build, 2026-11-05.
+
+| Run | Seconds | Summaries written |
+| --- | --- | --- |
+| first refresh | 3.23 | 9 131 created |
+| nothing changed | 1.35 | none (9 131 unchanged) |
+| after 500 new people (1%) | 2.15 | 1 013 created, 1 220 updated, 998 removed; 6 913 unchanged |
+
+| Level | Summaries | Purity against teams | Against departments | Coverage |
+| --- | --- | --- | --- | --- |
+| 0 | 8 052 | 0.993 | 0.999 | 0.79 |
+| 1 | 889 | 0.835 | 0.999 | 1.00 |
+| 2 | 167 | 0.169 | 0.999 | 1.00 |
+| 3 | 38 | 0.124 | 0.974 | 0.31 |
+
+Purity is the share of the nodes of each summary that belong to its
+majority team (or department). Level 0 splits teams into parts, level 1
+is close to the teams, level 2 to the departments. A team's topic word
+finds its summary first (level 0) for 200 of 200 teams, 0.06 ms a query.
+Every refresh recomputes Louvain and the summaries; what it saves is
+writes. With 100 teams (4 000 nodes) the first refresh takes 0.25 s.
+
 ## Remaining limits
 
 - **Vector search reads each visited vector from redb** (about 0.4 µs per

@@ -240,6 +240,11 @@ pub fn recall(read: &ReadTx, ns: &str, query: &RecallQuery) -> Result<Vec<Recall
         if !query.labels.is_empty() && !query.labels.iter().any(|label| node.has_label(label)) {
             continue;
         }
+        // Community summaries answer broad questions (`overview`); recall
+        // returns them only when asked for by label.
+        if query.labels.is_empty() && node.has_label(crate::communities::COMMUNITY) {
+            continue;
+        }
         if !query.include_archived && node.has_label(ARCHIVED) {
             continue;
         }

@@ -11,7 +11,7 @@ use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use grafeno::{
     Direction, EdgeFilter, EdgeId, Error, Grafeno, Grant, NodeId, Principal, Props, Role,
@@ -214,6 +214,10 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/{ns}/constraints", get(constraints))
         .route("/{ns}/contradictions", get(contradictions))
         .route("/{ns}/nodes/{id}/history/{key}", get(property_history))
+        .route("/{ns}/communities", get(communities))
+        .route("/{ns}/communities/refresh", post(refresh_communities))
+        .route("/{ns}/communities/{id}", get(community))
+        .route("/{ns}/communities/{id}/text", put(community_text))
         .route("/{ns}/extract", post(extract))
         .route("/{ns}/review", get(review_queue))
         .route("/{ns}/review/{key}", post(resolve_review))
@@ -2046,6 +2050,100 @@ async fn property_history(
     })
     .await?;
     Ok(Json(entries))
+}
+
+/// Recomputes the community hierarchy and brings its summaries up to date
+/// (the options of `CommunityOptions`, all optional, as the body). The
+/// slow part runs on a read transaction; the writes go in one.
+async fn refresh_communities(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<grafeno_memory::CommunityReport>> {
+    let options: grafeno_memory::CommunityOptions = if body.iter().all(u8::is_ascii_whitespace) {
+        grafeno_memory::CommunityOptions::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?
+    };
+    let plan = {
+        let ns = ns.clone();
+        blocking(&state, move |db| {
+            grafeno_memory::plan_communities(&db.begin_read()?, &ns, &options)
+        })
+        .await?
+    };
+    let plan = Arc::new(plan);
+    let report = write(&state, move |tx| {
+        grafeno_memory::apply_communities(tx, &ns, &plan)
+    })
+    .await?;
+    Ok(Json(report))
+}
+
+#[derive(Deserialize)]
+struct CommunitiesParams {
+    q: Option<String>,
+    level: Option<i64>,
+    limit: Option<usize>,
+}
+
+/// Global search over community summaries (`?q=`), or the top of the
+/// hierarchy without one.
+async fn communities(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Params(params): Params<CommunitiesParams>,
+) -> ApiResult<Json<Vec<grafeno_memory::CommunityHit>>> {
+    let options = grafeno_memory::OverviewOptions {
+        limit: params.limit.unwrap_or(10).min(MAX_PAGE),
+        level: params.level,
+    };
+    let hits = blocking(&state, move |db| {
+        grafeno_memory::overview(&db.begin_read()?, &ns, params.q.as_deref(), &options)
+    })
+    .await?;
+    Ok(Json(hits))
+}
+
+#[derive(Deserialize)]
+struct CommunityParams {
+    limit: Option<usize>,
+}
+
+/// One community: its summary, the summaries it is made of, and its
+/// direct members, central ones first.
+async fn community(
+    State(state): State<AppState>,
+    Path((ns, id)): Path<(String, NodeId)>,
+    Params(params): Params<CommunityParams>,
+) -> ApiResult<Json<grafeno_memory::CommunityMembers>> {
+    let limit = params.limit.unwrap_or(50).min(MAX_PAGE);
+    let opened = blocking(&state, move |db| {
+        grafeno_memory::community_members(&db.begin_read()?, &ns, id, limit)
+    })
+    .await?;
+    Ok(Json(opened))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommunityText {
+    /// The agent's own text; `null` goes back to the generated one.
+    text: Option<String>,
+}
+
+/// Replaces a summary's text with an agent's own (`{"text": null}` undoes
+/// it on the next refresh).
+async fn community_text(
+    State(state): State<AppState>,
+    Path((ns, id)): Path<(String, NodeId)>,
+    Body(input): Body<CommunityText>,
+) -> ApiResult<Json<Value>> {
+    write(&state, move |tx| {
+        grafeno_memory::set_community_text(tx, &ns, id, input.text.as_deref())
+    })
+    .await?;
+    Ok(Json(json!({ "id": id })))
 }
 
 /// Reads the namespace's new and changed texts and reconciles what they

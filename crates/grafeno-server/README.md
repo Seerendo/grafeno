@@ -228,7 +228,7 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `POST`   | `/v1/{ns}/search/text`                | `{query, limit}`                                        | `[{node, score}]`             |
 | `POST`   | `/v1/{ns}/search/vector`              | `{embedding, limit, ef}`                                | `[{node, score}]`             |
 | `POST`   | `/v1/{ns}/recall`                     | recall query                                            | `[{node, score, signals}]`    |
-| `POST`   | `/v1/{ns}/context`                    | recall query + `{budget, fact_share, max_facts, facts}` | `{items, facts, tokens, rendered}` |
+| `POST`   | `/v1/{ns}/context`                    | recall query + `{budget, fact_share, max_facts, facts, communities}` | `{overview, items, facts, tokens, rendered}`; `communities` puts that many matching community summaries first |
 | `POST`   | `/v1/{ns}/batch`                      | `{ops}`                                                 | `{results, refs}`             |
 | `POST`   | `/v1/{ns}/query`                      | `{query, params?}` ([GQ](../../docs/query-language.md)) | `{columns, rows, stats}`      |
 | `GET`    | `/v1/whoami`                          |                                                         | the caller: `{name, owner, grants, own_only}` |
@@ -247,6 +247,10 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `GET`    | `/v1/{ns}/constraints`                |                                                         | constraints on facts and functional properties (`CREATE CONSTRAINT` in GQ) |
 | `GET`    | `/v1/{ns}/contradictions`             | `?limit=`                                               | `[{constraint, action, new_edge, old_edge, replacement, at, by}]`, newest first |
 | `GET`    | `/v1/{ns}/nodes/{id}/history/{key}`   |                                                         | `[{value, from, to, by}]`: earlier values of a functional property |
+| `POST`   | `/v1/{ns}/communities/refresh`        | `{min_size, resolution, max_levels, labels, edge_labels, weight, central, terms, facts}`, all optional | `{nodes, levels, communities, created, updated, unchanged, removed, stale, modularity}` |
+| `GET`    | `/v1/{ns}/communities`                | `?q=&level=&limit=`                                     | community summaries matching `q`, or the top ones without it |
+| `GET`    | `/v1/{ns}/communities/{id}`           | `?limit=`                                               | `{community, children, members}`: drill down |
+| `PUT`    | `/v1/{ns}/communities/{id}/text`      | `{text}` (`null` to undo)                               | an agent's own text for a summary |
 | `POST`   | `/v1/{ns}/extract`                    | `{source_labels?, entity_labels?, identifiers?, min_phrase_sources?, force?, …}` (optional) | `{read, unchanged, mentions, linked, created, queued, found}` |
 | `GET`    | `/v1/{ns}/review`                     | `?limit=`                                               | `[{key, kind, value, occurrences, candidates}]` |
 | `POST`   | `/v1/{ns}/review/{key}`               | `{action: "link", node}` / `{action: "create", label?}` / `{action: "dismiss"}` | `{node, report}` |
@@ -321,7 +325,7 @@ Syncing a note and replacing its links in one request:
 | ---------- | ------------------------------------------------------------------------------ |
 | `remember` | Stores a memory (text, optional name, labels, importance and links). A known `name` updates that entity instead. |
 | `recall`   | Hybrid search; returns ids, names, snippets and why each result matched. Records accesses. |
-| `context`  | Relevant memories and facts as compact text within a token budget.             |
+| `context`  | Relevant memories and facts as compact text within a token budget, after the community summaries that match. |
 | `relate`   | Records a fact (edge) between two nodes, with optional valid dates; says which facts it contradicted under a constraint (and ended). |
 | `update`   | Replaces a node's text, renames it, merges properties, changes labels or importance. |
 | `forget`   | Invalidates (default), retracts or deletes a fact; deletes a node.            |
@@ -335,6 +339,9 @@ Syncing a note and replacing its links in one request:
 | `review` / `resolve_review` | What extraction could not decide, and settling it (link, create, dismiss). |
 | `maintain` | Lists likely duplicates, weak memories and groups ready to consolidate.        |
 | `consolidate` | Stores a summary of several memories and archives them.                     |
+| `overview` | For broad questions: community summaries that match a topic, or the top ones; with `id`, a community's parts and members. |
+| `summarize_communities` | Finds the communities (and communities of communities) and writes or refreshes their summaries. |
+| `set_summary` | Replaces a community summary's text with the agent's own (or undoes it). |
 
 Every tool takes an optional `namespace`, which defaults to `--namespace`.
 

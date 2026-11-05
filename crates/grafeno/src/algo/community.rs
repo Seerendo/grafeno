@@ -230,11 +230,31 @@ impl Default for Louvain {
 /// Edges count in both directions. Returns the communities, their
 /// modularity and the levels run.
 pub fn louvain(p: &Projection, settings: &Louvain, stop: Stop) -> Result<(Vec<u32>, f64, usize)> {
+    let (hierarchy, q, levels) = louvain_levels(p, settings, stop)?;
+    let last = hierarchy
+        .into_iter()
+        .last()
+        .unwrap_or_else(|| (0..p.len() as u32).collect());
+    Ok((last, q, levels))
+}
+
+/// Louvain kept as a hierarchy: the communities after each level of
+/// aggregation, finest first, each a community per node. A community of a
+/// level is a union of communities of the level before (communities of
+/// communities). Levels that merge nothing are left out, so the list is
+/// empty when no node moved. Returns them with the modularity of the last
+/// and the levels run.
+pub fn louvain_levels(
+    p: &Projection,
+    settings: &Louvain,
+    stop: Stop,
+) -> Result<(Vec<Vec<u32>>, f64, usize)> {
     let original = Undirected::from_projection(p);
     let total: f64 = original.degrees().iter().sum();
     let mut membership: Vec<u32> = (0..p.len() as u32).collect();
+    let mut hierarchy: Vec<Vec<u32>> = Vec::new();
     if total <= 0.0 {
-        return Ok((renumber(&membership), 0.0, 0));
+        return Ok((hierarchy, 0.0, 0));
     }
     let mut graph = Undirected {
         adjacency: original.adjacency.clone(),
@@ -299,6 +319,7 @@ pub fn louvain(p: &Projection, settings: &Louvain, stop: Stop) -> Result<(Vec<u3
         for member in &mut membership {
             *member = renumbered[*member as usize];
         }
+        hierarchy.push(renumber(&membership));
         let count = renumbered
             .iter()
             .copied()
@@ -327,9 +348,8 @@ pub fn louvain(p: &Projection, settings: &Louvain, stop: Stop) -> Result<(Vec<u3
             break;
         }
     }
-    let membership = renumber(&membership);
-    let q = modularity_of(&original, &membership, settings.resolution);
-    Ok((membership, q, levels))
+    let q = modularity_of(&original, &renumber(&membership), settings.resolution);
+    Ok((hierarchy, q, levels))
 }
 
 fn modularity_of(graph: &Undirected, communities: &[u32], resolution: f64) -> f64 {

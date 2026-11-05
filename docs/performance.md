@@ -22,6 +22,7 @@ test environments").
 | Finding a person by a misspelled name among 100 000 | 20 ms with a fuzzy index |
 | Telling duplicates from namesakes (match rule) | 95% of duplicates found, 99.4% of "same" right |
 | One current fact per person (constraint) | 14 000 facts/s, every person one current employer |
+| Community summaries of 50 000 nodes | 3.2 s, teams and departments found; a topic finds its summary in 0.06 ms |
 | Linking what memories mention to known entities | 3 200 texts/s, 99.4% linked right, none wrong |
 
 ## Test environments
@@ -177,6 +178,23 @@ stays visible with `KNOWN AT`. With 50 000 job changes for 10 000 people,
 every person ended with exactly one current employer and every earlier
 job in history, at a third of the write speed (each new fact looks at
 the person's other ones).
+
+## Communities that summarize themselves
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/charts/community-refresh-dark.svg">
+  <img alt="refreshing community summaries of 50 000 nodes: 3.2 s the first time, 1.35 s when nothing changed, 2.15 s after 1% new nodes" src="assets/charts/community-refresh-light.svg">
+</picture>
+
+`summarize_communities` (or `POST /v1/{ns}/communities/refresh`) finds the
+communities of the graph and the communities they form, and writes a
+summary of each without a model: who is central, which words set it
+apart, what kinds of nodes, which facts, and when. On 50 000 people and
+notes in 1 000 teams and 125 departments, one level of summaries matched
+the teams and the next the departments (99.9% of the nodes of each in
+the same department), and a team's topic found its summary first every
+time. A refresh with nothing changed writes nothing; agents ask broad
+questions with `overview` and open a community to go down.
 
 ## Extraction
 

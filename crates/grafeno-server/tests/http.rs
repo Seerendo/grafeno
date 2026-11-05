@@ -1413,3 +1413,65 @@ async fn constraint_endpoints() {
     assert_eq!(status, StatusCode::OK, "{history}");
     assert_eq!(history[0]["value"], "Lima");
 }
+
+#[tokio::test]
+async fn community_endpoints() {
+    let app = app(None);
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/k/query",
+        Some(json!({ "query": "CREATE (a:Person {name: 'Ana'}), (b:Person {name: 'Bruno'}), (c:Person {name: 'Carla'}), (d:Person {name: 'Dario'}), \
+         (a)<-[:works_with]-(b), (a)<-[:works_with]-(c), (a)<-[:works_with]-(d), (b)<-[:works_with]-(c), (b)<-[:works_with]-(d), (c)<-[:works_with]-(d), \
+         (e:Person {name: 'Eva'}), (f:Person {name: 'Fabio'}), (g:Person {name: 'Gala'}), (h:Person {name: 'Hugo'}), \
+         (e)<-[:works_with]-(f), (e)<-[:works_with]-(g), (e)<-[:works_with]-(h), (f)<-[:works_with]-(g), (f)<-[:works_with]-(h), (g)<-[:works_with]-(h), \
+         (b)-[:knows]->(f)" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, report) = call(&app, "POST", "/v1/k/communities/refresh", None).await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["created"], 2, "{report}");
+    let (status, again) = call(
+        &app,
+        "POST",
+        "/v1/k/communities/refresh",
+        Some(json!({ "min_size": 3 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["unchanged"], 2, "{again}");
+
+    let (status, hits) = call(&app, "GET", "/v1/k/communities?q=Ana", None).await;
+    assert_eq!(status, StatusCode::OK, "{hits}");
+    assert!(hits[0]["text"].as_str().unwrap().contains("Ana"), "{hits}");
+    let id = hits[0]["id"].as_str().unwrap().to_owned();
+    let (status, opened) = call(
+        &app,
+        "GET",
+        &format!("/v1/k/communities/{id}?limit=2"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{opened}");
+    assert_eq!(opened["members"].as_array().unwrap().len(), 2);
+    assert_eq!(opened["community"]["size"], 4);
+
+    let (status, _) = call(
+        &app,
+        "PUT",
+        &format!("/v1/k/communities/{id}/text"),
+        Some(json!({ "text": "The compiler team." })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, top) = call(&app, "GET", "/v1/k/communities", None).await;
+    let custom = top
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hit| hit["id"] == id.as_str())
+        .unwrap();
+    assert_eq!(custom["text"], "The compiler team.");
+    assert_eq!(custom["custom"], true);
+}

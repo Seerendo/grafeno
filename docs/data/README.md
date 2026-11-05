@@ -31,6 +31,8 @@ build unless the file says otherwise; on E1, runs vary by about ±20%.
 | `resolve_speed.csv` | Fuzzy index against a scan, and `find_matches`, 100 000 people | `crates/grafeno/examples/resolve_bench.rs` | E1-mem | 2026-11-05 | bars, log scale |
 | `resolve_quality.csv` | A match rule's decisions on 2 000 damaged duplicates and 2 000 namesakes | `resolve_bench.rs` | E1-mem | 2026-11-05 | grouped bars of shares per kind |
 | `constraint_cost.csv` | 50 000 job changes with and without an edge constraint | `crates/grafeno/examples/constraint_bench.rs` | E1-mem | 2026-11-05 | bars |
+| `community_refresh.csv` | Refreshes of community summaries: first, unchanged, 1% new nodes | `crates/grafeno-memory/examples/community_bench.rs` | E1-mem | 2026-11-05 | bars |
+| `community_levels.csv` | Summaries per level and their purity against planted teams and departments | `community_bench.rs` | E1-mem | 2026-11-05 | table |
 | `extract_runs.csv` | Extraction runs: first, unchanged, 1% changed | `crates/grafeno-memory/examples/extract_bench.rs` | E1-mem | 2026-11-05 | bars, log scale |
 | `extract_quality.csv` | Links against the known mentions of 20 000 memories | `extract_bench.rs` | E1-mem | 2026-11-05 | a table, or stat tiles |
 | `import_interference.csv` | An agent's write latency during a 300 000-node import | `saturation.rs` | E1-disk | 2026-11-05 | bars of p99 per import mode, log scale |

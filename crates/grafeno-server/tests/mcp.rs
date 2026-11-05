@@ -78,6 +78,9 @@ fn handshake_and_tool_list() {
             "query",
             "merge",
             "undo_merge",
+            "overview",
+            "summarize_communities",
+            "set_summary",
             "extract",
             "add_mentions",
             "review",
@@ -510,4 +513,58 @@ fn agents_are_fenced_and_recorded() {
         .handle_line(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"remember","arguments":{"text":"x"}}}"#)
         .unwrap();
     assert_eq!(refused["result"]["isError"], true);
+}
+
+#[test]
+fn community_tools() {
+    let db = Grafeno::in_memory().unwrap();
+    db.write(|tx| {
+        for names in [
+            ["Ana", "Bruno", "Carla", "Dario"],
+            ["Eva", "Fabio", "Gala", "Hugo"],
+        ] {
+            let ids: Vec<grafeno::NodeId> = names
+                .iter()
+                .map(|name| {
+                    tx.create_node("agent", grafeno::NewNode::new("Person").prop("name", *name))
+                })
+                .collect::<grafeno::Result<_>>()?;
+            for i in 0..4 {
+                for j in i + 1..4 {
+                    tx.create_edge("agent", grafeno::NewEdge::new(ids[j], "works_with", ids[i]))?;
+                }
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    let server = McpServer::new(db, "agent".into());
+    let empty = call(&server, "overview", json!({}));
+    assert!(
+        empty["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("summarize_communities")
+    );
+    let report = call(&server, "summarize_communities", json!({}));
+    assert_eq!(structured(&report)["created"], 2, "{report}");
+    let found = call(&server, "overview", json!({ "query": "Eva" }));
+    let hit = &structured(&found)["communities"][0];
+    assert!(hit["text"].as_str().unwrap().contains("Eva"), "{found}");
+    let id = hit["id"].as_str().unwrap().to_owned();
+    let opened = call(&server, "overview", json!({ "id": id }));
+    assert_eq!(structured(&opened)["members"].as_array().unwrap().len(), 4);
+    let set = call(
+        &server,
+        "set_summary",
+        json!({ "id": id, "text": "The garden team." }),
+    );
+    assert_eq!(structured(&set)["custom"], true);
+    // Context puts matching summaries first.
+    let context = call(&server, "context", json!({ "query": "garden team" }));
+    let text = context["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("## Overview\n- The garden team."),
+        "{text}"
+    );
 }

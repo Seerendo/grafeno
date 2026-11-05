@@ -28,8 +28,8 @@ use redb::ReadableTable;
 
 pub use centrality::{PageRank, betweenness, closeness, degree, page_rank};
 pub use community::{
-    Louvain, Triangles, label_propagation, louvain, modularity, strongly_connected, triangles,
-    weakly_connected,
+    Louvain, Triangles, label_propagation, louvain, louvain_levels, modularity, strongly_connected,
+    triangles, weakly_connected,
 };
 pub use embedding::{FastRp, fast_rp};
 pub use paths::{

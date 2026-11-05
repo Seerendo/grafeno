@@ -7,6 +7,7 @@ use crate::{RecallQuery, recall};
 
 const MEMORY_HEADER: &str = "## Memory\n";
 const FACTS_HEADER: &str = "\n## Facts\n";
+const OVERVIEW_HEADER: &str = "## Overview\n";
 /// Below this many tokens, a truncated item is not worth including.
 const MIN_TRUNCATED_TOKENS: usize = 24;
 const ELLIPSIS: &str = "…";
@@ -30,6 +31,9 @@ pub struct ContextOptions {
     /// Counts the tokens of a piece of text. Defaults to [`estimate_tokens`];
     /// pass the model's tokenizer for exact budgets.
     pub count_tokens: fn(&str) -> usize,
+    /// Community summaries matching the query put first, as an overview
+    /// (0, the default, for none). They share the items' budget.
+    pub communities: usize,
 }
 
 impl Default for ContextOptions {
@@ -46,6 +50,7 @@ impl ContextOptions {
             max_facts: 50,
             facts: EdgeFilter::any(),
             count_tokens: estimate_tokens,
+            communities: 0,
         }
     }
 }
@@ -76,6 +81,8 @@ pub struct ContextFact {
 /// Recalled knowledge packed for a prompt.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Context {
+    /// Community summaries put first (`ContextOptions::communities`).
+    pub overview: Vec<NodeId>,
     pub items: Vec<ContextItem>,
     pub facts: Vec<ContextFact>,
     /// Tokens of `rendered`, as counted by `ContextOptions::count_tokens`
@@ -96,6 +103,11 @@ pub fn context_for(
     let fact_reserve = (options.budget as f32 * options.fact_share.clamp(0.0, 1.0)) as usize;
     let item_budget = options.budget.saturating_sub(fact_reserve);
     let mut context = Context::default();
+    if options.communities > 0
+        && let Some(text) = &query.text
+    {
+        add_overview(read, ns, text, options, item_budget, &mut context)?;
+    }
 
     for recalled in recall(read, ns, query)? {
         let node = &recalled.node;
@@ -149,6 +161,52 @@ pub fn context_for(
 
     add_facts(read, ns, options, &mut context)?;
     Ok(context)
+}
+
+/// The community summaries that match the query, before the memories.
+fn add_overview(
+    read: &ReadTx,
+    ns: &str,
+    text: &str,
+    options: &ContextOptions,
+    budget: usize,
+    context: &mut Context,
+) -> Result<()> {
+    let count = options.count_tokens;
+    let hits = crate::communities::overview(
+        read,
+        ns,
+        Some(text),
+        &crate::communities::OverviewOptions {
+            limit: options.communities,
+            level: None,
+        },
+    )?;
+    for hit in hits {
+        let header = if context.overview.is_empty() {
+            OVERVIEW_HEADER
+        } else {
+            ""
+        };
+        let line = format!(
+            "- {}\n",
+            hit.text.split_whitespace().collect::<Vec<_>>().join(" ")
+        );
+        let header_cost = if header.is_empty() { 0 } else { count(header) };
+        let cost = header_cost + count(&line);
+        if context.tokens + cost + count("\n") > budget {
+            continue;
+        }
+        context.rendered.push_str(header);
+        context.rendered.push_str(&line);
+        context.tokens += cost;
+        context.overview.push(hit.id);
+    }
+    if !context.overview.is_empty() {
+        context.rendered.push('\n');
+        context.tokens += count("\n");
+    }
+    Ok(())
 }
 
 fn add_facts(
@@ -249,7 +307,7 @@ fn name_of(
 
 /// The node's explicit name, or else the start of its text in quotes (an
 /// unnamed memory reads better as "“Ana prefers answers…”" than by its id).
-fn readable_name(node: &Node, text: &str) -> String {
+pub(crate) fn readable_name(node: &Node, text: &str) -> String {
     const NAME_CHARS: usize = 40;
     if node.explicit_name().is_some() || text.trim().is_empty() {
         return node.display_name();
