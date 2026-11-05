@@ -37,6 +37,8 @@ pub(crate) enum Token {
     Le,
     Gt,
     Ge,
+    /// `=~`
+    RegexMatch,
     Semicolon,
     End,
 }
@@ -81,6 +83,7 @@ impl Token {
             Token::Le => "<=",
             Token::Gt => ">",
             Token::Ge => ">=",
+            Token::RegexMatch => "=~",
             Token::Semicolon => ";",
             _ => "?",
         }
@@ -132,6 +135,10 @@ pub(crate) fn lex(source: &str) -> Result<Vec<Spanned>, QueryError> {
             '/' => single(Token::Slash, &mut i),
             '%' => single(Token::Percent, &mut i),
             '^' => single(Token::Caret, &mut i),
+            '=' if at(i + 1) == Some('~') => {
+                i += 2;
+                Token::RegexMatch
+            }
             '=' => single(Token::Eq, &mut i),
             ';' => single(Token::Semicolon, &mut i),
             '.' if at(i + 1) == Some('.') => {

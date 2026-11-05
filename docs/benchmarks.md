@@ -486,6 +486,18 @@ finds its summary first (level 0) for 200 of 200 teams, 0.06 ms a query.
 Every refresh recomputes Louvain and the summaries; what it saves is
 writes. With 100 teams (4 000 nodes) the first refresh takes 0.25 s.
 
+## CSV and GraphML (`crates/grafeno/examples/interchange_bench.rs`)
+
+100 000 nodes with text and 99 999 edges, in memory, release build,
+2026-11-05.
+
+| Format | Operation | Seconds | Records per second | Size |
+| --- | --- | --- | --- | --- |
+| CSV | export | 0.50 | 396 595 | 19.3 MiB |
+| CSV | import | 7.25 | 27 568 | |
+| GraphML | export | 0.59 | 340 742 | 40.0 MiB |
+| GraphML | import | 7.73 | 25 869 | |
+
 ## Change log and streaming ingestion (`changes_bench.rs`, `grafeno-server/examples/events_bench.rs`)
 
 In memory, release build, 2026-11-05.

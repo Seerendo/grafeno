@@ -247,6 +247,9 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `GET`    | `/v1/{ns}/constraints`                |                                                         | constraints on facts and functional properties (`CREATE CONSTRAINT` in GQ) |
 | `GET`    | `/v1/{ns}/contradictions`             | `?limit=`                                               | `[{constraint, action, new_edge, old_edge, replacement, at, by}]`, newest first |
 | `GET`    | `/v1/{ns}/nodes/{id}/history/{key}`   |                                                         | `[{value, from, to, by}]`: earlier values of a functional property |
+| `GET`    | `/v1/{ns}/export.graphml`             |                                                         | the namespace as GraphML (retracted facts left out) |
+| `GET`    | `/v1/{ns}/export/nodes.csv`, `/export/edges.csv` |                                              | as CSV, in `neo4j-admin import` headers |
+| `POST`   | `/v1/{ns}/import/graphml`, `/import/nodes.csv`, `/import/edges.csv` | the file (admin)          | `{nodes, edges, failed, errors}`; Grafeno ids update, other ids map to new nodes |
 | `GET`    | `/v1/{ns}/changes`                    | `?since=&limit=`; `Accept: text/event-stream` or `?stream=true` for a stream | `{changes, last, oldest, gap}`, or server-sent events (`id` = sequence number; resume with `Last-Event-ID`) |
 | `POST`   | `/v1/{ns}/ingest`                     | NDJSON: `{"key", "node": {…}}` or `{"key", "edge": {from, label, to, …}}` per line; ends may be `$key` | `{lines, nodes, edges, duplicates, failed, errors}`; a key sent again writes nothing |
 | `GET`    | `/v1/{ns}/webhooks`                   |                                                         | the namespace's webhooks (admin) |

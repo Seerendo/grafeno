@@ -204,6 +204,11 @@ fn tokens() -> impl Strategy<Value = String> {
 }
 
 const SEEDS: &[&str] = &[
+    "MATCH p = (a:Person)-[:knows*1..3]->(b) RETURN nodes(p), relationships(p), length(p)",
+    "MATCH p = shortestPath((a:Person)-[:knows*]-(b:Topic)) RETURN p LIMIT 2",
+    "MATCH (a:Person) CALL { WITH a MATCH (a)-->(b) RETURN count(b) AS c } RETURN a.i, c",
+    "MATCH (a) RETURN a {.name, .*, k: COUNT { (a)-->() }}, [(a)-->(b) WHERE b.i > 1 | b.name]",
+    "MATCH (a) WHERE a.name =~ 'n[0-9]+' RETURN reverse(a.name), left(a.name, 1), tail(a.tags)",
     "MATCH (a:Person {name: 'n1'})-[:knows]->(b) WHERE b.i > 3 RETURN a.name, b.name ORDER BY b.i LIMIT 5",
     "MATCH (a)-[r:knows*1..3]-(b) RETURN count(DISTINCT b)",
     "UNWIND range(1, 10) AS x WITH x WHERE x % 2 = 0 RETURN collect(x)",

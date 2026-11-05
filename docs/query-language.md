@@ -35,6 +35,8 @@ labels, property names and variables are not. `//` starts a comment.
 | `(a)-[:knows\|likes]->(b)`        | an edge with any of these labels                    |
 | `(a)-[:knows*1..3]->(b)`         | 1 to 3 hops (`*` alone: 1 to 32; `*2`: exactly 2)   |
 | `(a)-[r {role: 'lead'}]->(b)`    | edges whose properties equal these values           |
+| `p = (a)-[:knows*]->(b)`         | `p` holds the path: `nodes(p)`, `relationships(p)`, `length(p)` |
+| `p = shortestPath((a)-[:knows*]-(b))` | the shortest path (`allShortestPaths` gives one per end too) |
 
 - Patterns chain: `(a)-[:knows]->(b)-[:works_at]->(c)`. A `MATCH` can list
   several patterns separated by commas; they share variables, and
@@ -156,6 +158,21 @@ MATCH (p:Person) RETURN p.name AS name
 UNION
 MATCH (c:Company) RETURN c.name AS name;
 ```
+
+### `CALL { … }`: subqueries
+
+The clauses inside run once per row and see its variables; the rows their
+`RETURN` gives are added to it, and a row with none is dropped. Without
+`RETURN` (writes only) rows stay as they were.
+
+```text
+MATCH (p:Person)
+CALL { WITH p MATCH (p)-[:knows]->(f) RETURN count(f) AS friends }
+RETURN p.name, friends;
+```
+
+A name returned may not already exist outside. `UNION` inside and `IN
+TRANSACTIONS` are not supported: a query is one transaction.
 
 ### `CALL`: procedures
 
@@ -463,7 +480,14 @@ RETURN CASE p.status WHEN 'a' THEN 1 WHEN 'b' THEN 2 ELSE 0 END;  // simple
 RETURN [x IN range(1, 10) WHERE x % 2 = 0 | x * x];               // comprehension
 RETURN all(x IN p.scores WHERE x > 50), any(…), none(…), single(…);
 RETURN reduce(total = 0, x IN [1, 2, 3] | total + x);             // 6
+RETURN [(a)-[:knows]->(f) WHERE f.age > 30 | f.name];             // pattern comprehension
+RETURN COUNT { (a)-[:knows]->() }, EXISTS { MATCH (a)-->(b) WHERE b.x = 1 };
+RETURN p {.name, .age, friends: 3, other}, p {.*};                // map projection
+RETURN 'abc' =~ 'a.c', 'ABC' =~ '(?i)abc';                        // true, true
 ```
+
+`=~` matches the whole string. The syntax is that of Rust's `regex` crate:
+no look-around or backreferences, and matching always takes linear time.
 
 `CASE` without a matching `WHEN` and no `ELSE` gives `null`. Quantifiers
 are three-valued: unknown items make the answer unknown unless the known
@@ -481,6 +505,10 @@ ones decide it.
 | `datetime([x])` / `time([x])`, `date([t])` (`YYYY-MM-DD`), `now()`, `timestamp()` (milliseconds) | |
 | `duration(x)`, `duration.between`, `duration.inMonths` / `inDays` / `inSeconds`, `date.truncate(unit, t)` | see *Time and durations* |
 | `exists(pattern)`, `exists(n.key)` | pattern predicate; whether a property is set |
+| `nodes(p)`, `relationships(p)` / `rels(p)`, `length(p)` | the parts of a path |
+| `reverse(x)`, `tail(list)`, `isEmpty(x)`, `left(s, n)`, `right(s, n)`, `ltrim`, `rtrim`, `char_length` | |
+| `toBoolean`, `toIntegerOrNull`, `toFloatOrNull`, `toStringOrNull`, `toBooleanOrNull`, `toIntegerList`, `toFloatList`, `toStringList`, `toBooleanList`, `nullIf(a, b)` | conversions; `…OrNull` gives null instead of an error |
+| `asin`, `acos`, `atan`, `atan2(y, x)`, `cot`, `degrees`, `radians`, `haversin`, `isNaN`, `rand()`, `randomUUID()`, `elementId(x)` | |
 | `text.levenshtein`, `text.damerau`, `text.jaroWinkler`, `text.similarity(a, b[, measure])`, … | text similarity (see *Similar text and entity resolution*) |
 
 ## Constraints on facts
@@ -635,10 +663,25 @@ deep. Past either, the query fails with an error instead of exhausting the
 stack. The library and the local shell run without the other limits
 (`grafeno_query::execute_with` takes them).
 
+## Differences from Cypher
+
+These are pinned in `crates/grafeno-query/tests/conformance/scenarios.txt`,
+which holds hand-written scenarios in the openCypher TCK's form. The
+official TCK has not been run against Grafeno.
+
+- Every node needs a label: `CREATE ({n: 1})` is refused.
+- A variable-length edge reaches each end node once, at its shortest
+  distance. Cypher returns every path, so where it gives several rows
+  Grafeno gives one, and `(a)-[:T*2]->(x)` does not find a node that also
+  has a shorter way from `a`.
+- `allShortestPaths` therefore gives one path per end.
+- `id(x)` is a string (a UUID), not an integer.
+
 ## Not supported (yet)
 
-- `CALL { … }` subqueries, pattern comprehensions (`[(a)-->(b) | b.name]`),
-  map projections (`n {.name}`) and `=~` regular expressions.
+- `UNION` inside `CALL { … }`, `IN TRANSACTIONS`, and path variables in
+  `CREATE` and `MERGE`.
+- The Bolt protocol: Neo4j drivers cannot connect.
 - Indexes on several properties at once, or on edge properties.
 - Graph algorithms over several namespaces at once. Hybrid recall is in
   the shell's `\recall` and `\context`, and in the HTTP API.

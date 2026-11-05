@@ -24,6 +24,16 @@ pub enum Value {
     Map(BTreeMap<String, Value>),
     Node(Arc<Node>),
     Edge(Arc<Edge>),
+    /// A matched path (`p = (a)-[…]->(b)`).
+    Path(Arc<Path>),
+}
+
+/// Nodes and the edges between them: `nodes[i]` and `nodes[i + 1]` are the
+/// ends of `edges[i]`, in either direction.
+#[derive(Clone, Debug)]
+pub struct Path {
+    pub nodes: Vec<Arc<Node>>,
+    pub edges: Vec<Arc<Edge>>,
 }
 
 impl PartialEq for Value {
@@ -76,6 +86,10 @@ impl Value {
             ),
             Value::Node(node) => serde_json::to_value(node.as_ref()).unwrap_or_default(),
             Value::Edge(edge) => serde_json::to_value(edge.as_ref()).unwrap_or_default(),
+            Value::Path(path) => json!({
+                "nodes": path.nodes.iter().map(|n| serde_json::to_value(n.as_ref()).unwrap_or_default()).collect::<Vec<_>>(),
+                "relationships": path.edges.iter().map(|e| serde_json::to_value(e.as_ref()).unwrap_or_default()).collect::<Vec<_>>(),
+            }),
         }
     }
 
@@ -83,7 +97,7 @@ impl Value {
     /// properties, except times, which are stored as ISO strings.
     pub(crate) fn to_property(&self) -> Result<serde_json::Value, String> {
         match self {
-            Value::Node(_) | Value::Edge(_) => {
+            Value::Node(_) | Value::Edge(_) | Value::Path(_) => {
                 Err(format!("a property cannot hold a {}", self.type_name()))
             }
             Value::List(items) => items
@@ -113,6 +127,7 @@ impl Value {
             Value::Map(_) => "map",
             Value::Node(_) => "node",
             Value::Edge(_) => "edge",
+            Value::Path(_) => "path",
         }
     }
 
@@ -145,6 +160,16 @@ impl Value {
             }
             Value::Node(node) => format!("N{}", node.id),
             Value::Edge(edge) => format!("E{}", edge.id),
+            Value::Path(path) => {
+                let mut key = String::from("P");
+                for node in &path.nodes {
+                    key.push_str(&format!("{};", node.id));
+                }
+                for edge in &path.edges {
+                    key.push_str(&format!("{};", edge.id));
+                }
+                key
+            }
         }
     }
 
@@ -246,13 +271,14 @@ pub(crate) fn sort_order(a: &Value, b: &Value) -> Ordering {
             Value::Map(_) => 0,
             Value::Node(_) => 1,
             Value::Edge(_) => 2,
-            Value::List(_) => 3,
-            Value::Str(_) => 4,
-            Value::Bool(_) => 5,
-            Value::Int(_) | Value::Float(_) => 6,
-            Value::Time(_) => 7,
-            Value::Duration(_) => 8,
-            Value::Null => 9,
+            Value::Path(_) => 3,
+            Value::List(_) => 4,
+            Value::Str(_) => 5,
+            Value::Bool(_) => 6,
+            Value::Int(_) | Value::Float(_) => 7,
+            Value::Time(_) => 8,
+            Value::Duration(_) => 9,
+            Value::Null => 10,
         }
     }
     match (a, b) {

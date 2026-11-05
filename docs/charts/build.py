@@ -539,6 +539,12 @@ def main():
           [(r['run'], [num(r['lines_per_s'])], 0 if r['run'] == 'first time' else 2) for r in rows],
           '', log=True, note='Sent again, every line is a duplicate of its idempotency key and nothing is written. Data: docs/data/ingest_runs.csv')
 
+    # CSV and GraphML.
+    rows = read('interchange.csv')
+    hbars('interchange', 'CSV and GraphML, out and back in', 'Records per second, log scale; 100 000 nodes with text and 99 999 edges. E1-mem.',
+          [(f"{r['format']} {r['operation']}", [num(r['records_per_s'])], 0 if r['operation'] == 'import' else 2) for r in rows],
+          '', log=True, note='An import writes through every index, as any write does. Data: docs/data/interchange.csv')
+
     print('charts written to', OUT)
 
 

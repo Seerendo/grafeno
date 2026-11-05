@@ -45,6 +45,7 @@ mod eval;
 mod exec;
 mod lexer;
 mod limits;
+mod morefns;
 mod parser;
 mod plan;
 mod procedures;

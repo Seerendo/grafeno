@@ -228,6 +228,12 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/{ns}/constraints", get(constraints))
         .route("/{ns}/contradictions", get(contradictions))
         .route("/{ns}/nodes/{id}/history/{key}", get(property_history))
+        .route("/{ns}/export.graphml", get(export_graphml))
+        .route("/{ns}/export/nodes.csv", get(export_nodes_csv))
+        .route("/{ns}/export/edges.csv", get(export_edges_csv))
+        .route("/{ns}/import/graphml", post(import_graphml))
+        .route("/{ns}/import/nodes.csv", post(import_nodes_csv))
+        .route("/{ns}/import/edges.csv", post(import_edges_csv))
         .route("/{ns}/changes", get(changes))
         .route("/{ns}/ingest", post(ingest))
         .route("/{ns}/webhooks", get(list_webhooks).post(create_webhook))
@@ -2072,6 +2078,93 @@ async fn property_history(
     })
     .await?;
     Ok(Json(entries))
+}
+
+/// A namespace as GraphML (Gephi, yEd, NetworkX, igraph, APOC).
+async fn export_graphml(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+) -> ApiResult<Response> {
+    let body = blocking(&state, move |db| {
+        let mut out = Vec::new();
+        db.begin_read()?.export_graphml(&ns, &mut out)?;
+        Ok(out)
+    })
+    .await?;
+    Ok(([(header::CONTENT_TYPE, "application/graphml+xml")], body).into_response())
+}
+
+/// A namespace's nodes as CSV (`neo4j-admin import` headers).
+async fn export_nodes_csv(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+) -> ApiResult<Response> {
+    let body = blocking(&state, move |db| {
+        let mut out = Vec::new();
+        db.begin_read()?.export_nodes_csv(&ns, &mut out)?;
+        Ok(out)
+    })
+    .await?;
+    Ok(([(header::CONTENT_TYPE, "text/csv; charset=utf-8")], body).into_response())
+}
+
+/// A namespace's current facts as CSV.
+async fn export_edges_csv(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+) -> ApiResult<Response> {
+    let body = blocking(&state, move |db| {
+        let mut out = Vec::new();
+        db.begin_read()?.export_edges_csv(&ns, &mut out)?;
+        Ok(out)
+    })
+    .await?;
+    Ok(([(header::CONTENT_TYPE, "text/csv; charset=utf-8")], body).into_response())
+}
+
+async fn interchange_body(request: Request) -> ApiResult<axum::body::Bytes> {
+    axum::body::to_bytes(request.into_body(), IMPORT_LIMIT)
+        .await
+        .map_err(|error| ApiError::bad_request(format!("cannot read the file: {error}")))
+}
+
+async fn import_graphml(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    request: Request,
+) -> ApiResult<Json<grafeno::InterchangeStats>> {
+    let body = interchange_body(request).await?;
+    let stats = blocking(&state, move |db| {
+        db.import_graphml(&ns, body.as_ref(), &grafeno::InterchangeOptions::default())
+    })
+    .await?;
+    Ok(Json(stats))
+}
+
+async fn import_nodes_csv(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    request: Request,
+) -> ApiResult<Json<grafeno::InterchangeStats>> {
+    let body = interchange_body(request).await?;
+    let stats = blocking(&state, move |db| {
+        db.import_nodes_csv(&ns, body.as_ref(), &grafeno::InterchangeOptions::default())
+    })
+    .await?;
+    Ok(Json(stats))
+}
+
+async fn import_edges_csv(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    request: Request,
+) -> ApiResult<Json<grafeno::InterchangeStats>> {
+    let body = interchange_body(request).await?;
+    let stats = blocking(&state, move |db| {
+        db.import_edges_csv(&ns, body.as_ref(), &grafeno::InterchangeOptions::default())
+    })
+    .await?;
+    Ok(Json(stats))
 }
 
 #[derive(Deserialize)]

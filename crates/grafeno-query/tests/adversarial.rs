@@ -279,3 +279,78 @@ fn procedure_rows_count_against_max_memory() {
     .unwrap();
     assert_eq!(top.rows.len(), 5);
 }
+
+#[test]
+fn new_forms_stay_within_their_limits() {
+    let db = world();
+    let limits = Limits {
+        max_reads: Some(200_000),
+        max_rows: Some(50_000),
+        ..Limits::standard()
+    };
+    let params = Params::new();
+    let started = Instant::now();
+    // Nested without end: refused while parsing, not by a stack overflow.
+    for (open, close) in [
+        ("CALL { ", " RETURN 1 AS x }"),
+        ("FOREACH (x IN [1] | ", ")"),
+        ("RETURN [(a)-->(b) | ", "]"),
+        ("RETURN COUNT { (a)-->(b) WHERE ", " }"),
+        ("WITH 1 AS n RETURN n {k: ", "}"),
+    ] {
+        let query = format!("{}RETURN 1{}", open.repeat(20_000), close.repeat(20_000));
+        let error = execute_with(&db, NS, &query, &params, &limits);
+        assert!(error.is_err(), "{open}");
+    }
+    // Work that multiplies per row runs out of budget.
+    for query in [
+        "MATCH (a) RETURN [(a)-[*1..8]-(b) | [(b)-[*1..8]-(c) | c.i]]",
+        "MATCH (a) RETURN COUNT { (a)-[*1..8]-()-[*1..8]-() }",
+        "MATCH (a), (b) CALL { WITH a, b MATCH (a)-->(c), (b)-->(d) RETURN c, d } RETURN count(*)",
+        "MATCH p = (a)-[*1..8]-(b), q = (b)-[*1..8]-(c) RETURN count(*)",
+    ] {
+        let error = execute_with(&db, NS, query, &params, &limits)
+            .err()
+            .unwrap_or_else(|| panic!("{query} should run out of budget"));
+        assert!(error.to_string().contains("limit"), "{query}: {error}");
+    }
+    // A regular expression that would backtrack forever elsewhere.
+    let text = "a".repeat(30_000);
+    let mut with_text = Params::new();
+    with_text.insert("t".into(), grafeno_query::Value::Str(text));
+    let result = execute_with(&db, NS, "RETURN $t =~ '(a|aa)+$b'", &with_text, &limits);
+    assert!(result.is_ok(), "{:?}", result.err().map(|e| e.to_string()));
+    assert!(started.elapsed() < Duration::from_secs(60));
+}
+
+#[test]
+fn nested_blocks_just_under_the_limit_run() {
+    let db = Grafeno::in_memory().unwrap();
+    let (params, limits) = (Params::new(), Limits::standard());
+    let depth = 150;
+    let call = format!(
+        "{}RETURN 1 AS x{} RETURN x",
+        "CALL { ".repeat(depth),
+        " }  RETURN 1 AS x".repeat(depth - 1) + " }"
+    );
+    let foreach = format!(
+        "{}CREATE (:N){}",
+        "FOREACH (x IN [1] | ".repeat(depth),
+        ")".repeat(depth)
+    );
+    // On a thread of the size servers use.
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn_scoped(scope, || {
+                let result = execute_with(&db, NS, &call, &params, &limits)
+                    .unwrap_or_else(|e| panic!("nested CALL: {e}"));
+                assert_eq!(result.to_json()["rows"], serde_json::json!([[1]]));
+                execute_with(&db, NS, &foreach, &params, &limits)
+                    .unwrap_or_else(|e| panic!("nested FOREACH: {e}"));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    });
+}

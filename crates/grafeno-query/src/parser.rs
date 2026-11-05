@@ -4,8 +4,9 @@ use grafeno::Direction;
 
 use crate::QueryError;
 use crate::ast::{
-    BinOp, Clause, Expr, Key, Mode, NodePattern, Pattern, ProcedureCall, Projection, Quantifier,
-    Query, RelPattern, RemoveItem, ReturnItem, Schema, SetItem, Statement, UnOp,
+    BinOp, Clause, Expr, Key, MapItem, Mode, NodePattern, Pattern, PatternKind, ProcedureCall,
+    Projection, Quantifier, Query, RelPattern, RemoveItem, ReturnItem, Schema, SetItem, Statement,
+    UnOp,
 };
 use crate::lexer::{Spanned, Token, lex};
 use crate::value::Value;
@@ -430,10 +431,20 @@ impl Parser<'_> {
             return self.call_clause();
         }
         if self.eat_keyword("CREATE") {
-            return Ok(Clause::Create(self.patterns()?));
+            let patterns = self.patterns()?;
+            if patterns
+                .iter()
+                .any(|p| p.path.is_some() || p.shortest.is_some())
+            {
+                return Err(self.error("path variables and shortestPath are for MATCH, not CREATE"));
+            }
+            return Ok(Clause::Create(patterns));
         }
         if self.eat_keyword("MERGE") {
             let pattern = self.pattern()?;
+            if pattern.path.is_some() || pattern.shortest.is_some() {
+                return Err(self.error("path variables and shortestPath are for MATCH, not MERGE"));
+            }
             let (mut on_create, mut on_match) = (Vec::new(), Vec::new());
             while self.eat_keyword("ON") {
                 let target = if self.eat_keyword("CREATE") {
@@ -477,6 +488,8 @@ impl Parser<'_> {
             self.expect_keyword("IN")?;
             let list = self.expr()?;
             self.expect(Token::Pipe, "`|` before the clauses of FOREACH")?;
+            let base = self.depth;
+            self.deeper()?;
             let mut body = Vec::new();
             while self.peek() != &Token::RParen {
                 let start = self.start();
@@ -493,6 +506,7 @@ impl Parser<'_> {
                 }
                 body.push(clause);
             }
+            self.depth = base;
             if body.is_empty() {
                 return Err(self.error("FOREACH needs at least one clause"));
             }
@@ -513,8 +527,30 @@ impl Parser<'_> {
     }
 
     fn call_clause(&mut self) -> Result<Clause, QueryError> {
-        if self.peek() == &Token::LBrace {
-            return Err(self.error("`CALL { … }` subqueries are not supported yet"));
+        if self.eat(&Token::LBrace) {
+            let base = self.depth;
+            self.deeper()?;
+            let mut clauses = Vec::new();
+            while self.peek() != &Token::RBrace {
+                if self.peek() == &Token::End {
+                    return Err(self.error("`}` to close CALL { … }"));
+                }
+                if self.at_keyword("UNION") {
+                    return Err(self.error("UNION inside CALL { … } is not supported yet"));
+                }
+                clauses.push(self.clause()?);
+            }
+            self.advance();
+            self.depth = base;
+            if clauses.is_empty() {
+                return Err(self.error("CALL { } needs at least one clause"));
+            }
+            if self.at_keyword("IN") && self.keyword_at(1, "TRANSACTIONS") {
+                return Err(self.error(
+                    "CALL { … } IN TRANSACTIONS is not supported: a query is one transaction",
+                ));
+            }
+            return Ok(Clause::Subquery(Query { clauses }));
         }
         let mut name = self.ident("a procedure name")?;
         while self.eat(&Token::Dot) {
@@ -714,13 +750,53 @@ impl Parser<'_> {
     // ------------------------------------------------------------ patterns
 
     fn pattern(&mut self) -> Result<Pattern, QueryError> {
+        // `p = …`: a path variable.
+        let mut path = None;
+        if let Token::Ident(name) = self.peek().clone()
+            && self.peek_at(1) == &Token::Eq
+            && self.peek_at(2) != &Token::Eq
+        {
+            self.position += 2;
+            path = Some(name);
+        }
+        // `shortestPath(…)` / `allShortestPaths(…)`.
+        let mut shortest = None;
+        if let Token::Ident(name) = self.peek().clone()
+            && self.peek_at(1) == &Token::LParen
+        {
+            let lower = name.to_ascii_lowercase();
+            if lower == "shortestpath" || lower == "allshortestpaths" {
+                self.position += 2;
+                shortest = Some(lower == "allshortestpaths");
+            }
+        }
         let start = self.node_pattern()?;
         let mut steps = Vec::new();
         while matches!(self.peek(), Token::Minus | Token::Lt) {
             let rel = self.rel_pattern()?;
             steps.push((rel, self.node_pattern()?));
         }
-        Ok(Pattern { start, steps })
+        if shortest.is_some() {
+            self.expect(Token::RParen, "`)` to close shortestPath")?;
+            if steps.len() != 1 {
+                return Err(self.error(
+                    "shortestPath takes one edge pattern: shortestPath((a)-[:knows*]-(b))",
+                ));
+            }
+            // As in Cypher, a single edge without `*` is one hop.
+            if steps[0].0.length.is_none() {
+                steps[0].0.length = Some((1, Some(1)));
+            }
+        }
+        if path.is_some() && path == start.var {
+            return Err(self.error("a path variable cannot also name a node"));
+        }
+        Ok(Pattern {
+            start,
+            steps,
+            path,
+            shortest,
+        })
     }
 
     /// A pattern with at least one edge, if one starts here; otherwise the
@@ -916,6 +992,7 @@ impl Parser<'_> {
                 Token::Le => Some(BinOp::Le),
                 Token::Gt => Some(BinOp::Gt),
                 Token::Ge => Some(BinOp::Ge),
+                Token::RegexMatch => Some(BinOp::Regex),
                 _ => None,
             };
             if let Some(op) = op {
@@ -1043,11 +1120,87 @@ impl Parser<'_> {
                 }
                 self.expect(Token::RBracket, "`]`")?;
                 expr = Expr::Index(Box::new(expr), Box::new(index));
+            } else if self.peek() == &Token::LBrace && matches!(expr, Expr::Var(_)) {
+                expr = self.map_projection(expr)?;
             } else {
                 self.depth = base;
                 return Ok(expr);
             }
         }
+    }
+
+    /// `n {.name, .*, alias: expr, var}` after the variable.
+    fn map_projection(&mut self, base: Expr) -> Result<Expr, QueryError> {
+        self.expect(Token::LBrace, "`{`")?;
+        let mut items = Vec::new();
+        if !self.eat(&Token::RBrace) {
+            loop {
+                if self.eat(&Token::Dot) {
+                    if self.eat(&Token::Star) {
+                        items.push(MapItem::All);
+                    } else {
+                        items.push(MapItem::Property(self.ident("a property name")?));
+                    }
+                } else {
+                    let name = match self.peek() {
+                        Token::Ident(name) | Token::Str(name) => name.clone(),
+                        _ => {
+                            return Err(
+                                self.unexpected("`.property`, `.*`, `name: value` or a variable")
+                            );
+                        }
+                    };
+                    self.advance();
+                    if self.eat(&Token::Colon) {
+                        items.push(MapItem::Entry(name, self.expr()?));
+                    } else {
+                        items.push(MapItem::Var(name));
+                    }
+                }
+                if !self.eat(&Token::Comma) {
+                    break;
+                }
+            }
+            self.expect(Token::RBrace, "`}` to close the map projection")?;
+        }
+        Ok(Expr::MapProjection {
+            base: Box::new(base),
+            items,
+        })
+    }
+
+    /// `[(a)-->(b) WHERE … | expr]` or `[p = (a)-->(b) | p]`, after `[`;
+    /// `None` (nothing consumed) when no pattern starts here.
+    fn pattern_comprehension(&mut self) -> Result<Option<Expr>, QueryError> {
+        let saved = self.position;
+        let starts = self.peek() == &Token::LParen
+            || (matches!(self.peek(), Token::Ident(_))
+                && self.peek_at(1) == &Token::Eq
+                && self.peek_at(2) == &Token::LParen);
+        if !starts {
+            return Ok(None);
+        }
+        let pattern = match self.pattern() {
+            Ok(pattern) if !pattern.steps.is_empty() => pattern,
+            _ => {
+                self.position = saved;
+                return Ok(None);
+            }
+        };
+        let filter = if self.eat_keyword("WHERE") {
+            Some(Box::new(self.expr()?))
+        } else {
+            None
+        };
+        self.expect(Token::Pipe, "`|` and what to collect for each match")?;
+        let map = self.expr()?;
+        self.expect(Token::RBracket, "`]` to close the pattern comprehension")?;
+        Ok(Some(Expr::PatternQuery {
+            kind: PatternKind::Collect,
+            patterns: vec![pattern],
+            filter,
+            map: Some(Box::new(map)),
+        }))
     }
 
     /// The end of `[from..to]`, with its `]`.
@@ -1096,10 +1249,8 @@ impl Parser<'_> {
                 if matches!(self.peek(), Token::Ident(_)) && self.keyword_at(1, "IN") {
                     return self.comprehension();
                 }
-                if self.peek() == &Token::LParen && self.try_pattern().is_some() {
-                    return Err(self.error(
-                        "pattern comprehensions (`[(a)-->(b) | …]`) are not supported yet",
-                    ));
+                if let Some(comprehension) = self.pattern_comprehension()? {
+                    return Ok(comprehension);
                 }
                 let mut items = Vec::new();
                 if !self.eat(&Token::RBracket) {
@@ -1166,6 +1317,23 @@ impl Parser<'_> {
                 };
                 self.expect(Token::RBrace, "`}` to close EXISTS")?;
                 return Ok(Expr::Exists { patterns, filter });
+            }
+            "count" if self.peek_at(1) == &Token::LBrace => {
+                self.position += 2;
+                self.eat_keyword("MATCH");
+                let patterns = self.patterns()?;
+                let filter = if self.eat_keyword("WHERE") {
+                    Some(Box::new(self.expr()?))
+                } else {
+                    None
+                };
+                self.expect(Token::RBrace, "`}` to close COUNT")?;
+                return Ok(Expr::PatternQuery {
+                    kind: PatternKind::Count,
+                    patterns,
+                    filter,
+                    map: None,
+                });
             }
             "exists" if call_next => {
                 self.position += 2;
@@ -1511,7 +1679,7 @@ mod tests {
                 .contains("both ways")
         );
         assert!(
-            parse("CALL { MATCH (n) RETURN n } RETURN 1")
+            parse("CALL { MATCH (n) RETURN n } IN TRANSACTIONS RETURN 1")
                 .unwrap_err()
                 .to_string()
                 .contains("not supported")

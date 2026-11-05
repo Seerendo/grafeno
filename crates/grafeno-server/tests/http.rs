@@ -1475,3 +1475,63 @@ async fn community_endpoints() {
     assert_eq!(custom["text"], "The compiler team.");
     assert_eq!(custom["custom"], true);
 }
+
+async fn raw(app: &Router, method: &str, uri: &str, body: Vec<u8>) -> (StatusCode, Vec<u8>) {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::from(body))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    (
+        status,
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+}
+
+#[tokio::test]
+async fn csv_and_graphml_endpoints() {
+    let app = app(None);
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/k/query",
+        Some(json!({ "query": "CREATE (a:Person {name: 'Ana'})-[:knows {since: 2020}]->(b:Person {name: 'Bob'})" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, graphml) = raw(&app, "GET", "/v1/k/export.graphml", Vec::new()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&graphml).contains("<graphml"));
+    let (status, report) = raw(&app, "POST", "/v1/copy/import/graphml", graphml).await;
+    assert_eq!(status, StatusCode::OK);
+    let report: Value = serde_json::from_slice(&report).unwrap();
+    assert_eq!(
+        (report["nodes"].as_u64(), report["edges"].as_u64()),
+        (Some(2), Some(1))
+    );
+
+    let (_, nodes) = raw(&app, "GET", "/v1/k/export/nodes.csv", Vec::new()).await;
+    let (_, edges) = raw(&app, "GET", "/v1/k/export/edges.csv", Vec::new()).await;
+    assert!(String::from_utf8_lossy(&edges).contains("since:int"));
+    raw(&app, "POST", "/v1/csv/import/nodes.csv", nodes).await;
+    let (status, report) = raw(&app, "POST", "/v1/csv/import/edges.csv", edges).await;
+    assert_eq!(status, StatusCode::OK);
+    let report: Value = serde_json::from_slice(&report).unwrap();
+    assert_eq!(report["edges"], 1, "{report}");
+    let (_, found) = call(
+        &app,
+        "POST",
+        "/v1/csv/query",
+        Some(json!({ "query": "MATCH (a)-[r:knows]->(b) RETURN a.name, r.since, b.name" })),
+    )
+    .await;
+    assert_eq!(found["rows"], json!([["Ana", 2020, "Bob"]]));
+}

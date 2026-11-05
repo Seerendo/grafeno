@@ -30,6 +30,7 @@ mod constraints;
 mod db;
 mod dump;
 mod index;
+mod interchange;
 mod memory;
 mod merge;
 mod namespace;
@@ -55,6 +56,7 @@ pub use db::{
 pub use dump::{DumpStats, EXPORT_FORMAT, EXPORT_VERSION, ImportOptions, Record};
 pub use grafeno_core::*;
 pub use index::{FuzzyHit, IndexDef, IndexInfo, IndexRange};
+pub use interchange::{IMPORT_ID, InterchangeOptions, InterchangeStats};
 pub use memory::{DEFAULT_IMPORTANCE, MemoryState, names_of, normalize_name};
 pub use merge::{
     Conflict, ConflictKind, DEFAULT_STRONG_KEYS, MergeOptions, MergeRecord, MergeReport,

@@ -182,28 +182,47 @@ enum Command {
         #[arg(long, conflicts_with = "namespaces")]
         all: bool,
     },
-    /// Write namespaces (all by default) as a JSON Lines export.
+    /// Write namespaces (all by default) as a JSON Lines export, or one
+    /// namespace as CSV (`nodes.csv` and `edges.csv` in a folder) or GraphML.
     Export {
         #[command(flatten)]
         db: FileArgs,
         #[arg(long = "namespace", short = 'n')]
         namespaces: Vec<String>,
-        /// Output file; standard output when absent.
+        /// Output file (a folder for CSV); standard output when absent.
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
+        #[arg(long, value_enum, default_value = "jsonl")]
+        format: Format,
     },
-    /// Import a JSON Lines export in one transaction.
+    /// Import a JSON Lines export in one transaction, or CSV or GraphML
+    /// into one namespace.
     Import {
         #[command(flatten)]
         db: FileArgs,
-        /// Export file, or `-` for standard input.
+        /// Export file, or `-` for standard input (CSV: the nodes file).
         input: PathBuf,
         /// Load in chunks of 20,000 records with a single flush at the end:
         /// faster for large exports, but an error leaves the chunks before
         /// it in place.
         #[arg(long)]
         bulk: bool,
+        #[arg(long, value_enum, default_value = "jsonl")]
+        format: Format,
+        /// The namespace that CSV and GraphML go into.
+        #[arg(long = "namespace", short = 'n')]
+        namespace: Option<String>,
+        /// CSV: the edges file, read after the nodes.
+        #[arg(long)]
+        edges: Option<PathBuf>,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Format {
+    Jsonl,
+    Csv,
+    Graphml,
 }
 
 /// Where `grafeno keys` works: a database file (with no server using it),
@@ -676,6 +695,77 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             db,
             namespaces,
             output,
+            format,
+        } if format != Format::Jsonl => {
+            let [ns] = namespaces.as_slice() else {
+                return Err("CSV and GraphML export one namespace: give --namespace".into());
+            };
+            let db = db.open()?;
+            let read = db.begin_read()?;
+            if format == Format::Csv {
+                let folder =
+                    output.ok_or("CSV needs --output, a folder for nodes.csv and edges.csv")?;
+                std::fs::create_dir_all(&folder)?;
+                let mut nodes =
+                    std::io::BufWriter::new(std::fs::File::create(folder.join("nodes.csv"))?);
+                let mut edges =
+                    std::io::BufWriter::new(std::fs::File::create(folder.join("edges.csv"))?);
+                let n = read.export_nodes_csv(ns, &mut nodes)?;
+                let e = read.export_edges_csv(ns, &mut edges)?;
+                eprintln!("exported {n} nodes and {e} edges to {}", folder.display());
+            } else {
+                let (n, e) = match output {
+                    Some(path) => read.export_graphml(
+                        ns,
+                        &mut std::io::BufWriter::new(std::fs::File::create(path)?),
+                    )?,
+                    None => read.export_graphml(ns, &mut std::io::stdout().lock())?,
+                };
+                eprintln!("exported {n} nodes and {e} edges");
+            }
+        }
+        Command::Import {
+            db,
+            input,
+            format,
+            namespace,
+            edges,
+            ..
+        } if format != Format::Jsonl => {
+            let ns = namespace.ok_or("CSV and GraphML go into one namespace: give --namespace")?;
+            let db = db.open()?;
+            let options = grafeno::InterchangeOptions::default();
+            let open = |path: &PathBuf| -> std::io::Result<Box<dyn std::io::BufRead>> {
+                Ok(if path.as_os_str() == "-" {
+                    Box::new(std::io::BufReader::new(std::io::stdin()))
+                } else {
+                    Box::new(std::io::BufReader::new(std::fs::File::open(path)?))
+                })
+            };
+            let mut stats = if format == Format::Csv {
+                db.import_nodes_csv(&ns, open(&input)?, &options)?
+            } else {
+                db.import_graphml(&ns, open(&input)?, &options)?
+            };
+            if let Some(edges) = edges {
+                let more = db.import_edges_csv(&ns, open(&edges)?, &options)?;
+                stats.edges += more.edges;
+                stats.failed += more.failed;
+                stats.errors.extend(more.errors);
+            }
+            for error in &stats.errors {
+                eprintln!("skipped: {error}");
+            }
+            eprintln!(
+                "imported {} nodes and {} edges into {ns}; {} skipped",
+                stats.nodes, stats.edges, stats.failed
+            );
+        }
+        Command::Export {
+            db,
+            namespaces,
+            output,
+            ..
         } => {
             let db = db.open()?;
             let read = db.begin_read()?;
@@ -691,7 +781,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 stats.namespaces, stats.nodes, stats.edges
             );
         }
-        Command::Import { db, input, bulk } => {
+        Command::Import {
+            db, input, bulk, ..
+        } => {
             let db = db.open()?;
             let options = if bulk {
                 grafeno::ImportOptions::bulk()

@@ -500,6 +500,7 @@ fn validate(statement: &Statement) -> Result<(), QueryError> {
                         "a query cannot end with WITH: add RETURN, or a write",
                     ));
                 }
+                Clause::Subquery(query) => validate_subquery(query)?,
                 Clause::With(projection) => {
                     for item in &projection.items {
                         if !item.aliased && !matches!(item.expr, Expr::Var(_)) {
@@ -527,6 +528,29 @@ fn validate(statement: &Statement) -> Result<(), QueryError> {
         }
     }
     Ok(())
+}
+
+/// A `CALL { … }` body: RETURN only last; it ends with RETURN or a write.
+fn validate_subquery(query: &Query) -> Result<(), QueryError> {
+    let last = query.clauses.len().saturating_sub(1);
+    for (index, clause) in query.clauses.iter().enumerate() {
+        match clause {
+            Clause::Return(_) if index != last => {
+                return Err(QueryError::runtime(
+                    "RETURN must be the last clause of a CALL { } subquery",
+                ));
+            }
+            Clause::Subquery(inner) => validate_subquery(inner)?,
+            _ => {}
+        }
+    }
+    match query.clauses.last() {
+        Some(Clause::Return(_)) => Ok(()),
+        Some(clause) if clause.writes() => Ok(()),
+        _ => Err(QueryError::runtime(
+            "a CALL { } subquery ends with RETURN, or with a write",
+        )),
+    }
 }
 
 // ---------------------------------------------------------------- runner
@@ -989,6 +1013,51 @@ impl<'a> Runner<'a> {
                     }
                 }
             }
+            Clause::Subquery(query) => {
+                let mut out = Vec::new();
+                let mut added: Vec<String> = Vec::new();
+                for row in flow.rows {
+                    let mut inner = Flow {
+                        rows: vec![row.clone()],
+                        vars: flow.vars.clone(),
+                    };
+                    let mut returned = None;
+                    for clause in &query.clauses {
+                        if let Clause::Return(projection) = clause {
+                            let edges = EdgeFilter::any();
+                            let ctx = self.ctx(&edges);
+                            returned = Some(project(
+                                &ctx,
+                                std::mem::take(&mut inner.rows),
+                                projection,
+                                &inner.vars,
+                            )?);
+                            break;
+                        }
+                        inner = self.apply(clause, inner, None)?;
+                    }
+                    match returned {
+                        Some((columns, values)) => {
+                            if let Some(clash) = columns.iter().find(|c| flow.vars.contains(c)) {
+                                return Err(QueryError::runtime(format!(
+                                    "the CALL {{ }} subquery returns `{clash}`, which is already a variable outside it"
+                                )));
+                            }
+                            for values in values {
+                                let mut next = row.clone();
+                                next.extend(columns.iter().cloned().zip(values));
+                                out.push(next);
+                            }
+                            added = columns;
+                        }
+                        // A subquery without RETURN (writes) keeps the row.
+                        None => out.push(row),
+                    }
+                    self.budget.rows(out.len())?;
+                }
+                flow.rows = out;
+                flow.bind(added);
+            }
             Clause::Return(_) => unreachable!("RETURN ends the query"),
         }
         Ok(flow)
@@ -1070,6 +1139,33 @@ fn yielded(call: &ProcedureCall) -> Result<Vec<(String, String)>, QueryError> {
 }
 
 /// Whether a pattern predicate matches from `row` at least once.
+/// Every match of the patterns from `row` that passes `filter` (for
+/// `COUNT { }` and pattern comprehensions).
+pub(crate) fn pattern_rows(
+    ctx: &Context,
+    row: &Row,
+    patterns: &[Pattern],
+    filter: Option<&Expr>,
+) -> Result<Vec<Row>, QueryError> {
+    let mut rows = vec![row.clone()];
+    for pattern in patterns {
+        rows = match_pattern(ctx, rows, pattern, &Matcher::default())?;
+        if rows.is_empty() {
+            return Ok(rows);
+        }
+    }
+    if let Some(filter) = filter {
+        let mut kept = Vec::with_capacity(rows.len());
+        for row in rows {
+            if truth(&eval(ctx, filter, Scope::Row(&row))?)? == Some(true) {
+                kept.push(row);
+            }
+        }
+        rows = kept;
+    }
+    Ok(rows)
+}
+
 pub(crate) fn exists(
     ctx: &Context,
     row: &Row,
@@ -1105,6 +1201,43 @@ struct Partial {
     used: Vec<EdgeId>,
     /// The node bound at each position of the pattern.
     nodes: Vec<Option<NodeId>>,
+    /// The edges of each step, from its left node to its right one (kept
+    /// only when the pattern has a path variable).
+    steps: Vec<Vec<EdgeId>>,
+}
+
+/// The path a match went through: nodes and edges in written order.
+fn build_path(
+    ctx: &Context,
+    nodes: &[Option<NodeId>],
+    steps: &[Vec<EdgeId>],
+) -> Result<Value, QueryError> {
+    let start = nodes[0].expect("every position is bound after a match");
+    let node = |id: NodeId| -> Result<Arc<Node>, QueryError> {
+        ctx.node(id)?
+            .map(Arc::new)
+            .ok_or_else(|| QueryError::runtime(format!("node {id} disappeared during the query")))
+    };
+    let mut path = crate::value::Path {
+        nodes: vec![node(start)?],
+        edges: Vec::new(),
+    };
+    let mut current = start;
+    for step in steps {
+        for &edge_id in step {
+            let edge = ctx
+                .edge(edge_id)?
+                .ok_or_else(|| QueryError::runtime(format!("edge {edge_id} disappeared")))?;
+            current = if edge.from == current {
+                edge.to
+            } else {
+                edge.from
+            };
+            path.edges.push(Arc::new(edge));
+            path.nodes.push(node(current)?);
+        }
+    }
+    Ok(Value::Path(Arc::new(path)))
 }
 
 /// What a match may use besides the pattern: the `WHERE` conditions (to
@@ -1156,6 +1289,7 @@ fn match_pattern(
                     row: row.clone(),
                     used: Vec::new(),
                     nodes: vec![None; nodes.len()],
+                    steps: vec![Vec::new(); pattern.steps.len()],
                 };
                 start.nodes[anchor] = Some(node.id);
                 if let Some(var) = anchor_var {
@@ -1179,6 +1313,7 @@ fn match_pattern(
                             rel.direction,
                             target,
                             step + 1,
+                            (step, false),
                         )?);
                     }
                     ctx.budget.rows(next.len())?;
@@ -1198,12 +1333,17 @@ fn match_pattern(
                             reverse(rel.direction),
                             nodes[step],
                             step,
+                            (step, true),
                         )?);
                     }
                     ctx.budget.rows(next.len())?;
                     states = next;
                 }
-                for state in states {
+                for mut state in states {
+                    if let Some(var) = &pattern.path {
+                        let path = build_path(ctx, &state.nodes, &state.steps)?;
+                        state.row.insert(var.clone(), path);
+                    }
                     if let Some(filter) = matcher.filter
                         && truth(&eval(ctx, filter, Scope::Row(&state.row))?)? != Some(true)
                     {
@@ -1410,6 +1550,10 @@ fn target_node(
     Ok(node_fits(ctx, &node, pattern, row)?.then_some(node))
 }
 
+/// Extends a partial match by one step of the pattern. `(step, leftwards)`
+/// says which step it is and whether it is walked against the written
+/// order (from its right node), so paths keep the written order.
+#[allow(clippy::too_many_arguments)]
 fn expand(
     ctx: &Context,
     state: Partial,
@@ -1418,6 +1562,7 @@ fn expand(
     direction: Direction,
     target: &NodePattern,
     target_index: usize,
+    (step, leftwards): (usize, bool),
 ) -> Result<Vec<Partial>, QueryError> {
     let mut filter = ctx.edges.clone();
     for label in &rel.labels {
@@ -1452,6 +1597,7 @@ fn expand(
             };
             let mut next = state.clone();
             next.used.push(edge_id);
+            next.steps[step] = vec![edge_id];
             next.nodes[target_index] = Some(other);
             if let Some(var) = &target.var {
                 next.row.insert(var.clone(), Value::Node(node));
@@ -1501,18 +1647,27 @@ fn expand(
         };
         let mut next = state.clone();
         next.nodes[target_index] = Some(end);
+        // The edges from `from` to `end`.
+        let mut ids = Vec::new();
+        let mut current = end;
+        while let Some(&(previous, edge_id)) = parent.get(&current) {
+            ids.push(edge_id);
+            current = previous;
+        }
+        ids.reverse();
         if let Some(var) = &rel.var {
             let mut edges = Vec::new();
-            let mut current = end;
-            while let Some(&(previous, edge_id)) = parent.get(&current) {
+            for &edge_id in &ids {
                 if let Some(edge) = ctx.edge(edge_id)? {
                     edges.push(Value::Edge(Arc::new(edge)));
                 }
-                current = previous;
             }
-            edges.reverse();
             next.row.insert(var.clone(), Value::List(edges));
         }
+        if leftwards {
+            ids.reverse();
+        }
+        next.steps[step] = ids;
         if let Some(var) = &target.var {
             next.row.insert(var.clone(), Value::Node(node));
         }
@@ -2223,6 +2378,14 @@ fn clause_variables(clause: &Clause) -> Vec<String> {
         Clause::Call(call) => yielded(call)
             .map(|items| items.into_iter().map(|(_, alias)| alias).collect())
             .unwrap_or_default(),
+        Clause::Subquery(query) => match query.clauses.last() {
+            Some(Clause::Return(projection)) => projection
+                .items
+                .iter()
+                .map(|item| item.alias.clone())
+                .collect(),
+            _ => Vec::new(),
+        },
         _ => Vec::new(),
     }
 }
@@ -2394,6 +2557,15 @@ fn describe(clause: &Clause, bound: &HashSet<String>, info: &PlanInfo) -> String
         Clause::Foreach { var, body, .. } => format!(
             "for each {var}: {}",
             body.iter().map(Clause::name).collect::<Vec<_>>().join(", ")
+        ),
+        Clause::Subquery(query) => format!(
+            "once per row: {}",
+            query
+                .clauses
+                .iter()
+                .map(Clause::name)
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
     }
 }

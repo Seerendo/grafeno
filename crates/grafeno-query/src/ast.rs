@@ -111,6 +111,10 @@ pub(crate) enum Clause {
         body: Vec<Clause>,
     },
     Return(Projection),
+    /// `CALL { … }`: the clauses run once per row, which sees the row's
+    /// variables; what the inner RETURN gives is added to it (a subquery
+    /// without RETURN keeps the rows as they were).
+    Subquery(Query),
 }
 
 impl Clause {
@@ -124,7 +128,7 @@ impl Clause {
                 | Clause::Delete(_)
                 | Clause::Retract(_)
                 | Clause::Foreach { .. }
-        )
+        ) || matches!(self, Clause::Subquery(query) if query.clauses.iter().any(Clause::writes))
     }
 
     /// The keyword, for plans and error messages.
@@ -143,6 +147,7 @@ impl Clause {
             Clause::Retract(_) => "RETRACT",
             Clause::Foreach { .. } => "FOREACH",
             Clause::Return(_) => "RETURN",
+            Clause::Subquery(_) => "CALL { }",
         }
     }
 }
@@ -162,6 +167,11 @@ pub(crate) struct ProcedureCall {
 pub(crate) struct Pattern {
     pub(crate) start: NodePattern,
     pub(crate) steps: Vec<(RelPattern, NodePattern)>,
+    /// `p = (…)`: the variable that holds the matched path.
+    pub(crate) path: Option<String>,
+    /// `shortestPath(…)` (`Some(false)`) or `allShortestPaths(…)`
+    /// (`Some(true)`).
+    pub(crate) shortest: Option<bool>,
 }
 
 impl Pattern {
@@ -171,7 +181,7 @@ impl Pattern {
             .collect()
     }
 
-    /// Every variable the pattern names, in order.
+    /// Every variable the pattern names, in order (the path's last).
     pub(crate) fn variables(&self) -> Vec<&str> {
         std::iter::once(self.start.var.as_deref())
             .chain(
@@ -179,6 +189,7 @@ impl Pattern {
                     .iter()
                     .flat_map(|(rel, node)| [rel.var.as_deref(), node.var.as_deref()]),
             )
+            .chain(std::iter::once(self.path.as_deref()))
             .flatten()
             .collect()
     }
@@ -272,6 +283,8 @@ pub(crate) enum BinOp {
     StartsWith,
     EndsWith,
     In,
+    /// `=~`: the whole string matches the regular expression.
+    Regex,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -351,6 +364,38 @@ pub(crate) enum Expr {
         patterns: Vec<Pattern>,
         filter: Option<Box<Expr>>,
     },
+    /// `COUNT { MATCH … WHERE … }`: how many times the patterns match;
+    /// `[(a)-->(b) WHERE … | b.name]`: a list with `map` for each match.
+    PatternQuery {
+        kind: PatternKind,
+        patterns: Vec<Pattern>,
+        filter: Option<Box<Expr>>,
+        map: Option<Box<Expr>>,
+    },
+    /// `n {.name, .*, alias: expr, var}`: a map built from a node, an
+    /// edge or a map.
+    MapProjection {
+        base: Box<Expr>,
+        items: Vec<MapItem>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PatternKind {
+    Count,
+    Collect,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum MapItem {
+    /// `.key`
+    Property(String),
+    /// `.*`
+    All,
+    /// `var`: the variable under its own name.
+    Var(String),
+    /// `name: expr`
+    Entry(String, Expr),
 }
 
 pub(crate) const AGGREGATES: &[&str] = &[
@@ -392,7 +437,18 @@ impl Expr {
             | Expr::Param(_)
             | Expr::Var(_)
             | Expr::CountStar
-            | Expr::Exists { .. } => {}
+            | Expr::Exists { .. }
+            | Expr::PatternQuery { .. } => {}
+            Expr::MapProjection { base, items } => {
+                base.visit(f);
+                for item in items {
+                    match item {
+                        MapItem::Var(name) => f(&Expr::Var(name.clone())),
+                        MapItem::Entry(_, value) => value.visit(f),
+                        MapItem::Property(_) | MapItem::All => {}
+                    }
+                }
+            }
             Expr::Property(inner, _) | Expr::Unary(_, inner) | Expr::HasLabels(inner, _) => {
                 inner.visit(f)
             }

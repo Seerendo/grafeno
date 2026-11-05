@@ -1362,7 +1362,8 @@ As built (`crates/grafeno/src/changes.rs`, table `changes`, layout version
 
 #### Phase 12: compatibility and speed
 
-**12.1 Wider Cypher and tool compatibility.**
+**12.1 Wider Cypher and tool compatibility** (done, except the two items
+named below).
 
 - The rest of common Cypher: path variables (`p = (…)`, `nodes(p)`,
   `relationships(p)`, `shortestPath`), `CALL { … }` subqueries, `EXISTS
@@ -1372,6 +1373,51 @@ As built (`crates/grafeno/src/changes.rs`, table `changes`, layout version
 - Tools: import and export in CSV and GraphML; a Bolt protocol endpoint
   (a subset) so Neo4j drivers and tools can connect, if the TCK subset is
   far enough along.
+
+As built:
+
+- Paths are a value (`Value::Path`, nodes and edges in written order):
+  `p = (…)`, `nodes(p)`, `relationships(p)`, `length(p)`. A match keeps the
+  edges of each step, oriented left to right whichever end it started
+  from, only used when the pattern names a path. `shortestPath` and
+  `allShortestPaths` take one edge pattern and use the breadth-first search
+  variable-length edges already use, so `allShortestPaths` gives one path
+  per end.
+- `CALL { … }` runs once per row, which it sees whole (no need for `WITH x`,
+  which also works); what its RETURN gives multiplies the row, and without
+  RETURN (writes) the row stays. A name it returns may not exist outside.
+  It is one transaction: `IN TRANSACTIONS` and `UNION` inside are refused.
+- `COUNT { … }` and pattern comprehensions share `pattern_rows` with
+  `EXISTS { … }`; map projections are `n {.a, .*, k: v, var}`; `=~` matches
+  the whole string with the `regex` crate, whose time is linear in the text,
+  with compiled size bounded and expressions cached per thread. New
+  functions are in `morefns.rs`: `reverse`, `tail`, `isEmpty`, `toBoolean`,
+  `to…OrNull`, `to…List`, `ltrim`, `rtrim`, `left`, `right`, `char_length`,
+  `nullIf`, `asin`, `acos`, `atan`, `atan2`, `cot`, `degrees`, `radians`,
+  `haversin`, `isNaN`, `rand`, `randomUUID`, `elementId`.
+- Nested `CALL { }` and `FOREACH` count against the parser's depth limit;
+  all the new forms run under the query budget
+  (`tests/adversarial.rs`).
+- `crates/grafeno/src/interchange.rs`: CSV in `neo4j-admin import` headers
+  (`id:ID`, `:LABEL`, `name:type`, `:TEXT`; `:START_ID`, `:END_ID`, `:TYPE`,
+  `valid_from`, `valid_to`) and GraphML (APOC's `labels` and `label`).
+  Exports hold current knowledge: retracted facts stay out. Imports keep
+  Grafeno ids, so a re-import updates; other ids map to new nodes,
+  remembered per namespace (state kind `import.id`), so a later edges file
+  finds them. Bad rows are skipped and reported. `grafeno export` and
+  `grafeno import` take `--format csv|graphml`; the server has
+  `/v1/{ns}/export.graphml`, `/export/nodes.csv`, `/export/edges.csv` and
+  the same under `/import/` (admin role).
+- Conformance: `tests/conformance/scenarios.txt` holds 146 scenarios in the
+  TCK's form, run by `cargo test`. They are written by hand from the
+  language's semantics. **The official openCypher TCK is not vendored or
+  run**, so this suite is not a TCK score; five scenarios pin where Grafeno
+  differs on purpose.
+- **Not built: Bolt.** It depended on the TCK subset being far enough along,
+  and without running the official TCK there is no number to judge that by.
+- Measured (`examples/interchange_bench.rs`, 200 000 records): CSV exports
+  at 397 000 records a second and imports at 27 600; GraphML at 341 000 and
+  25 900.
 
 **12.2 Query optimization and performance under concurrency.**
 
@@ -1466,6 +1512,7 @@ spinning disk, on ARM, or for days at a time.
 | Fuzzy search for a damaged name among 100 000 people | 20 ms p50 (469 ms comparing with every node) | E1-mem | `resolve_speed.csv` |
 | Entity resolution by a match rule (2 000 damaged duplicates, 2 000 namesakes) | 95% found as same or review, precision of `same` 0.994 | E1-mem | `resolve_quality.csv` |
 | One current fact per source (50 000 job changes) | 14 000 facts/s (44 000 without); every person one current employer | E1-mem | `constraint_cost.csv` |
+| CSV and GraphML of 200 000 records | export 397 000 and 341 000 records/s; import 27 600 and 25 900 | E1-mem | `interchange.csv` |
 | Change log on 200 000 records | 29 500 records/s (35 000 without); reads 1.4 M entries/s | E1-mem | `change_log_cost.csv` |
 | NDJSON ingestion of 100 000 lines | 25 000 lines/s; a retry 360 000 lines/s, nothing written; commit to event 0.15 ms | E1-mem | `ingest_runs.csv` |
 | Community summaries of 50 000 nodes in 4 levels | 3.2 s first, 1.35 s unchanged; teams and departments found (purity 0.999); global search 0.06 ms | E1-mem | `community_*.csv` |
@@ -1489,6 +1536,8 @@ real binary. The ones that carry each guarantee:
 | Vector search keeps its quality | `grafeno/tests/vector_churn.rs` | deletes, reinserts, three rounds of churn and a compaction keep recall@10 at 0.95 or more, and reinserted vectors are found |
 | Records are matched by rule, with reasons | `grafeno/tests/resolve.rs`, `property_index.rs` (fuzzy), `src/textsim.rs` tests | measures against published values; strong keys decide either way; typos, swapped dates and namesakes; neighbors as evidence (and no links as no evidence); scans without indexes; pairs for deduplication; fuzzy indexes through updates, check and export |
 | Contradicting facts are ended, not lost | `grafeno/tests/constraints.rs` | invalidation as a new version (`KNOWN AT` sees what was believed), late facts shortened, facts without dates starting now, the same fact again, flag, reject, target and pair scopes, `own_only` agents flagged, existing contradictions, property history |
+| Common Cypher behaves as expected | `grafeno-query/tests/conformance.rs` (hand-written scenarios, not the official TCK), `cypher_more.rs`, `adversarial.rs`, `fuzz.rs` | 146 scenarios over MATCH, paths, RETURN, WITH, UNION, aggregation, nulls, numbers, strings, lists, subqueries, writes and errors; differences from Cypher pinned; nesting and budgets for the new forms |
+| Graphs go out and come back | `grafeno/tests/interchange.rs`, `grafeno-server/tests/http.rs` | CSV and GraphML round trips with types, text and dates; re-imports that update; files from other tools with their own ids; bad rows reported |
 | Every write is in the change log | `grafeno/tests/changes.rs`, `grafeno-server/tests/events.rs`, `upgrade.rs` | entries folded per record and numbered per namespace, nothing from aborted or failed writes in a group commit, the window and the gap, listeners; pages and server-sent events resuming after `Last-Event-ID`; NDJSON with keys, references and failing lines, retries as duplicates; signed webhooks, label filters, failures kept in place; extraction and summaries from the log; layout 11 upgrades with an empty log |
 | Communities summarize themselves | `grafeno-memory/tests/communities.rs`, `grafeno-server/tests/http.rs` and `mcp.rs` community tests | a summary per community naming its center and topic, refreshes that change nothing, members joining in place, an agent's text kept and marked stale, levels as communities of communities, global search, drill-down, recall without summaries, context with an overview |
 | Texts link to what they mention | `grafeno-memory/tests/extraction.rs`, `src/extract.rs` tests | patterns and their normalized values and offsets, phrases and sentence openers, the gazetteer on normalized text; known names, emails by index, value nodes, new names after two texts, namesakes settled by context or queued, decisions that last, dismissals, incremental runs, an agent's mentions through match rules |
@@ -1514,6 +1563,7 @@ cargo run --release -p grafeno --example resolve_bench -- 100000
 cargo run --release -p grafeno-memory --example extract_bench -- 5000 20000
 cargo run --release -p grafeno --example constraint_bench -- 10000 50000
 cargo run --release -p grafeno-memory --example community_bench -- 1000 50
+cargo run --release -p grafeno --example interchange_bench -- 100000
 cargo run --release -p grafeno --example changes_bench -- 100000
 cargo run --release -p grafeno-server --example events_bench -- 100000
 cargo test --release -p grafeno-query --test adversarial -- --nocapture

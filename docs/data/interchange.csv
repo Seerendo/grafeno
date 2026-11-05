@@ -1,0 +1,5 @@
+format,operation,records,seconds,records_per_s,mib
+CSV,export,199999,0.5,396595,19.3
+CSV,import,199999,7.25,27568,
+GraphML,export,199999,0.59,340742,40.0
+GraphML,import,199999,7.73,25869,

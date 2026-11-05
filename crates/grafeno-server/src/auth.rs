@@ -200,6 +200,7 @@ pub fn need(method: &str, path: &str) -> Need {
                 || rest == ["compact"]
                 // A webhook makes the server send requests: admins only.
                 || rest.first() == Some(&"webhooks")
+                || (rest.first() == Some(&"import") && method != "GET")
                 || (rest.first() == Some(&"match-rules") && method != "GET")
             {
                 Role::Admin

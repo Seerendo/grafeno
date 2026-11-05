@@ -49,6 +49,7 @@ pub(crate) fn free_vars(expr: &Expr) -> Option<HashSet<String>> {
             vars.insert(name.clone());
         }
         Expr::Exists { .. }
+        | Expr::PatternQuery { .. }
         | Expr::Comprehension { .. }
         | Expr::Quantified { .. }
         | Expr::Reduce { .. } => local = false,

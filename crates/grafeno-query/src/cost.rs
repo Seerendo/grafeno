@@ -175,6 +175,16 @@ impl<'i> Model<'i> {
             Clause::Delete(items) | Clause::Retract(items) => {
                 self.add(self.rows * items.len() as f64)
             }
+            Clause::Subquery(query) => {
+                let mut inner = Model::new(self.info);
+                inner.bound = self.bound.clone();
+                for clause in &query.clauses {
+                    inner.clause(clause);
+                }
+                self.add(self.rows * (1.0 + inner.cost));
+                self.rows = capped(self.rows * inner.rows.max(1.0));
+                self.bound.extend(inner.bound);
+            }
             Clause::Foreach { var, list, body } => {
                 let items = self.rows * list_length(list);
                 let mut inner = Model::new(self.info);
@@ -337,7 +347,7 @@ impl<'i> Model<'i> {
             Expr::Reduce {
                 init, list, expr, ..
             } => self.expr(init) + self.expr(list) + list_length(list) * (1.0 + self.expr(expr)),
-            Expr::Exists { patterns, .. } => {
+            Expr::Exists { patterns, .. } | Expr::PatternQuery { patterns, .. } => {
                 let mut model = Model::new(self.info);
                 model.bound = self.bound.clone();
                 let mut rows = 1.0;
@@ -362,7 +372,14 @@ fn children(expr: &Expr) -> Vec<&Expr> {
         | Expr::Param(_)
         | Expr::Var(_)
         | Expr::CountStar
-        | Expr::Exists { .. } => Vec::new(),
+        | Expr::Exists { .. }
+        | Expr::PatternQuery { .. } => Vec::new(),
+        Expr::MapProjection { base, items } => std::iter::once(&**base)
+            .chain(items.iter().filter_map(|item| match item {
+                crate::ast::MapItem::Entry(_, value) => Some(value),
+                _ => None,
+            }))
+            .collect(),
         Expr::Property(inner, _) | Expr::Unary(_, inner) | Expr::HasLabels(inner, _) => {
             vec![inner]
         }

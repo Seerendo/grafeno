@@ -9,7 +9,7 @@ use grafeno::{
 };
 
 use crate::QueryError;
-use crate::ast::{AGGREGATES, BinOp, Expr, Key, Quantifier, UnOp};
+use crate::ast::{AGGREGATES, BinOp, Expr, Key, MapItem, PatternKind, Quantifier, UnOp};
 use crate::limits::Budget;
 use crate::plan::PlanInfo;
 use crate::temporal::{self, DURATION_COMPONENTS, Duration, TIME_PARTS};
@@ -582,6 +582,75 @@ pub(crate) fn eval(ctx: &Context, expr: &Expr, scope: Scope) -> Result<Value, Qu
             patterns,
             filter.as_deref(),
         )?)),
+        Expr::PatternQuery {
+            kind,
+            patterns,
+            filter,
+            map,
+        } => {
+            let rows = crate::exec::pattern_rows(ctx, &scope.row(), patterns, filter.as_deref())?;
+            match kind {
+                PatternKind::Count => Ok(Value::Int(rows.len() as i64)),
+                PatternKind::Collect => {
+                    let mut out = Vec::with_capacity(rows.len());
+                    for row in &rows {
+                        ctx.budget.work(1)?;
+                        out.push(match map {
+                            Some(map) => eval(ctx, map, Scope::Row(row))?,
+                            None => Value::Null,
+                        });
+                    }
+                    let value = Value::List(out);
+                    ctx.budget.value(&value)?;
+                    Ok(value)
+                }
+            }
+        }
+        Expr::MapProjection { base, items } => {
+            let target = eval(ctx, base, scope)?;
+            if target.is_null() {
+                return Ok(Value::Null);
+            }
+            let mut map = std::collections::BTreeMap::new();
+            for item in items {
+                match item {
+                    MapItem::Property(key) => {
+                        map.insert(
+                            key.clone(),
+                            property(ctx, &target, &Key::Prop(key.clone()))?,
+                        );
+                    }
+                    MapItem::All => match &target {
+                        Value::Node(node) => {
+                            for (key, value) in &node.props {
+                                map.insert(key.clone(), Value::from_json(value));
+                            }
+                        }
+                        Value::Edge(edge) => {
+                            for (key, value) in &edge.props {
+                                map.insert(key.clone(), Value::from_json(value));
+                            }
+                        }
+                        Value::Map(entries) => {
+                            map.extend(entries.iter().map(|(k, v)| (k.clone(), v.clone())));
+                        }
+                        other => {
+                            return Err(error(format!(
+                                "a map projection needs a node, an edge or a map, not a {}",
+                                other.type_name()
+                            )));
+                        }
+                    },
+                    MapItem::Var(name) => {
+                        map.insert(name.clone(), eval(ctx, &Expr::Var(name.clone()), scope)?);
+                    }
+                    MapItem::Entry(name, value) => {
+                        map.insert(name.clone(), eval(ctx, value, scope)?);
+                    }
+                }
+            }
+            Ok(Value::Map(map))
+        }
         Expr::Call {
             name,
             distinct,
@@ -712,7 +781,43 @@ fn binary(op: BinOp, left: &Value, right: &Value) -> Result<Value, QueryError> {
                 )));
             }
         },
+        BinOp::Regex => match (left, right) {
+            (Value::Str(text), Value::Str(pattern)) => Value::Bool(regex_matches(pattern, text)?),
+            _ => {
+                return Err(error(format!(
+                    "=~ needs a string and a regular expression, got a {} and a {}",
+                    left.type_name(),
+                    right.type_name()
+                )));
+            }
+        },
         BinOp::And | BinOp::Or | BinOp::Xor => unreachable!("handled with short-circuit"),
+    })
+}
+
+/// Whether the whole of `text` matches `pattern` (as Cypher's `=~`).
+/// Compiled expressions are kept per thread; their size is bounded, and
+/// matching takes linear time, so a pattern cannot stall a query.
+fn regex_matches(pattern: &str, text: &str) -> Result<bool, QueryError> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        static CACHE: RefCell<HashMap<String, regex::Regex>> = RefCell::new(HashMap::new());
+    }
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if !cache.contains_key(pattern) {
+            let compiled = regex::RegexBuilder::new(&format!("^(?:{pattern})$"))
+                .size_limit(1 << 20)
+                .dfa_size_limit(1 << 20)
+                .build()
+                .map_err(|e| error(format!("invalid regular expression {pattern:?}: {e}")))?;
+            if cache.len() >= 128 {
+                cache.clear();
+            }
+            cache.insert(pattern.to_owned(), compiled);
+        }
+        Ok(cache[pattern].is_match(text))
     })
 }
 
@@ -1042,8 +1147,19 @@ fn function(ctx: &Context, name: &str, args: Vec<Value>) -> Result<Value, QueryE
     // Most functions return null for a null argument.
     let strict = !matches!(
         name,
-        "coalesce" | "now" | "datetime" | "time" | "range" | "date" | "timestamp" | "pi" | "e"
-    );
+        "coalesce"
+            | "now"
+            | "datetime"
+            | "time"
+            | "range"
+            | "date"
+            | "timestamp"
+            | "pi"
+            | "e"
+            | "nullif"
+            | "rand"
+            | "randomuuid"
+    ) && !name.ends_with("ornull");
     if strict && args.iter().any(Value::is_null) {
         return Ok(Value::Null);
     }
@@ -1153,6 +1269,7 @@ fn function(ctx: &Context, name: &str, args: Vec<Value>) -> Result<Value, QueryE
         "size" | "length" => {
             arity(name, &args, 1..=1)?;
             match &args[0] {
+                Value::Path(path) if name == "length" => Value::Int(path.edges.len() as i64),
                 Value::Str(s) => Value::Int(s.chars().count() as i64),
                 Value::List(items) => Value::Int(items.len() as i64),
                 Value::Map(map) => Value::Int(map.len() as i64),
@@ -1434,9 +1551,47 @@ fn function(ctx: &Context, name: &str, args: Vec<Value>) -> Result<Value, QueryE
                 None => return Err(error(format!("unknown function {other}()"))),
             }
         }
-        other => match crate::algorithms::function(ctx, other, &args) {
+        // `toIntegerOrNull(x)` and the like: null instead of an error.
+        other if other.ends_with("ornull") && other.starts_with("to") => {
+            let base = &other[..other.len() - "ornull".len()];
+            if args.iter().any(Value::is_null) {
+                return Ok(Value::Null);
+            }
+            match function(ctx, base, args) {
+                Ok(value) => value,
+                Err(_) => Value::Null,
+            }
+        }
+        // `toIntegerList(list)` and the like: each item, null when it fails.
+        "tointegerlist" | "tofloatlist" | "tostringlist" => {
+            arity(name, &args, 1..=1)?;
+            let base = &name[..name.len() - "list".len()];
+            match &args[0] {
+                Value::List(items) => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for item in items {
+                        out.push(if item.is_null() {
+                            Value::Null
+                        } else {
+                            function(ctx, base, vec![item.clone()]).unwrap_or(Value::Null)
+                        });
+                    }
+                    Value::List(out)
+                }
+                other => {
+                    return Err(error(format!(
+                        "{name}() needs a list, not a {}",
+                        other.type_name()
+                    )));
+                }
+            }
+        }
+        other => match crate::morefns::function(other, &args) {
             Some(result) => result?,
-            None => return Err(error(format!("unknown function {other}()"))),
+            None => match crate::algorithms::function(ctx, other, &args) {
+                Some(result) => result?,
+                None => return Err(error(format!("unknown function {other}()"))),
+            },
         },
     })
 }

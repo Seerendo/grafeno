@@ -1,0 +1,713 @@
+# Cypher conformance scenarios, in the style of the openCypher TCK:
+# a graph, a query, the expected result. Written by hand from the language's
+# semantics; these are NOT the official TCK's files. Each scenario runs on a
+# new database.
+#
+#   === name
+#   given: statements (one per `given:`)
+#   when: the query (may span lines)
+#   then: expected rows as JSON, in order
+#   then any order: expected rows as JSON, in any order
+#   then error: text the error must contain
+#
+# Nodes and edges are compared by what the query asks of them, so scenarios
+# return properties rather than whole records.
+#
+# Grafeno's model needs a label on every node, so the graphs are built with
+# `:N` where Cypher would allow none (see "Differences from Cypher" in
+# docs/query-language.md).
+
+# ---------------------------------------------------------------- MATCH
+
+=== match all nodes
+given: CREATE (:N {n: 1}), (:N {n: 2})
+when: MATCH (a) RETURN a.n
+then any order: [[1], [2]]
+
+=== match by label
+given: CREATE (:A {n: 1}), (:B {n: 2}), (:A:B {n: 3})
+when: MATCH (a:A) RETURN a.n
+then any order: [[1], [3]]
+
+=== match by several labels
+given: CREATE (:A {n: 1}), (:B {n: 2}), (:A:B {n: 3})
+when: MATCH (a:A:B) RETURN a.n
+then: [[3]]
+
+=== match by properties
+given: CREATE (:N {n: 1, m: 'x'}), (:N {n: 2, m: 'x'})
+when: MATCH (a {n: 2, m: 'x'}) RETURN a.n
+then: [[2]]
+
+=== match on an empty graph
+when: MATCH (a) RETURN a
+then: []
+
+=== directed edges
+given: CREATE (:N {n: 1})-[:T]->(:N {n: 2})
+when: MATCH (a)-[:T]->(b) RETURN a.n, b.n
+then: [[1, 2]]
+
+=== incoming edges
+given: CREATE (:N {n: 1})-[:T]->(:N {n: 2})
+when: MATCH (a)<-[:T]-(b) RETURN a.n, b.n
+then: [[2, 1]]
+
+=== undirected edges match both ways
+given: CREATE (:N {n: 1})-[:T]->(:N {n: 2})
+when: MATCH (a)-[:T]-(b) RETURN a.n, b.n
+then any order: [[1, 2], [2, 1]]
+
+=== edge labels as alternatives
+given: CREATE (a:N {n: 1}), (a)-[:X]->(:N {n: 2}), (a)-[:Y]->(:N {n: 3}), (a)-[:Z]->(:N {n: 4})
+when: MATCH ({n: 1})-[:X|Y]->(b) RETURN b.n
+then any order: [[2], [3]]
+
+=== edge properties
+given: CREATE (a:N {n: 1}), (a)-[:T {w: 1}]->(:N {n: 2}), (a)-[:T {w: 2}]->(:N {n: 3})
+when: MATCH ()-[:T {w: 2}]->(b) RETURN b.n
+then: [[3]]
+
+=== one edge is used once per pattern
+given: CREATE (:N {n: 1})-[:T]->(:N {n: 2})
+when: MATCH (a)-[:T]-(b)-[:T]-(c) RETURN a.n
+then: []
+
+=== a self loop
+given: CREATE (a:N {n: 1}), (a)-[:T]->(a)
+when: MATCH (a)-[:T]->(b) RETURN a.n, b.n
+then: [[1, 1]]
+
+=== a bound variable joins patterns
+given: CREATE (a:N {n: 1}), (a)-[:T]->(:N {n: 2}), (a)-[:U]->(:N {n: 3}), (:N {n: 4})-[:U]->(:N {n: 5})
+when: MATCH (x)-[:T]->(), (x)-[:U]->(y) RETURN y.n
+then: [[3]]
+
+=== unrelated patterns multiply
+given: CREATE (:N {n: 1}), (:N {n: 2})
+when: MATCH (a), (b) RETURN count(*)
+then: [[4]]
+
+=== two MATCH clauses
+given: CREATE (a:N {n: 1})-[:T]->(:N {n: 2})
+when: MATCH (a {n: 1}) MATCH (a)-[:T]->(b) RETURN b.n
+then: [[2]]
+
+=== WHERE on a property
+given: CREATE (:N {n: 1}), (:N {n: 2}), (:N {n: 3})
+when: MATCH (a) WHERE a.n > 1 RETURN a.n
+then any order: [[2], [3]]
+
+=== WHERE on a label
+given: CREATE (:A {n: 1}), (:B {n: 2})
+when: MATCH (a) WHERE a:B RETURN a.n
+then: [[2]]
+
+=== WHERE with a pattern predicate
+given: CREATE (a:N {n: 1})-[:T]->(:N {n: 2})
+when: MATCH (x) WHERE (x)-[:T]->() RETURN x.n
+then: [[1]]
+
+=== WHERE NOT with a pattern predicate
+given: CREATE (a:N {n: 1})-[:T]->(:N {n: 2})
+when: MATCH (x) WHERE NOT (x)-[:T]->() RETURN x.n
+then: [[2]]
+
+=== WHERE comparing a null is not true
+given: CREATE (:N {n: 1}), (:N {m: 2})
+when: MATCH (a) WHERE a.n = 1 OR a.n <> 1 RETURN count(*)
+then: [[1]]
+
+=== OPTIONAL MATCH keeps the row
+given: CREATE (:N {n: 1})
+when: MATCH (a) OPTIONAL MATCH (a)-[:T]->(b) RETURN a.n, b.n
+then: [[1, null]]
+
+=== OPTIONAL MATCH on nothing gives one row of nulls
+when: OPTIONAL MATCH (a) RETURN a
+then: [[null]]
+
+=== OPTIONAL MATCH WHERE filters the optional part
+given: CREATE (a:N {n: 1})-[:T]->(:N {n: 2})
+when: MATCH (a {n: 1}) OPTIONAL MATCH (a)-[:T]->(b) WHERE b.n > 5 RETURN a.n, b.n
+then: [[1, null]]
+
+=== variable length, a range
+given: CREATE (:N {n: 1})-[:T]->(:N {n: 2})-[:T]->(:N {n: 3})-[:T]->(:N {n: 4})
+when: MATCH ({n: 1})-[:T*2..3]->(b) RETURN b.n
+then any order: [[3], [4]]
+
+=== variable length, exactly
+given: CREATE (:N {n: 1})-[:T]->(:N {n: 2})-[:T]->(:N {n: 3})
+when: MATCH ({n: 1})-[:T*2]->(b) RETURN b.n
+then: [[3]]
+
+=== variable length, zero hops is the node itself
+given: CREATE (:N {n: 1})-[:T]->(:N {n: 2})
+when: MATCH ({n: 1})-[:T*0..1]->(b) RETURN b.n
+then any order: [[1], [2]]
+
+=== variable length, the variable holds the edges
+given: CREATE (:N {n: 1})-[:T {w: 1}]->(:N {n: 2})-[:T {w: 2}]->(:N {n: 3})
+when: MATCH ({n: 1})-[r:T*2]->() RETURN [x IN r | x.w]
+then: [[[1, 2]]]
+
+# ---------------------------------------------------------------- paths
+
+=== a path holds nodes and edges
+given: CREATE (:N {n: 1})-[:T]->(:N {n: 2})
+when: MATCH p = (a)-[:T]->(b) RETURN [x IN nodes(p) | x.n], [r IN relationships(p) | type(r)], length(p)
+then: [[[1, 2], ["T"], 1]]
+
+=== a path of one node has length zero
+given: CREATE (:N {n: 1})
+when: MATCH p = (a) RETURN length(p), size(nodes(p)), size(relationships(p))
+then: [[0, 1, 0]]
+
+=== a path keeps the written order against the edges
+given: CREATE (:N {n: 1})-[:T]->(:N {n: 2})-[:T]->(:N {n: 3})
+when: MATCH p = ({n: 3})<-[:T]-()<-[:T]-({n: 1}) RETURN [x IN nodes(p) | x.n]
+then: [[[3, 2, 1]]]
+
+=== a path keeps the written order when the middle is the anchor
+given: CREATE (:N {n: 1})-[:T]->(:M {n: 2})-[:T]->(:N {n: 3})
+when: MATCH p = (a)-[:T]->(:M)-[:T]->(c) RETURN [x IN nodes(p) | x.n]
+then: [[[1, 2, 3]]]
+
+=== a path over a variable-length step
+given: CREATE (:N {n: 1})-[:T]->(:N {n: 2})-[:T]->(:N {n: 3})
+when: MATCH p = ({n: 1})-[:T*2]->(b) RETURN [x IN nodes(p) | x.n], length(p)
+then: [[[1, 2, 3], 2]]
+
+=== a variable-length step walked from its right end
+given: CREATE (:N {n: 1})-[:T]->(:N {n: 2})-[:T]->(:End {n: 3})
+when: MATCH p = (a)-[:T*2]->(:End) RETURN [x IN nodes(p) | x.n]
+then: [[[1, 2, 3]]]
+
+=== an optional path that does not match is null
+given: CREATE (:N {n: 1})
+when: MATCH (a) OPTIONAL MATCH p = (a)-[:T]->() RETURN p
+then: [[null]]
+
+=== shortestPath finds the shorter way
+given: CREATE (a:N {n: 1}), (b:N {n: 2}), (c:N {n: 3}), (a)-[:T]->(b), (b)-[:T]->(c), (a)-[:T]->(c)
+when: MATCH p = shortestPath(({n: 1})-[:T*]->({n: 3})) RETURN length(p)
+then: [[1]]
+
+=== shortestPath with no way
+given: CREATE (:N {n: 1}), (:N {n: 2})
+when: MATCH p = shortestPath(({n: 1})-[:T*]->({n: 2})) RETURN p
+then: []
+
+=== paths compare by what they hold
+given: CREATE (:N {n: 1})-[:T]->(:N {n: 2})
+when: MATCH p = (a)-[:T]->(b), q = (a)-[:T]->(b) RETURN p = q
+then: [[true]]
+
+# ---------------------------------------------------------------- RETURN
+
+=== RETURN a literal
+when: RETURN 1 AS one
+then: [[1]]
+
+=== RETURN DISTINCT
+given: CREATE (:N {n: 1}), (:N {n: 1}), (:N {n: 2})
+when: MATCH (a) RETURN DISTINCT a.n ORDER BY a.n
+then: [[1], [2]]
+
+=== ORDER BY descending
+given: CREATE (:N {n: 1}), (:N {n: 3}), (:N {n: 2})
+when: MATCH (a) RETURN a.n ORDER BY a.n DESC
+then: [[3], [2], [1]]
+
+=== ORDER BY puts nulls last
+given: CREATE (:N {n: 1}), (:N {m: 1}), (:N {n: 2})
+when: MATCH (a) RETURN a.n ORDER BY a.n
+then: [[1], [2], [null]]
+
+=== ORDER BY descending puts nulls first
+given: CREATE (:N {n: 1}), (:N {m: 1}), (:N {n: 2})
+when: MATCH (a) RETURN a.n ORDER BY a.n DESC
+then: [[null], [2], [1]]
+
+=== ORDER BY an alias
+given: CREATE (:N {n: 1}), (:N {n: 2})
+when: MATCH (a) RETURN a.n * -1 AS x ORDER BY x
+then: [[-2], [-1]]
+
+=== SKIP and LIMIT
+when: UNWIND [1, 2, 3, 4] AS x RETURN x ORDER BY x SKIP 1 LIMIT 2
+then: [[2], [3]]
+
+=== LIMIT 0
+when: UNWIND [1, 2] AS x RETURN x LIMIT 0
+then: []
+
+=== RETURN star
+when: WITH 1 AS a, 2 AS b RETURN *
+then: [[1, 2]]
+
+=== a missing property is null
+given: CREATE (:N {n: 1})
+when: MATCH (a) RETURN a.nothing
+then: [[null]]
+
+=== a property of null is null
+when: WITH null AS x RETURN x.y
+then: [[null]]
+
+=== an unknown variable is an error
+when: RETURN nothing
+then error: unknown variable
+
+# ---------------------------------------------------------------- WITH, UNWIND, UNION
+
+=== WITH renames and filters
+when: UNWIND [1, 2, 3] AS x WITH x * 2 AS y WHERE y > 2 RETURN y ORDER BY y
+then: [[4], [6]]
+
+=== WITH hides what it does not pass on
+when: WITH 1 AS a WITH 2 AS b RETURN a
+then error: unknown variable
+
+=== WITH ORDER BY LIMIT then collect
+when: UNWIND [3, 1, 2] AS x WITH x ORDER BY x LIMIT 2 RETURN collect(x)
+then: [[[1, 2]]]
+
+=== WITH aggregates then filters
+when: UNWIND [1, 1, 2] AS x WITH x, count(*) AS c WHERE c > 1 RETURN x, c
+then: [[1, 2]]
+
+=== UNWIND a list
+when: UNWIND [1, 2] AS x RETURN x
+then: [[1], [2]]
+
+=== UNWIND an empty list gives no rows
+when: UNWIND [] AS x RETURN x
+then: []
+
+=== UNWIND null gives no rows
+when: UNWIND null AS x RETURN x
+then: []
+
+=== UNWIND nested lists one level
+when: UNWIND [[1, 2], [3]] AS x RETURN x
+then: [[[1, 2]], [[3]]]
+
+=== UNION removes duplicates
+when: RETURN 1 AS x UNION RETURN 1 AS x
+then: [[1]]
+
+=== UNION ALL keeps duplicates
+when: RETURN 1 AS x UNION ALL RETURN 1 AS x
+then: [[1], [1]]
+
+=== UNION needs the same columns
+when: RETURN 1 AS x UNION RETURN 1 AS y
+then error: same columns
+
+# ---------------------------------------------------------------- aggregation
+
+=== count star and count of a value
+given: CREATE (:N {n: 1}), (:N {m: 1})
+when: MATCH (a) RETURN count(*), count(a.n)
+then: [[2, 1]]
+
+=== count on no rows is zero
+when: MATCH (a) RETURN count(a)
+then: [[0]]
+
+=== count distinct
+when: UNWIND [1, 1, 2, null] AS x RETURN count(DISTINCT x)
+then: [[2]]
+
+=== sum and avg skip nulls
+when: UNWIND [1, 2, null] AS x RETURN sum(x), avg(x)
+then: [[3, 1.5]]
+
+=== sum on no rows is zero
+when: UNWIND [] AS x RETURN sum(x)
+then: [[0]]
+
+=== min and max
+when: UNWIND [3, 1, 2] AS x RETURN min(x), max(x)
+then: [[1, 3]]
+
+=== min on no rows is null
+when: UNWIND [] AS x RETURN min(x)
+then: [[null]]
+
+=== collect skips nulls
+when: UNWIND [1, null, 2] AS x RETURN collect(x)
+then: [[[1, 2]]]
+
+=== grouping by the other columns
+when: UNWIND [1, 1, 2] AS x RETURN x, count(*) ORDER BY x
+then: [[1, 2], [2, 1]]
+
+=== an aggregate inside an expression
+when: UNWIND [1, 2] AS x RETURN sum(x) + 1
+then: [[4]]
+
+=== stdev and percentiles
+when: UNWIND [1, 2, 3, 4] AS x RETURN percentileDisc(x, 0.5), percentileCont(x, 0.5)
+then: [[2, 2.5]]
+
+# ---------------------------------------------------------------- nulls and logic
+
+=== null equals nothing
+when: RETURN null = null, null <> null, 1 = null
+then: [[null, null, null]]
+
+=== IS NULL
+when: RETURN null IS NULL, 1 IS NULL, null IS NOT NULL, 1 IS NOT NULL
+then: [[true, false, false, true]]
+
+=== three-valued AND
+when: RETURN true AND null, false AND null, null AND null
+then: [[null, false, null]]
+
+=== three-valued OR
+when: RETURN true OR null, false OR null, null OR null
+then: [[true, null, null]]
+
+=== three-valued XOR and NOT
+when: RETURN true XOR null, true XOR false, NOT null, NOT true
+then: [[null, true, null, false]]
+
+=== IN with null
+when: RETURN 1 IN [1, null], 2 IN [1, null], null IN [1], 2 IN [1]
+then: [[true, null, null, false]]
+
+=== coalesce
+when: RETURN coalesce(null, 1, 2), coalesce(null, null)
+then: [[1, null]]
+
+# ---------------------------------------------------------------- numbers
+
+=== arithmetic keeps integers
+when: RETURN 1 + 2, 7 / 2, 7 % 2, 2 * 3, -1 - 1
+then: [[3, 3, 1, 6, -2]]
+
+=== mixed arithmetic is float
+when: RETURN 1 + 0.5, 7 / 2.0
+then: [[1.5, 3.5]]
+
+=== power is a float
+when: RETURN 2 ^ 3
+then: [[8.0]]
+
+=== an integer equals its float
+when: RETURN 1 = 1.0, 1 < 1.5
+then: [[true, true]]
+
+=== division by zero is an error for integers
+when: RETURN 1 / 0
+then error:
+
+=== rounding and friends
+when: RETURN abs(-2), ceil(1.1), floor(1.9), round(1.5), sign(-3)
+then: [[2, 2.0, 1.0, 2.0, -1]]
+
+=== conversions
+when: RETURN toInteger('42'), toInteger(3.9), toFloat('1.5'), toString(1), toBoolean('true')
+then: [[42, 3, 1.5, "1", true]]
+
+=== conversions that do not parse
+when: RETURN toInteger('x'), toFloat('x'), toBoolean('x')
+then: [[null, null, null]]
+
+=== trigonometry
+when: RETURN round(sin(0.0)), round(cos(0.0)), round(atan(0.0)), round(degrees(0.0))
+then: [[0.0, 1.0, 0.0, 0.0]]
+
+# ---------------------------------------------------------------- strings
+
+=== string functions
+when: RETURN toUpper('aB'), toLower('aB'), trim(' a '), ltrim(' a'), rtrim('a '), reverse('ab')
+then: [["AB", "ab", "a", "a", "a", "ba"]]
+
+=== substring, left and right
+when: RETURN substring('hello', 1), substring('hello', 1, 2), left('hello', 2), right('hello', 2)
+then: [["ello", "el", "he", "lo"]]
+
+=== replace and split
+when: RETURN replace('aXb', 'X', '-'), split('a,b', ',')
+then: [["a-b", ["a", "b"]]]
+
+=== string operators
+when: RETURN 'abc' STARTS WITH 'a', 'abc' ENDS WITH 'c', 'abc' CONTAINS 'b', 'abc' CONTAINS 'x'
+then: [[true, true, true, false]]
+
+=== string operators with null
+when: RETURN null STARTS WITH 'a', 'a' CONTAINS null
+then: [[null, null]]
+
+=== concatenation
+when: RETURN 'a' + 'b', 'n' + 1
+then: [["ab", "n1"]]
+
+=== size counts characters
+when: RETURN size('ñu')
+then: [[2]]
+
+=== regular expressions match the whole string
+when: RETURN 'abc' =~ 'a.c', 'abc' =~ 'b', 'ABC' =~ '(?i)abc', null =~ 'a'
+then: [[true, false, true, null]]
+
+=== an invalid regular expression is an error
+when: RETURN 'a' =~ '['
+then error: invalid regular expression
+
+# ---------------------------------------------------------------- lists and maps
+
+=== list indexing
+when: RETURN [1, 2, 3][0], [1, 2, 3][-1], [1, 2, 3][9]
+then: [[1, 3, null]]
+
+=== list slices
+when: RETURN [1, 2, 3, 4][1..3], [1, 2, 3][..1], [1, 2, 3][1..], [1, 2, 3][-2..]
+then: [[[2, 3], [1], [2, 3], [2, 3]]]
+
+=== list functions
+when: RETURN size([1, 2]), head([1, 2]), last([1, 2]), tail([1, 2]), reverse([1, 2]), range(1, 3), range(0, 4, 2)
+then: [[2, 1, 2, [2], [2, 1], [1, 2, 3], [0, 2, 4]]]
+
+=== head and last of nothing
+when: RETURN head([]), last([]), tail([])
+then: [[null, null, []]]
+
+=== list concatenation
+when: RETURN [1] + [2], [1] + 2
+then: [[[1, 2], [1, 2]]]
+
+=== list comprehension
+when: RETURN [x IN [1, 2, 3] WHERE x > 1 | x * 2], [x IN [1, 2] | x + 1], [x IN [1, 2] WHERE x = 1]
+then: [[[4, 6], [2, 3], [1]]]
+
+=== quantifiers
+when: RETURN all(x IN [1, 2] WHERE x > 0), any(x IN [1, 2] WHERE x > 1), none(x IN [1, 2] WHERE x > 5), single(x IN [1, 2] WHERE x > 1)
+then: [[true, true, true, true]]
+
+=== quantifiers on empty lists
+when: RETURN all(x IN [] WHERE x > 0), any(x IN [] WHERE x > 0), none(x IN [] WHERE x > 0), single(x IN [] WHERE x > 0)
+then: [[true, false, true, false]]
+
+=== reduce
+when: RETURN reduce(s = 0, x IN [1, 2, 3] | s + x)
+then: [[6]]
+
+=== map access
+when: WITH {a: 1, b: {c: 2}} AS m RETURN m.a, m.b.c, m['a'], m.z, keys({x: 1})
+then: [[1, 2, 1, null, ["x"]]]
+
+=== lists compare item by item
+when: RETURN [1, 2] = [1, 2], [1, 2] = [2, 1], [1, null] = [1, null], [1, 2] = [1]
+then: [[true, false, null, false]]
+
+=== maps compare by keys and values
+when: RETURN {a: 1} = {a: 1}, {a: 1} = {a: 2}, {a: 1} = {b: 1}
+then: [[true, false, false]]
+
+=== CASE, searched and simple
+when: RETURN CASE WHEN 1 > 2 THEN 'a' ELSE 'b' END, CASE 1 WHEN 1 THEN 'x' END, CASE 2 WHEN 1 THEN 'x' END
+then: [["b", "x", null]]
+
+# ---------------------------------------------------------------- subqueries and comprehensions
+
+=== EXISTS with a filter
+given: CREATE (:N {n: 1})-[:T]->(:N {n: 2})
+when: MATCH (a) WHERE EXISTS { MATCH (a)-[:T]->(b) WHERE b.n = 2 } RETURN a.n
+then: [[1]]
+
+=== COUNT of a pattern
+given: CREATE (a:N {n: 1}), (a)-[:T]->(:N), (a)-[:T]->(:N)
+when: MATCH (a {n: 1}) RETURN COUNT { (a)-[:T]->() }
+then: [[2]]
+
+=== CALL runs once per row
+when: UNWIND [1, 2] AS x CALL { WITH x RETURN x * 10 AS y } RETURN x, y
+then: [[1, 10], [2, 20]]
+
+=== CALL can give several rows
+when: UNWIND [1, 2] AS x CALL { WITH x UNWIND [x, x] AS y RETURN y } RETURN y
+then: [[1], [1], [2], [2]]
+
+=== CALL with no rows drops the outer row
+when: UNWIND [1, 2] AS x CALL { WITH x UNWIND [] AS y RETURN y } RETURN x
+then: []
+
+=== CALL aggregates per row
+given: CREATE (a:N {n: 1}), (a)-[:T]->(:N), (a)-[:T]->(:N), (:N {n: 2})
+when: MATCH (a) WHERE a.n IS NOT NULL CALL { WITH a OPTIONAL MATCH (a)-[:T]->(b) RETURN count(b) AS c } RETURN a.n, c ORDER BY a.n
+then: [[1, 2], [2, 0]]
+
+=== CALL cannot return an outer name
+when: WITH 1 AS x CALL { RETURN 2 AS x } RETURN x
+then error: already a variable
+
+=== a pattern comprehension
+given: CREATE (a:N {n: 1}), (a)-[:T]->(:N {n: 2})
+when: MATCH (a {n: 1}) RETURN [(a)-[:T]->(b) | b.n]
+then: [[[2]]]
+
+=== a pattern comprehension with a filter
+given: CREATE (a:N {n: 1}), (a)-[:T]->(:N {n: 2}), (a)-[:T]->(:N {n: 3})
+when: MATCH (a {n: 1}) RETURN [(a)-[:T]->(b) WHERE b.n > 2 | b.n]
+then: [[[3]]]
+
+=== a pattern comprehension without matches is empty
+given: CREATE (:N {n: 1})
+when: MATCH (a) RETURN [(a)-[:T]->(b) | b.n]
+then: [[[]]]
+
+=== map projection of properties
+given: CREATE (:N {n: 1, m: 2})
+when: MATCH (a) RETURN a {.n}
+then: [[{"n": 1}]]
+
+=== map projection of everything, and more
+given: CREATE (:N {n: 1, m: 2})
+when: MATCH (a) RETURN a {.*, k: 3}
+then: [[{"n": 1, "m": 2, "k": 3}]]
+
+=== map projection of a variable
+given: CREATE (:N {n: 1})
+when: MATCH (a) WITH a, 5 AS v RETURN a {.n, v}
+then: [[{"n": 1, "v": 5}]]
+
+=== map projection of a missing property is null
+given: CREATE (:N {n: 1})
+when: MATCH (a) RETURN a {.z}
+then: [[{"z": null}]]
+
+# ---------------------------------------------------------------- writes
+
+=== CREATE returns what it made
+when: CREATE (a:A {n: 1}) RETURN a.n, labels(a)
+then: [[1, ["A"]]]
+
+=== CREATE an edge between matched nodes
+given: CREATE (:N {n: 1}), (:N {n: 2})
+given: MATCH (a:N {n: 1}), (b:N {n: 2}) CREATE (a)-[:T {w: 1}]->(b)
+when: MATCH (a)-[r:T]->(b) RETURN a.n, r.w, b.n, type(r)
+then: [[1, 1, 2, "T"]]
+
+=== SET a property
+given: CREATE (:N {n: 1})
+given: MATCH (a) SET a.m = 2
+when: MATCH (a) RETURN a.n, a.m
+then: [[1, 2]]
+
+=== SET to null removes
+given: CREATE (:N {n: 1, m: 2})
+given: MATCH (a) SET a.m = null
+when: MATCH (a) RETURN keys(a)
+then: [[["n"]]]
+
+=== SET += merges, = replaces
+given: CREATE (:A {n: 1, m: 2}), (:B {n: 1, m: 2})
+given: MATCH (a:A) SET a += {k: 3}
+given: MATCH (b:B) SET b = {k: 3}
+when: MATCH (a) RETURN labels(a), a.n, a.k ORDER BY labels(a)
+then: [[["A"], 1, 3], [["B"], null, 3]]
+
+=== SET and REMOVE labels
+given: CREATE (:A {n: 1})
+given: MATCH (a) SET a:B
+given: MATCH (a) REMOVE a:A
+when: MATCH (a) RETURN labels(a)
+then: [[["B"]]]
+
+=== REMOVE a property
+given: CREATE (:N {n: 1, m: 2})
+given: MATCH (a) REMOVE a.m
+when: MATCH (a) RETURN a.m, a.n
+then: [[null, 1]]
+
+=== DELETE an edge
+given: CREATE (:N {n: 1})-[:T]->(:N {n: 2})
+given: MATCH ()-[r:T]->(:N) DELETE r
+when: MATCH ()-[r]->() RETURN count(r)
+then: [[0]]
+
+=== DETACH DELETE a node
+given: CREATE (:N {n: 1})-[:T]->(:N {n: 2})
+given: MATCH (a:N {n: 1}) DETACH DELETE a
+when: MATCH (a) RETURN a.n
+then: [[2]]
+
+=== MERGE creates once
+given: MERGE (:N {n: 1})
+given: MERGE (:N {n: 1})
+when: MATCH (a) RETURN count(a)
+then: [[1]]
+
+=== MERGE ON CREATE and ON MATCH
+given: MERGE (a:N {n: 1}) ON CREATE SET a.c = 1 ON MATCH SET a.m = 1
+given: MERGE (a:N {n: 1}) ON CREATE SET a.c = 2 ON MATCH SET a.m = 2
+when: MATCH (a) RETURN a.c, a.m
+then: [[1, 2]]
+
+=== MERGE an edge
+given: CREATE (:N {n: 1}), (:N {n: 2})
+given: MATCH (a:N {n: 1}), (b:N {n: 2}) MERGE (a)-[:T]->(b)
+given: MATCH (a:N {n: 1}), (b:N {n: 2}) MERGE (a)-[:T]->(b)
+when: MATCH ()-[r:T]->() RETURN count(r)
+then: [[1]]
+
+=== FOREACH writes per item
+given: FOREACH (x IN [1, 2] | CREATE (:N {n: x}))
+when: MATCH (a) RETURN a.n ORDER BY a.n
+then: [[1], [2]]
+
+=== a subquery that writes
+given: UNWIND [1, 2] AS x CALL { WITH x CREATE (:N {n: x}) } RETURN x
+when: MATCH (a) RETURN a.n ORDER BY a.n
+then: [[1], [2]]
+
+# ---------------------------------------------------------------- syntax errors
+
+=== a query that ends with WITH
+when: WITH 1 AS a
+then error: cannot end with WITH
+
+=== RETURN must be last
+when: RETURN 1 RETURN 2
+then error: last clause
+
+=== an expression in WITH needs a name
+when: WITH 1 + 1 RETURN 1
+then error: needs a name
+
+=== keywords do not care about case
+when: unwind [1] as x return x
+then: [[1]]
+
+# ---------------------------------------------------------------- differences
+# Where Grafeno differs from Cypher on purpose, pinned so a change is seen.
+# Each says what Cypher gives.
+
+=== difference: every new node needs a label (Cypher allows none)
+when: CREATE ({n: 1})
+then error: at least one label
+
+=== difference: a variable-length edge reaches each end once (Cypher: 2 rows, one per path)
+given: CREATE (a:N {n: 1}), (b:N {n: 2}), (c:N {n: 3}), (d:N {n: 4}), (a)-[:T]->(b), (a)-[:T]->(c), (b)-[:T]->(d), (c)-[:T]->(d)
+when: MATCH ({n: 1})-[:T*2]->(x) RETURN x.n
+then: [[4]]
+
+=== difference: a longer way to a closer node is not found (Cypher: [[3]])
+given: CREATE (a:N {n: 1}), (b:N {n: 2}), (c:N {n: 3}), (a)-[:T]->(b), (b)-[:T]->(c), (a)-[:T]->(c)
+when: MATCH ({n: 1})-[:T*2]->(x) RETURN x.n
+then: []
+
+=== difference: allShortestPaths gives one path per end (Cypher: 2 rows)
+given: CREATE (a:N {n: 1}), (b:N {n: 2}), (c:N {n: 3}), (d:N {n: 4}), (a)-[:T]->(b), (a)-[:T]->(c), (b)-[:T]->(d), (c)-[:T]->(d)
+when: MATCH p = allShortestPaths(({n: 1})-[:T*]->({n: 4})) RETURN length(p)
+then: [[2]]
+
+=== difference: ids are strings (Cypher: integers)
+given: CREATE (:N {n: 1})
+when: MATCH (a) RETURN size(id(a))
+then: [[36]]

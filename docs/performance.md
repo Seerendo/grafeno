@@ -22,6 +22,7 @@ test environments").
 | Finding a person by a misspelled name among 100 000 | 20 ms with a fuzzy index |
 | Telling duplicates from namesakes (match rule) | 95% of duplicates found, 99.4% of "same" right |
 | One current fact per person (constraint) | 14 000 facts/s, every person one current employer |
+| CSV and GraphML | export 340 000 to 400 000 records/s; import about 26 000 to 28 000 records/s |
 | Following writes: change log, streams, ingestion | 20% write cost; a commit reaches a stream in 0.15 ms; 25 000 NDJSON lines/s |
 | Community summaries of 50 000 nodes | 3.2 s, teams and departments found; a topic finds its summary in 0.06 ms |
 | Linking what memories mention to known entities | 3 200 texts/s, 99.4% linked right, none wrong |
@@ -179,6 +180,17 @@ stays visible with `KNOWN AT`. With 50 000 job changes for 10 000 people,
 every person ended with exactly one current employer and every earlier
 job in history, at a third of the write speed (each new fact looks at
 the person's other ones).
+
+## Moving graphs in and out
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/charts/interchange-dark.svg">
+  <img alt="200 000 records: CSV exports at 397 000 records per second and imports at 27 600; GraphML at 341 000 and 25 900" src="assets/charts/interchange-light.svg">
+</picture>
+
+A namespace goes out as CSV or GraphML for spreadsheets, Gephi, yEd,
+NetworkX or APOC, and comes back the same. Importing takes about as long as
+any other write of those records, since each goes through every index.
 
 ## Following the writes
 

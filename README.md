@@ -151,6 +151,11 @@ measured speed, memory and limits, with charts, in
   `changes` tool; NDJSON ingestion with idempotency keys; extraction and
   community summaries can follow the log in the background
   (`[background]`).
+- **Phase 12.1, wider Cypher and tools:** path variables, `shortestPath`,
+  `CALL { … }`, `COUNT { … }`, pattern comprehensions, map projections,
+  `=~` and more functions; import and export in CSV and GraphML; 146
+  hand-written conformance scenarios in the TCK's form (the official TCK is
+  not run, and Bolt is not built).
 
 ## Installing
 

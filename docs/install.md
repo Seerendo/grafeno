@@ -188,6 +188,27 @@ It verifies every page against its checksum, then the indexes. Exports
 (`grafeno export`) are the other kind of copy: JSON Lines, readable and
 portable between versions, but without the keys.
 
+To move a namespace to or from other tools (spreadsheets, Gephi, yEd,
+NetworkX, APOC), use CSV or GraphML. They hold current knowledge, without
+retracted facts or the history behind them, so they do not replace a
+backup:
+
+```bash
+grafeno export --format csv -n notes -o notes-csv
+```
+
+```bash
+grafeno import --format csv -n notes notes-csv/nodes.csv --edges notes-csv/edges.csv
+```
+
+```bash
+grafeno export --format graphml -n notes -o notes.graphml
+```
+
+```bash
+grafeno import --format graphml -n notes notes.graphml
+```
+
 ## Settings
 
 `grafeno.toml` is read by the service, and by `grafeno serve --config` and
