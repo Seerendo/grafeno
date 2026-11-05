@@ -1,0 +1,33 @@
+query,ms,outcome
+cartesian product,403,max_rows
+long variable paths,999,max_rows
+unwind squared,103,max_rows
+string built in reduce,2000,timeout
+nested comprehension,248,max_memory
+string doubled,117,max_memory
+replace amplified,6,max_memory
+list nested in reduce,3,value depth
+map nested in reduce,3,value depth
+a range per item,59,max_memory
+list grown in reduce,2000,timeout
+collect then square,64,max_memory
+sort a million,86,max_rows
+distinct a million,86,max_rows
+collect a million,85,max_rows
+group a million,89,max_rows
+pattern predicate paths,1000,max_reads
+comprehension over matches,2000,timeout
+cartesian in optional,421,max_rows
+union of products,408,max_rows
+foreach writes,77,max_rows
+merge flood,73,max_rows
+deep parentheses,1,nesting error
+deep lists,0.8,nesting error
+long AND chain,14,nesting error
+long + chain,6,nesting error
+deep NOT,2,nesting error
+deep minus,0.9,nesting error
+deep CASE,2,nesting error
+big list literal,209,ok
+algorithm on everything,18,ok
+all shortest paths,2000,ok

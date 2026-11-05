@@ -86,13 +86,16 @@ short-lived agents.
 | `indexes`      | `(ns, index name)`            | index definition (JSON)    |
 | `index_entries` | `(ns, index, sortable value, node_id)` | `()`              |
 | `namespaces`   | `ns`                          | creation time, description (JSON) |
+| `principals`   | key name                      | secret hash, grants, owner, `own_only` (JSON) |
+| `merges`       | `(ns, merge_id)`              | merge record: who, when, both nodes before, edges moved and dropped |
 
 - The layout has a version (`SCHEMA_VERSION`, now 8) in `meta`. Opening an
   older file upgrades it in one transaction: version 1 gets its counters
   computed, version 2 gets the new adjacency and posting tables (built from
   the records) and loses the old ones, version 3 gets the names index,
   version 4 the (empty) property index tables, version 5 the namespace
-  registry (every namespace with data). A newer layout is refused.
+  registry (every namespace with data), version 6 the (empty) principals
+  and version 7 the (empty) merge records. A newer layout is refused.
 - Adjacency entries hold the edge's record time and valid time
   (`recorded_at`, `expired_at`, `valid_from`, `valid_to`), so traversals
   filter without reading edge records. Postings hold the length of their
@@ -1115,6 +1118,146 @@ assets).
 - Vector quantization (int8, with exact rescoring of the best
   candidates), compressed postings and adjacency lists; memory and speed
   compared with 10.6's numbers.
+
+## Measurements and test environments
+
+What Grafeno has been measured to do, where, and how; the base for the
+official documentation's charts. The raw numbers are CSV files in
+`docs/data/` (one per experiment, described in its `README.md`); the
+discussion of each experiment is in `docs/benchmarks.md`. Every number
+below comes from one of three environments.
+
+### Environments
+
+| Id | What | Hardware and system | Storage | Build |
+| --- | --- | --- | --- | --- |
+| E1-mem | The engine alone, without a disk | Lenovo laptop (model 83JC): AMD Ryzen 7 7435HS, 8 cores / 16 threads, 31.7 GiB of RAM; Windows 11 Home 10.0.26200 | redb's in-memory backend: no file, no fsync | Rust 1.99.1, release profile, redb 4.4.0 |
+| E1-disk | The engine on a file | The same laptop | a file in `%TEMP%` on an NVMe SSD (Micron MTFDKCD512QFM, NTFS); immediate durability is an fsync per commit | as E1-mem |
+| E2 | Memory limits | The same laptop, Docker Desktop 29.6.1 on WSL2 (Linux 6.18.54.1, 16 CPUs and 15.5 GiB visible to Docker) | a named Docker volume (ext4 inside WSL2's virtual disk, on the laptop's NVMe); slower than E1-disk for random reads | built in `rust:1.91` with `cargo build --release --locked`, run in `debian:bookworm-slim` with `--memory` equal to `--memory-swap` (a hard limit, no swap): 2 GiB or 512 MiB |
+
+E1 is a laptop on mains power with other programs running: runs vary by
+about ±20%, so only larger differences mean something. E2's times are
+pessimistic (its disk sits behind a virtual disk); its memory numbers are
+the point. Nothing has been measured yet on Linux bare metal, on a
+spinning disk, on ARM, or for days at a time.
+
+### Methodology
+
+- **Builds and runs.** Release builds; one run per configuration unless a
+  file says otherwise; the date of each run is in `docs/data/README.md`.
+  Benchmarks call the library in-process, so HTTP is not in their times
+  (its cost has not been measured).
+- **Latency under load** (`examples/saturation.rs`). Open load: each write
+  is scheduled at a fixed rate whatever the answers, and its latency runs
+  from that scheduled time, so a system that falls behind shows it instead
+  of slowing the clients down (no coordinated omission). 512 client
+  threads; each step lasts 3 s; percentiles are exact over every write of
+  the step. Each write is a node and an edge to an earlier node.
+- **Memory** (`examples/ram_bench.rs`). Resident memory (`VmRSS`) after an
+  operation is "steady"; the most it reached while the operation ran
+  (`VmHWM`, reset through `/proc/self/clear_refs` before each operation)
+  is "peak". Both include redb's page cache, which lives in the process,
+  and not the kernel's file cache. A run that crosses the container's
+  limit is killed by the kernel (exit code 137), as a server would be.
+- **Recall** (`examples/hnsw_recall.rs`, `hnsw_churn.rs`, `vector_recall`).
+  Recall@10 against exact answers from a pass over every vector alive at
+  that moment, over 200 queries drawn from the data (clustered vectors,
+  closer to real embeddings than uniform noise).
+- **Hostile queries** (`tests/adversarial.rs`). Each query runs on a
+  thread of its own with the 2 MiB stack of a server worker, under limits
+  of 2 s, 2 million reads, 200 000 rows and 64 MiB, on 2 000 nodes and
+  6 000 edges; the test fails on a panic, a crash or more than 4 s.
+- **Correctness** is shown by tests, not benchmarks (below): property
+  tests against a model, crash tests in child processes, fixtures of every
+  past layout, fuzzing.
+
+### Headline numbers
+
+| Capability | Result | Env | Data |
+| --- | --- | --- | --- |
+| Read a node | 1.6 µs | E1-mem | `engine.csv` |
+| Neighbors of a node (10k nodes, 40k edges) | 25 µs | E1-mem | `engine.csv` |
+| BM25 search, top 10 of 10 000 notes | 0.27 ms | E1-mem | `engine.csv` |
+| Vector search, top 10 of 20 000 (128-d, `ef` 64) | recall@10 1.000, p50 0.51 ms, p99 0.98 ms | E1-mem | `hnsw_recall.csv` |
+| Vector search, top 10 of 1 000 000 (128-d) | 5 ms, 140 MiB resident in a 512 MiB container | E2 | `vector_search.csv` |
+| Recall@10 through deletes, reinserts and churn | 0.99 or more at `ef` 64 (0.929 before 10.3) | E1-mem | `hnsw_churn.csv` |
+| A write with immediate durability | about 2 ms up to 4 000 writes/s | E1-disk | `saturation_immediate.csv` |
+| Most writes per second, immediate / eventual durability | about 11 000 / 16 000 | E1-disk | `saturation_*.csv` |
+| An agent's p99 write latency during a 300 000-node import | 88 ms (12 s before 10.7) | E1-disk | `import_interference.csv` |
+| Bulk import, nodes with 30-word texts | about 7 500 nodes/s, steady up to 1 M | E1-disk | `bulk_load.csv` |
+| Property index lookup against a label scan (100 000 nodes) | 3.6 ms against 200 ms | E1-mem | `property_index.csv` |
+| PageRank, 100 000 nodes and 500 000 edges | 17 ms (projection 102 ms, cached afterwards) | E1-mem | `algorithms.csv` |
+| Graph of 1 M nodes and 10 M edges in 512 MiB | every operation completes; peak 509 MiB (a projection with edge ids) | E2 | `ram_graph.csv` |
+| Integrity check of 10 M edges | 249 s, 443 MiB peak (killed at 2 GiB before 10.6) | E2 | `check_cost.csv` |
+| Projection memory | about 12 bytes per edge, 28 with edge ids | E2 | `projection_size.csv` |
+| Hostile GQ queries | 32 of 32 end within their limits, none crashes | E1-mem | `hostile_queries.csv` |
+
+### Guarantees and the tests that hold them
+
+`cargo test --workspace` runs about 210 Rust tests (unit and
+integration); the TypeScript client has 7 end-to-end tests against the
+real binary. The ones that carry each guarantee:
+
+| Guarantee | Tests | How |
+| --- | --- | --- |
+| The engine does what a plain model does | `grafeno/tests/model.rs` | proptest: random sequences of every write, aborted transactions, valid and record times; records, labels, counters, neighbors, text and vector search compared with an in-memory model, also after export → import and after a rebuild (3 000 cases) |
+| Commits survive crashes | `grafeno/tests/durability.rs`, `crash.rs` | a child process killed at random moments during writes, imports, rebuilds, namespace drops and upgrades; every reported commit is there, nothing is half-written, the check passes |
+| Old files open | `grafeno/tests/upgrade.rs` and `fixtures/layout-v1` to `v7` | a database written by the commit of every past layout version, upgraded on open, then written and reopened |
+| Damage is found, not trusted | `grafeno/tests/corruption.rs`, `src/check.rs` tests | files with flipped bytes, zeroed pages or cut short are refused or read back exactly as they were, never a crash or a different answer; damage to each derived index is reported and repaired by a rebuild |
+| Backups are consistent | `grafeno/tests/backup.rs` | a backup taken while writes go on is the snapshot it started from |
+| Readers see whole transactions | `grafeno/tests/concurrency.rs` | readers during commits never see part of one, and snapshots never go back |
+| Group commit is correct | `grafeno/tests/writer.rs` | concurrent writes all commit; a failing write leaves the others; a full queue answers busy; imports through the bulk lane let interactive writes in; metrics count what happened |
+| Vector search keeps its quality | `grafeno/tests/vector_churn.rs` | deletes, reinserts, three rounds of churn and a compaction keep recall@10 at 0.95 or more, and reinserted vectors are found |
+| Merges are right and reversible | `grafeno/tests/merges.rs`, `grafeno-memory/tests/maintenance.rs` | strong keys, labels, conflicting facts and functional edges; namesakes, typos, nicknames, translations; a merge undone exactly (indexes, counters and the check agree) |
+| Isolation between principals | `grafeno-server/tests/access.rs` | a matrix of keys, grants and endpoints: no read or write outside a key's grants, `own_only` keys change only their own records |
+| GQ follows Cypher | `grafeno-query/tests/cypher.rs`, `queries.rs`, `statistics.rs`, `indexes.rs`, `algorithms.rs` | clauses, functions, aggregates, indexes, planner choices and algorithms on known graphs |
+| Costly queries stop | `grafeno-query/tests/adversarial.rs` | 32 hostile queries within their limits; nesting just under the limit runs on a 2 MiB stack; `max_cost` refuses; procedure rows count against `max_memory` |
+| Nothing a client sends crashes the parser | `grafeno-query/tests/fuzz.rs` | proptest: random tokens, valid queries with random edits, arbitrary text, through the lexer, parser, planner, `EXPLAIN` and executor |
+| The API keeps its contract | `grafeno-server/tests/http.rs`, `mcp.rs`, `shell.rs`, `clients/typescript/test` | every endpoint and MCP tool, limits, conflicts (409 with details), metrics, the CLI shell, and the client against the real binary |
+
+### Reproducing
+
+```bash
+cargo bench -p grafeno --bench engine
+cargo run --release -p grafeno --example hnsw_recall -- 20000 128 200
+cargo run --release -p grafeno --example hnsw_churn
+cargo run --release -p grafeno --example concurrency
+cargo run --release -p grafeno --example bulk_load -- 200000
+cargo run --release -p grafeno --example algo_bench
+cargo run --release -p grafeno --example saturation -- 3
+cargo run --release -p grafeno-query --example index_bench
+cargo test --release -p grafeno-query --test adversarial -- --nocapture
+```
+
+The memory runs (E2) build the benchmark for Linux and run it with a hard
+limit; the file lives on a named volume:
+
+```bash
+docker run --rm -v "$PWD:/src:ro" -v grafeno-target:/target -e CARGO_TARGET_DIR=/target -w /src rust:1.91 cargo build --release --locked -p grafeno-query --example ram_bench
+docker run --rm --memory 2g --memory-swap 2g -v grafeno-target:/target -v grafeno-data:/data debian:bookworm-slim /target/release/examples/ram_bench build /data/big.redb 1_000_000 10_000_000
+docker run --rm --memory 512m --memory-swap 512m -e CACHE_MB=128 -e PROJECTION_CACHE_MB=64 -v grafeno-target:/target -v grafeno-data:/data debian:bookworm-slim /target/release/examples/ram_bench ops /data/big.redb
+```
+
+(`vectors DB COUNT DIM` and `search DB DIM` measure vectors the same way.)
+
+### What the measurements leave open
+
+- Counting every edge of 10 M in GQ takes longer than the 30 s limit:
+  aggregates do not stream yet (12.3).
+- Vector inserts slow down as the index grows: each 100 000 took 96 s at
+  first and 809 s at the millionth (E2); a vector cache that keeps the
+  most used entries, larger transactions and quantization (12.3) are the
+  levers.
+- With a projection cache smaller than a projection, every algorithm call
+  rebuilds it (about 60 s on 10 M edges in E2) and GQ algorithms hit the
+  30 s timeout.
+- Opening a large file after a crash takes minutes while redb repairs it
+  (461 s for 6.4 GB in E2).
+- With eventual durability, the flush every 500 ms holds the writer for
+  10 to 25 ms, which is the p99 of a write.
+- Not yet measured: Linux bare metal, spinning disks, ARM, readers at
+  high concurrency against a busy writer (12.2), multi-day runs, and HTTP
+  end to end under load.
 
 ## Open decisions
 

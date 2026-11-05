@@ -1,0 +1,7 @@
+import,import_s,agent_p50_ms,agent_p99_ms,agent_max_ms,rejected
+none (agent alone),,1.89,2.81,10,0
+around the writer, one transaction,12.2,6208,12035,12152,0
+around the writer, chunks of 20000,9.7,3745,9564,9681,0
+bulk lane, one transaction,10.3,4269,10088,10208,0
+bulk lane, chunks of 20000,10.5,291,696,758,0
+bulk lane, chunks of 2000,11.6,36,88,161,0

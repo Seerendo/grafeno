@@ -1,0 +1,3 @@
+vectors,vector_cache_mib,step_100k_s_1,step_100k_s_2,step_100k_s_3,total_s,peak_mib
+300000,128,96,186,257,539,442
+300000,1024,48,87,149,284,583

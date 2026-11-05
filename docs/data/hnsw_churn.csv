@@ -1,0 +1,8 @@
+state,recall_ef64_before_10_3,recall_ef64_after,recall_ef16_after,recall_ef32_after
+built,1.0,1.0,0.965,0.998
+10% deleted,1.0,1.0,0.974,0.996
+10% inserted back,0.929,1.0,0.953,0.993
+30% deleted,0.999,0.999,0.985,0.998
+30% inserted back,0.98,0.999,0.957,0.995
+50% inserted back,0.988,1.0,0.95,0.99
+5 rounds of churn (worst),0.956,0.99,0.95,0.984

@@ -1,0 +1,5 @@
+write,us
+empty node (commit cost),90
+node with 60 words of text,740
+node with a 64-d vector,1800
+100 notes with text in one transaction, per note,170

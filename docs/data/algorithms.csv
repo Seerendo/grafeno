@@ -1,0 +1,14 @@
+step,ms
+projection (adjacency scan),102
+projection again (cached),0
+projection with an edge weight,718
+Dijkstra one pair (13 hops),27
+Yen 5 shortest paths,756
+PageRank 20 rounds,17
+weakly connected components,3
+label propagation,309
+Louvain (384 communities, modularity 0.899),427
+triangles (89,654),77
+betweenness, 100 sampled sources,1700
+FastRP 64 dimensions,104
+node similarity top 10 per node,374

@@ -1,0 +1,6 @@
+nodes,texts,mode,seconds,nodes_per_s
+200000,no,one transaction,8.4,23900
+200000,no,bulk,7.7,25800
+200000,yes,one transaction,32.4,6200
+200000,yes,bulk,25,8000
+1000000,yes,bulk,134,7450

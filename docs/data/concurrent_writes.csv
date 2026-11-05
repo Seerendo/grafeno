@@ -1,0 +1,5 @@
+writes,durability,writes_per_s,reads_per_s_meanwhile
+one transaction each,immediate,737,79900
+group commit,immediate,8106,63356
+one transaction each,eventual,16865,61093
+group commit,eventual,32210,64903

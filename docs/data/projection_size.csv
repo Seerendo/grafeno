@@ -1,0 +1,3 @@
+projection,nodes,edges,mib,bytes_per_edge_approx
+no edge ids,1000000,10000000,138,12
+with edge ids,1000000,10000000,291,28

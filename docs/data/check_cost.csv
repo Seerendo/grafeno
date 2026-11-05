@@ -1,0 +1,5 @@
+version,graph,container,seconds,peak_mib,outcome
+records in memory (before 10.6),1 M nodes, 10 M edges,2g,,,killed
+streaming with point lookups,1 M nodes, 10 M edges,2g,2562,436,ok
+fingerprints (now),1 M nodes, 10 M edges,2g,249,443,ok
+fingerprints (now),1 M nodes, 10 M edges,512m,368,273,ok
