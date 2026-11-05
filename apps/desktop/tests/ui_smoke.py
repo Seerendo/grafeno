@@ -31,10 +31,9 @@ class Window:
                 result = json.load(response)
         except HTTPError as error:
             raise RuntimeError(error.read().decode()) from error
-        value = result.get("value")
-        if isinstance(value, dict) and value.get("error"):
-            raise RuntimeError(value)
-        return value
+        # Los errores del protocolo llegan mediante HTTPError. Una ejecución
+        # JavaScript puede devolver {ok: false, error: ...} como dato de prueba.
+        return result.get("value")
 
     def call(self, method, path, body=None):
         return self.command(method, f"/session/{self.session}{path}", body)
