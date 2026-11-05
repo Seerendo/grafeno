@@ -17,6 +17,12 @@
 //! max_memory_mb = 512    # one value built, or the rows held at once
 //! max_cost = 0           # refuse queries EXPLAIN estimates above this (off)
 //!
+//! [writer]               # the group commit
+//! max_batch = 512        # writes per transaction at most
+//! queue = 4096           # writes that may wait; more get 503
+//! flush_ms = 500         # with eventual durability, how often commits reach the disk
+//! import_chunk = 2000    # records per transaction of a bulk import
+//!
 //! [memory]               # caches, in MiB
 //! cache_mb = 256         # pages of the file
 //! projection_cache_mb = 256  # graphs kept for algorithms
@@ -52,6 +58,47 @@ pub struct Config {
     pub query: QueryConfig,
     #[serde(default, skip_serializing_if = "MemoryConfig::is_empty")]
     pub memory: MemoryConfig,
+    #[serde(default, skip_serializing_if = "WriterConfig::is_empty")]
+    pub writer: WriterConfig,
+}
+
+/// The group-commit writer; missing values take
+/// [`grafeno::WriterOptions`]'s defaults.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriterConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_batch: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flush_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_chunk: Option<usize>,
+}
+
+impl WriterConfig {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn options(&self) -> grafeno::WriterOptions {
+        let base = grafeno::WriterOptions::default();
+        grafeno::WriterOptions {
+            max_batch: self.max_batch.unwrap_or(base.max_batch).max(1),
+            queue: self.queue.unwrap_or(base.queue).max(1),
+            flush_every: self.flush_ms.map_or(base.flush_every, |ms| {
+                std::time::Duration::from_millis(ms.max(1))
+            }),
+            ..base
+        }
+    }
+
+    pub fn import_chunk(&self) -> usize {
+        self.import_chunk
+            .unwrap_or(crate::http::IMPORT_CHUNK)
+            .max(1)
+    }
 }
 
 /// Cache sizes, in MiB; missing values take [`grafeno::OpenOptions`]'s
@@ -232,6 +279,7 @@ pub fn init(path: &Path, db: &Path, addr: SocketAddr, force: bool) -> Result<Con
         max_requests: None,
         query: QueryConfig::default(),
         memory: MemoryConfig::default(),
+        writer: WriterConfig::default(),
     };
     let text = format!(
         "# Grafeno server settings. Restart the service after changing them.\n\

@@ -167,7 +167,7 @@ fn decode(segment: &str) -> String {
 pub fn need(method: &str, path: &str) -> Need {
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     match parts.as_slice() {
-        ["algorithms"] | ["whoami"] => Need::Caller,
+        ["algorithms"] | ["whoami"] | ["metrics"] => Need::Caller,
         // Listing filters what the caller may read; creating checks the
         // name in the handler.
         ["namespaces"] => Need::Caller,

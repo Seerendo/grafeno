@@ -241,3 +241,105 @@ fn bulk_import_matches_a_normal_import() {
     );
     assert!(normal.import(broken.as_slice()).is_err());
 }
+
+fn export_of(nodes: usize) -> Vec<u8> {
+    let source = Grafeno::in_memory().unwrap();
+    source
+        .write(|tx| {
+            for i in 0..nodes {
+                tx.create_node(
+                    NS,
+                    NewNode::new("Note")
+                        .prop("i", i as i64)
+                        .text(format!("note {i}")),
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let mut dump = Vec::new();
+    source.begin_read().unwrap().export(&[], &mut dump).unwrap();
+    dump
+}
+
+#[test]
+fn imports_through_the_writer_let_interactive_writes_in_between() {
+    let dump = export_of(3_000);
+    let db = Arc::new(Grafeno::in_memory().unwrap());
+    let writer = Arc::new(Writer::new(db.clone(), WriterOptions::default()));
+    // While a load runs in chunks of 100, interactive writes keep landing:
+    // each one waits for one chunk at most, not for the whole load.
+    let load = {
+        let (writer, dump) = (writer.clone(), dump.clone());
+        std::thread::spawn(move || writer.import(dump.as_slice(), 100))
+    };
+    let mut during = 0;
+    while !load.is_finished() {
+        writer
+            .write(|tx| tx.create_node(NS, NewNode::new("Agent")))
+            .unwrap();
+        during += 1;
+    }
+    let stats = load.join().unwrap().unwrap();
+    assert_eq!(stats.nodes, 3_000);
+    assert!(
+        during > 1,
+        "interactive writes ran during the load ({during})"
+    );
+    let read = db.begin_read().unwrap();
+    assert_eq!(count(&db, "Note"), 3_000);
+    assert!(read.check(NS).unwrap().is_ok());
+    assert_eq!(read.search_text(NS, "note", 5).unwrap().len(), 5);
+    drop(read);
+
+    let metrics = writer.metrics();
+    assert_eq!(metrics.queued + metrics.queued_bulk, 0);
+    assert!(metrics.bulk_latency_seconds.count() >= 30, "one per chunk");
+    assert_eq!(metrics.latency_seconds.count(), during as u64);
+    assert!(metrics.groups >= 30);
+    assert_eq!(metrics.failed, 0);
+
+    // In one transaction (all or nothing) through the writer too.
+    let whole = Grafeno::in_memory().unwrap();
+    let whole = Arc::new(whole);
+    let stats = Writer::new(whole.clone(), WriterOptions::default())
+        .import(dump.as_slice(), usize::MAX)
+        .unwrap();
+    assert_eq!(stats.nodes, 3_000);
+    let mut broken = dump.clone();
+    broken.extend_from_slice(b"not json\n");
+    let empty = Arc::new(Grafeno::in_memory().unwrap());
+    assert!(
+        Writer::new(empty.clone(), WriterOptions::default())
+            .import(broken.as_slice(), usize::MAX)
+            .is_err()
+    );
+    assert_eq!(
+        count(&empty, "Note"),
+        0,
+        "nothing of a failed load in one transaction"
+    );
+}
+
+#[test]
+fn metrics_count_groups_failures_and_rejections() {
+    let db = Arc::new(Grafeno::in_memory().unwrap());
+    let writer = Writer::new(db, WriterOptions::default());
+    writer
+        .write(|tx| tx.create_node(NS, NewNode::new("Note")))
+        .unwrap();
+    assert!(
+        writer
+            .write(|_| Err::<(), _>(Error::Invalid("no".into())))
+            .is_err()
+    );
+    let metrics = writer.metrics();
+    assert_eq!(
+        (metrics.writes, metrics.failed, metrics.rejected),
+        (2, 1, 0)
+    );
+    assert_eq!(metrics.groups, 1);
+    assert_eq!(metrics.group_size.count(), 1);
+    assert!(metrics.latency_seconds.quantile(0.99) > 0.0);
+    assert!(metrics.commit_seconds.sum >= 0.0);
+}

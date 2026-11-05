@@ -57,7 +57,7 @@ pub use namespace::{DropStats, MAX_NAMESPACE_LENGTH, check_new_namespace};
 pub use stats::{NamespaceInfo, NamespaceStats};
 pub use text::tokenize;
 pub use traverse::{Direction, EdgeFilter, Neighbor, Path, Subgraph};
-pub use writer::{Writer, WriterOptions};
+pub use writer::{Histogram, HistogramSnapshot, Lane, Writer, WriterOptions, WriterSnapshot};
 
 /// A search result: a node and its score (BM25 for text, cosine similarity
 /// for vectors). Higher is better.

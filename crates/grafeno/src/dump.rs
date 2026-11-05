@@ -294,8 +294,59 @@ impl Grafeno {
     }
 }
 
+impl crate::Writer {
+    /// [`Grafeno::import_with`] in chunks through the writer's bulk lane:
+    /// each chunk of `chunk` records is one transaction, taken between the
+    /// groups of interactive writes, so the import never holds the
+    /// database for longer than one chunk. Chunks commit with eventual
+    /// durability and the import flushes at the end. An error leaves the
+    /// chunks before it in place.
+    pub fn import(&self, input: impl BufRead, chunk: usize) -> Result<DumpStats> {
+        let state = std::sync::Arc::new(std::sync::Mutex::new(Import {
+            defer_texts: true,
+            ..Import::default()
+        }));
+        let mut lines = input.lines();
+        let mut number = 0usize;
+        loop {
+            let mut part: Vec<(usize, String)> = Vec::with_capacity(chunk.clamp(1, 100_000));
+            for line in lines.by_ref() {
+                number += 1;
+                let line = line.map_err(|e| Error::Invalid(format!("line {number}: {e}")))?;
+                part.push((number, line));
+                if part.len() >= chunk.max(1) {
+                    break;
+                }
+            }
+            if part.is_empty() {
+                break;
+            }
+            let last = part.len() < chunk.max(1);
+            let shared = state.clone();
+            let part = std::sync::Arc::new(part);
+            self.write_bulk(move |tx| {
+                // A failed attempt must leave the state as it was: work on a
+                // copy and keep it only on success.
+                let mut import = shared.lock().expect("not poisoned").clone();
+                for (number, line) in part.iter() {
+                    import.line(tx, *number, Ok(line.clone()))?;
+                }
+                import.index_texts(tx)?;
+                *shared.lock().expect("not poisoned") = import;
+                Ok(())
+            })?;
+            if last {
+                break;
+            }
+        }
+        self.flush()?;
+        let import = std::mem::take(&mut *state.lock().expect("not poisoned"));
+        import.finish()
+    }
+}
+
 /// The state of an import across its lines.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Import {
     stats: DumpStats,
     namespaces: BTreeSet<String>,

@@ -116,6 +116,11 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
   (`[memory]`), projections at about 12 bytes per edge, a streaming
   `check` ten times faster, and GQ algorithms bounded by `max_memory` and
   `top`.
+- **Phase 10.7, one writer:** saturation measured (about 2 ms a write up
+  to 4 000 a second with immediate durability, 11 000 at most); imports
+  go through a bulk lane, so an agent writing during a large import waits
+  88 ms at p99 instead of the whole import; `GET /v1/metrics` for
+  Prometheus. Phase 10 (hardening) is complete.
 
 ## Installing
 

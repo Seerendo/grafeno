@@ -304,6 +304,73 @@ time; it lives for one write transaction, so large transactions make the
 most of it. Searches stay at about 5 ms and need little memory: 140 MiB
 with a million vectors (512 MiB of vectors on disk).
 
+## The one writer under load (`crates/grafeno/examples/saturation.rs`)
+
+Writes of a node and an edge each, offered at a fixed rate by 512 client
+threads for 3 s per step (open load: latency runs from the scheduled
+time, so falling behind shows), through the group-commit writer, on a
+database file on a laptop's NVMe SSD (Windows 11). Release build,
+2026-11-05.
+
+Immediate durability, `max_batch` 128 (before) and 512 (now):
+
+| offered/s | 128: done/s | p50 / p99 / p999 ms | writes/commit | 512: done/s | p50 / p99 / p999 ms | writes/commit |
+| --- | --- | --- | --- | --- | --- | --- |
+| 250 | 250 | 1.8 / 4.1 / 11 | 1.0 | 250 | 1.8 / 2.7 / 11 | 1.0 |
+| 1 000 | 999 | 2.9 / 4.9 / 11 | 1.9 | 999 | 3.3 / 6.1 / 11 | 2.2 |
+| 2 000 | 1 998 | 3.5 / 5.6 / 11 | 4.6 | 1 998 | 3.9 / 7.5 / 12 | 5.2 |
+| 4 000 | 3 992 | 5.5 / 9.9 / 25 | 14.7 | 3 993 | 6.1 / 11 / 16 | 16.2 |
+| 8 000 | 7 851 | 29 / 71 / 73 | 120 | 7 891 | 30 / 70 / 78 | 159 |
+| 16 000 | 8 129 | 1 290 / 2 872 / 2 903 | 127 | 11 200 | 571 / 1 288 / 1 305 | 495 |
+| 32 000 | 7 233 | 5 048 / 10 171 / 10 270 | 128 | 10 024 | 3 127 / 6 510 / 6 580 | 505 |
+
+Eventual durability (`max_batch` 128):
+
+| offered/s | done/s | p50 / p99 / p999 ms | writes/commit |
+| --- | --- | --- | --- |
+| 250 | 250 | 0.17 / 1.3 / 9.4 | 1.0 |
+| 1 000 | 1 000 | 0.14 / 11 / 18 | 1.0 |
+| 4 000 | 4 000 | 0.12 / 26 / 51 | 1.1 |
+| 8 000 | 7 928 | 0.22 / 63 / 82 | 1.4 |
+| 16 000 | 15 775 | 35 / 122 / 128 | 107 |
+| 32 000 | 16 589 | 1 415 / 2 768 / 2 784 | 127 |
+
+What the numbers say:
+
+- With immediate durability a write takes about 2 ms (the disk's flush)
+  until about 4 000 writes a second; groups grow with the load, which is
+  what keeps latency flat. Past that the groups reach `max_batch` and it
+  bounds throughput: 128 writes per commit saturate at about 8 000 a
+  second, 512 at about 11 000 (the default now). Beyond saturation
+  latency grows with the queue, and at the queue's limit (4 096) writes
+  get 503.
+- With eventual durability a write takes about 0.15 ms until about 8 000
+  a second and saturates at about 16 000. Its p99 is the flush: every
+  500 ms the writer makes the commits durable, which holds it for 10 to
+  25 ms; a write arriving then waits for it.
+- No step lost or failed a write; none reached the queue limit (512
+  clients keep at most 512 waiting).
+
+An agent writing 200 times a second for 12 s while 300 000 nodes with
+texts are imported:
+
+| import | import s | agent p50 / p99 / max ms |
+| --- | --- | --- |
+| none (the agent alone) | - | 1.9 / 2.8 / 10 |
+| around the writer, one transaction (the server before 10.7) | 12.2 | 6 208 / 12 035 / 12 152 |
+| around the writer, chunks of 20 000 (`?bulk=true` before 10.7) | 9.7 | 3 745 / 9 564 / 9 681 |
+| bulk lane, one transaction | 10.3 | 4 269 / 10 088 / 10 208 |
+| bulk lane, chunks of 20 000 | 10.5 | 291 / 696 / 758 |
+| bulk lane, chunks of 2 000 (`?bulk=true` now) | 11.6 | 36 / 88 / 161 |
+
+An import that took the database for itself stopped the agent for as
+long as it ran. Through the bulk lane, the agent's writes go between
+chunks: with chunks of 2 000 records an agent waits 36 ms at the median
+and 88 ms at p99 while the import runs about 10% slower. An import in one
+transaction (all or nothing) still holds the writer for its whole length,
+in either lane: that is what all or nothing means; `?bulk=true` is the
+way for large loads.
+
 ## Remaining limits
 
 - **Vector search reads each visited vector from redb** (about 0.4 µs per

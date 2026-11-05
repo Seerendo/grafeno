@@ -202,7 +202,7 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `DELETE` | `/v1/namespaces/{ns}`                 |                                                         | `{nodes, edges}` deleted with it |
 | `GET`    | `/v1/backup`                          |                                                         | the whole database file, consistent (owners) |
 | `GET`    | `/v1/export`                          | `?ns=a,b` (all by default)                              | JSON Lines                    |
-| `POST`   | `/v1/import`                          | JSON Lines (up to 1 GiB); `?bulk=true` loads in chunks  | `{namespaces, nodes, edges}`  |
+| `POST`   | `/v1/import`                          | JSON Lines (up to 1 GiB); `?bulk=true` loads in chunks between other writes | `{namespaces, nodes, edges}`  |
 | `GET`    | `/v1/{ns}/stats`                      |                                                         | statistics                    |
 | `POST`   | `/v1/{ns}/compact`                    |                                                         | rebuilds the vector graph (admin): `{vectors, dangling_before, unreachable_before, unreachable_after}` |
 | `GET`    | `/v1/{ns}/vectors/recall`             | `?sample=100&ef=64`                                     | `{sample, ef, recall}`: estimated recall@10 |
@@ -231,6 +231,7 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `POST`   | `/v1/{ns}/batch`                      | `{ops}`                                                 | `{results, refs}`             |
 | `POST`   | `/v1/{ns}/query`                      | `{query, params?}` ([GQ](../../docs/query-language.md)) | `{columns, rows, stats}`      |
 | `GET`    | `/v1/whoami`                          |                                                         | the caller: `{name, owner, grants, own_only}` |
+| `GET`    | `/v1/metrics`                         |                                                         | counters and histograms in the Prometheus text format (any secret) |
 | `GET`    | `/v1/keys`                            |                                                         | the keys, never their secrets (owners) |
 | `POST`   | `/v1/keys`                            | `{name, grants: [{namespace, role}], owner?, own_only?, description?}` | `{key, secret}` (201; the secret only here) |
 | `DELETE` | `/v1/keys/{name}`                     |                                                         | 204                           |

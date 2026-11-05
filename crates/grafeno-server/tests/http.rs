@@ -1139,3 +1139,87 @@ async fn namespaces_are_created_and_dropped() {
     let (status, _) = call(&app, "DELETE", "/v1/namespaces/demo", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn metrics_count_requests_writes_and_limits() {
+    let app = router(
+        AppState::new(Arc::new(Grafeno::in_memory().unwrap()), Some("secret")).with_limits(
+            grafeno_query::Limits {
+                max_rows: Some(10),
+                ..grafeno_query::Limits::standard()
+            },
+        ),
+    );
+    let auth = |request: axum::http::request::Builder| {
+        request.header(header::AUTHORIZATION, "Bearer secret")
+    };
+    for i in 0..3 {
+        let request = auth(Request::builder().method("POST").uri("/v1/m/nodes"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "labels": ["Note"], "props": { "i": i } }).to_string(),
+            ))
+            .unwrap();
+        assert!(
+            app.clone()
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+    }
+    let request = auth(Request::builder().method("POST").uri("/v1/m/query"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({ "query": "UNWIND range(1, 100) AS x RETURN x" }).to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(request).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+    // Without a secret: refused, like the rest of /v1.
+    let anonymous = Request::builder()
+        .uri("/v1/metrics")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(anonymous).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    let request = auth(Request::builder().uri("/v1/metrics"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/plain")
+    );
+    let text = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    for line in [
+        "grafeno_writes_total 3",
+        "grafeno_write_groups_total",
+        "grafeno_write_queue{lane=\"interactive\"} 0",
+        "grafeno_queries_total 1",
+        "grafeno_query_limits_total{limit=\"max_rows\"} 1",
+        "grafeno_http_requests_total{status=\"4xx\"} 2",
+        "grafeno_commit_seconds_bucket{le=\"+Inf\"}",
+        "grafeno_write_seconds_count{lane=\"interactive\"} 3",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in:\n{text}");
+    }
+}

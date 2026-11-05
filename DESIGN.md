@@ -972,7 +972,7 @@ when the cache is too small for them; the edge-label filter of
 projections reads every adjacency entry; and duplicate detection
 (`find_duplicates`) still loads every node of the namespace.
 
-**10.7 One writer.**
+**10.7 One writer** (done).
 
 - Measure saturation: write latency (p50, p99, p999) against offered
   load, queue depth and group sizes, with immediate and eventual
@@ -981,6 +981,35 @@ projections reads every adjacency entry; and duplicate detection
   group size, rejected writes, query times and limits hit.
 - Tuning from the numbers (group size, flush interval, separate queues for
   bulk and interactive writes so an import cannot starve an agent).
+
+As built: the writer has two lanes. Interactive writes are grouped as
+before and always served first; bulk writes run one per transaction
+between groups, with eventual durability, and a bulk writer waits for
+room instead of being refused. `Writer::import` reads an export in
+chunks and writes each in the bulk lane, and the server imports through
+it (a rebuild and a compaction go through it too): before, an import
+opened its own transactions, so the writer, and every agent, waited for
+the whole import, and a chunked import switched the whole database to
+eventual durability while it ran. Measured (`examples/saturation.rs`,
+numbers in `docs/benchmarks.md`): an agent writing 200 times a second
+waited up to 12 s during a 300 000-node import, and now 88 ms at p99 with
+chunks of 2 000 (the server's default, `[writer] import_chunk`).
+
+Saturation, on a laptop SSD: with immediate durability writes stay near
+2 ms up to about 4 000 a second; then groups reach `max_batch`, which
+bounds throughput, so it went from 128 to 512 (from about 8 000 to about
+11 000 writes a second). With eventual durability writes take about 0.15
+ms up to about 8 000 a second and saturate near 16 000; the flush every
+500 ms holds the writer for 10 to 25 ms, which is the p99.
+
+The writer keeps counters and histograms (`Writer::metrics`): queue
+depth per lane, writes, failures, rejections, retries, groups, writes per
+group, commit time and latency per lane. `GET /v1/metrics` serves them
+in the Prometheus text format with the server's own: requests by status
+class and their time, 503s, GQ queries and their time, and the limits
+they hit (timeout, reads, rows, memory, cost, cancelled), and the
+projection cache's memory. It needs a secret like the rest of `/v1`. The
+writer's options are `[writer]` in `grafeno.toml`.
 
 #### Phase 11: memory that keeps itself
 

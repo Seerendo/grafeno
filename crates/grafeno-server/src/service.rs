@@ -29,6 +29,9 @@ pub struct ServerSettings {
     pub max_requests: usize,
     /// Cache sizes.
     pub memory: grafeno::OpenOptions,
+    /// The group-commit writer, and records per bulk-import transaction.
+    pub writer: grafeno::WriterOptions,
+    pub import_chunk: usize,
 }
 
 /// Values given on the command line (or in the environment), if any.
@@ -75,6 +78,8 @@ impl ServerSettings {
             durability: config.durability.map(Into::into).unwrap_or_default(),
             max_requests: config.max_requests.unwrap_or(http::MAX_REQUESTS),
             memory: config.memory.options(),
+            writer: config.writer.options(),
+            import_chunk: config.writer.import_chunk(),
         }
     }
 
@@ -93,7 +98,8 @@ pub fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = Arc::new(settings.open()?);
     db.set_durability(settings.durability);
-    let state = AppState::new(db, settings.token.as_deref())
+    let state = AppState::with_writer(db, settings.token.as_deref(), settings.writer)
+        .with_import_chunk(settings.import_chunk)
         .with_limits(settings.limits.clone())
         .with_max_requests(settings.max_requests);
     tokio::runtime::Builder::new_multi_thread()

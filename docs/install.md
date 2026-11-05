@@ -209,6 +209,12 @@ max_rows = 1000000          # rows held at once
 max_memory_mb = 512         # one value a query builds, or the rows it holds at once
 max_cost = 0                # refuse queries EXPLAIN estimates above this (0: off)
 
+[writer]                    # the group commit (see "Monitoring" below)
+max_batch = 512             # writes per transaction at most
+queue = 4096                # writes that may wait; more get 503
+flush_ms = 500              # with eventual durability, how often commits reach the disk
+import_chunk = 2000         # records per transaction of an import with ?bulk=true
+
 [memory]                    # caches, in MiB (see "Memory" below)
 cache_mb = 256              # pages of the database file
 projection_cache_mb = 256   # graphs kept for graph algorithms
@@ -231,6 +237,30 @@ a graph then build their projection, about 140 MiB, each time, and may
 need a longer `timeout_secs`). Loading many embeddings goes about twice as
 fast with `vector_cache_mb = 1024` and large write transactions, if the
 memory is there. Numbers in [benchmarks](benchmarks.md).
+
+### Monitoring
+
+`GET /v1/metrics` answers in the Prometheus text format: requests and
+their time, GQ queries, the limits they hit, the writer's queue, groups,
+commit time and write latency per lane. It needs a secret, like the rest
+of `/v1`; a key with any grant will do:
+
+```yaml
+scrape_configs:
+  - job_name: grafeno
+    metrics_path: /v1/metrics
+    authorization:
+      credentials: gfk_…
+    static_configs:
+      - targets: ["127.0.0.1:7810"]
+```
+
+Watch `grafeno_write_queue` and `grafeno_write_seconds`: a queue that
+stays up means writes arrive faster than one writer commits them (about
+11 000 a second on an SSD with immediate durability, more with
+`durability = "eventual"`); `grafeno_write_rejected_total` counts the 503s
+past the queue's limit. Load large exports with `?bulk=true`: they then go
+in chunks between the agents' writes instead of before them.
 
 ## Grafeno Studio on its own
 

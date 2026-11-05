@@ -323,8 +323,14 @@ impl Grafeno {
     }
 
     pub fn begin_write(&self) -> Result<WriteTx> {
+        self.begin_write_lane(false)
+    }
+
+    /// A write transaction; with `eventual`, its commit has eventual
+    /// durability whatever the database's setting (bulk loads).
+    pub(crate) fn begin_write_lane(&self, eventual: bool) -> Result<WriteTx> {
         let mut tx = self.db.begin_write().map_err(storage)?;
-        if self.eventual.load(Ordering::Relaxed) {
+        if eventual || self.eventual.load(Ordering::Relaxed) {
             tx.set_durability(redb::Durability::None).map_err(storage)?;
             self.unflushed.store(true, Ordering::Release);
         }

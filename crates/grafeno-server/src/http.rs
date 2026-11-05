@@ -43,26 +43,48 @@ pub struct AppState {
     /// Requests being served under `/v1`; beyond its permits the server
     /// answers 503 instead of piling up work.
     pub in_flight: Arc<tokio::sync::Semaphore>,
+    /// Counters for `GET /v1/metrics`.
+    pub metrics: Arc<crate::metrics::ServerMetrics>,
+    /// Records per transaction of a bulk import.
+    pub import_chunk: usize,
 }
 
 /// Requests served at once under `/v1` by default.
 pub const MAX_REQUESTS: usize = 512;
 
+/// Records per transaction of a bulk import, by default. Small enough that
+/// an agent's write waits for one chunk at most (tens of milliseconds); at
+/// 20 000 it waited most of a second (`examples/saturation.rs`).
+pub const IMPORT_CHUNK: usize = 2_000;
+
 impl AppState {
     /// The state for `db`, with its group-commit writer, the standard query
     /// limits and room for [`MAX_REQUESTS`] requests at once.
     pub fn new(db: Arc<Grafeno>, token: Option<&str>) -> Self {
+        Self::with_writer(db, token, grafeno::WriterOptions::default())
+    }
+
+    /// [`AppState::new`] with a writer of these options.
+    pub fn with_writer(
+        db: Arc<Grafeno>,
+        token: Option<&str>,
+        options: grafeno::WriterOptions,
+    ) -> Self {
         Self {
-            writer: Arc::new(grafeno::Writer::new(
-                db.clone(),
-                grafeno::WriterOptions::default(),
-            )),
+            writer: Arc::new(grafeno::Writer::new(db.clone(), options)),
             keys: Arc::new(Keyring::load(&db).unwrap_or_default()),
             db,
             token: token.map(Arc::from),
             limits: grafeno_query::Limits::standard(),
             in_flight: Arc::new(tokio::sync::Semaphore::new(MAX_REQUESTS)),
+            metrics: Arc::default(),
+            import_chunk: IMPORT_CHUNK,
         }
+    }
+
+    pub fn with_import_chunk(mut self, chunk: usize) -> Self {
+        self.import_chunk = chunk.max(1);
+        self
     }
 
     pub fn with_limits(mut self, limits: grafeno_query::Limits) -> Self {
@@ -194,8 +216,10 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/{ns}/archive", post(archive_nodes))
         .route("/{ns}/consolidation", get(consolidation))
         .route("/{ns}/summaries", post(summaries))
+        .route("/metrics", get(metrics))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
-        .route_layer(middleware::from_fn_with_state(state.clone(), admit));
+        .route_layer(middleware::from_fn_with_state(state.clone(), admit))
+        .route_layer(middleware::from_fn_with_state(state.clone(), observe));
     let mut app = Router::new().route("/health", get(health)).nest("/v1", v1);
     if options.studio {
         app = app
@@ -360,6 +384,30 @@ async fn write<T: Send + 'static>(
         .map_err(ApiError::from)
 }
 
+/// Runs a long write (a rebuild, a compaction) in the writer's bulk lane:
+/// in a transaction of its own, after the interactive writes waiting.
+async fn write_bulk<T: Send + 'static>(
+    state: &AppState,
+    work: impl Fn(&mut WriteTx) -> grafeno::Result<T> + Send + 'static,
+) -> ApiResult<T> {
+    let writer = state.writer.clone();
+    let actor = auth::current().actor();
+    let work = move |tx: &mut WriteTx| {
+        tx.act_as(actor.clone());
+        let result = work(tx);
+        tx.act_as(None);
+        result
+    };
+    tokio::task::spawn_blocking(move || {
+        let value = writer.write_bulk(work)?;
+        writer.flush()?;
+        Ok::<T, grafeno::Error>(value)
+    })
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))?
+    .map_err(ApiError::from)
+}
+
 /// Runs engine work on the blocking pool: redb calls are synchronous.
 async fn blocking<T: Send + 'static>(
     state: &AppState,
@@ -503,17 +551,49 @@ fn parse_edge_id(text: &str) -> grafeno::Result<EdgeId> {
 
 /// Turns requests away with 503 (and `Retry-After`) when too many are in
 /// flight, instead of queueing without bound.
+/// Counts every request under `/v1` and how long it took.
+async fn observe(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let started = std::time::Instant::now();
+    let response = next.run(request).await;
+    state
+        .metrics
+        .request(response.status().as_u16(), started.elapsed().as_secs_f64());
+    response
+}
+
+/// The server's and the writer's counters, in the Prometheus text format.
+async fn metrics(State(state): State<AppState>) -> Response {
+    let text = state
+        .metrics
+        .render(&state.writer.metrics(), state.db.projection_cache_bytes());
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        text,
+    )
+        .into_response()
+}
+
 async fn admit(State(state): State<AppState>, request: Request, next: Next) -> Response {
     match state.in_flight.clone().try_acquire_owned() {
         Ok(_permit) => next.run(request).await,
-        Err(_) => ApiError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            code: "busy",
-            message: "the server is busy: retry in a moment".into(),
-            details: None,
+        Err(_) => {
+            state.metrics.busy();
+            busy_response()
         }
-        .into_response(),
     }
+}
+
+fn busy_response() -> Response {
+    ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "busy",
+        message: "the server is busy: retry in a moment".into(),
+        details: None,
+    }
+    .into_response()
 }
 
 async fn health() -> Json<Value> {
@@ -1289,7 +1369,7 @@ async fn rebuild(
     State(state): State<AppState>,
     Path(ns): Path<String>,
 ) -> ApiResult<Json<grafeno::RebuildReport>> {
-    let report = blocking(&state, move |db| db.write(|tx| tx.rebuild_indexes(&ns))).await?;
+    let report = write_bulk(&state, move |tx| tx.rebuild_indexes(&ns)).await?;
     Ok(Json(report))
 }
 
@@ -1298,7 +1378,7 @@ async fn compact(
     State(state): State<AppState>,
     Path(ns): Path<String>,
 ) -> ApiResult<Json<grafeno::CompactReport>> {
-    let report = write(&state, move |tx| tx.compact_vectors(&ns)).await?;
+    let report = write_bulk(&state, move |tx| tx.compact_vectors(&ns)).await?;
     Ok(Json(report))
 }
 
@@ -1430,12 +1510,17 @@ async fn import(
     let body = axum::body::to_bytes(request.into_body(), IMPORT_LIMIT)
         .await
         .map_err(|error| ApiError::bad_request(format!("cannot read the export: {error}")))?;
-    let options = if params.bulk {
-        grafeno::ImportOptions::bulk()
+    // Through the bulk lane, so agents keep writing during a load: in
+    // chunks with `bulk`, else in one transaction (all of it or nothing).
+    let chunk = if params.bulk {
+        state.import_chunk
     } else {
-        grafeno::ImportOptions::default()
+        usize::MAX
     };
-    let stats = blocking(&state, move |db| db.import_with(body.as_ref(), &options)).await?;
+    let writer = state.writer.clone();
+    let stats = tokio::task::spawn_blocking(move || writer.import(body.as_ref(), chunk))
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))??;
     Ok(Json(stats))
 }
 
@@ -1493,8 +1578,25 @@ async fn query(
     run_query(&state, ns, input.query, params).await.map(Json)
 }
 
-/// Runs a GQ query: reads on a snapshot, writes in the next group commit.
+/// Runs a GQ query, counted in the metrics.
 async fn run_query(
+    state: &AppState,
+    ns: String,
+    query: String,
+    params: grafeno_query::Params,
+) -> ApiResult<Value> {
+    let started = std::time::Instant::now();
+    let outcome = run_query_counted(state, ns, query, params).await;
+    let limit = match &outcome {
+        Err(error) if error.code == "query_limit" => Some(error.message.as_str()),
+        _ => None,
+    };
+    state.metrics.query(started.elapsed().as_secs_f64(), limit);
+    outcome
+}
+
+/// Runs a GQ query: reads on a snapshot, writes in the next group commit.
+async fn run_query_counted(
     state: &AppState,
     ns: String,
     query: String,
