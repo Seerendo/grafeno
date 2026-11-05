@@ -689,7 +689,7 @@ export function App() {
             <Icon name="logout" />
           </button>
         </header>
-        <main className={layout} key={`${current}-${view}`}>
+        <main className={layout} key={`${connection.url}-${current}-${view}`}>
           {view === "overview" && <OverviewView />}
           {view === "explorer" && <ExplorerView selected={route.param} />}
           {view === "graph" && <GraphView seed={route.param} />}

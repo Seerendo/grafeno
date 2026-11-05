@@ -168,6 +168,7 @@ def scenario(window, files, artifacts):
     assert window.script("return window.location.hash;") == "#/overview"
     window.wait(lambda: window.text("main .cards .card:first-child .value") == "0", "mostrar la base vacía")
     assert not window.exists(".toast.error"), "quedó un aviso de la base anterior"
+    assert not window.exists("main .error"), "quedó un error de la vista anterior"
     window.capture(artifacts, "04-otra-base-sin-borradores")
     assert window.query("MATCH (p:Person) RETURN count(p)") == [[0]]
     stale = window.promise("return await window.__TAURI__.core.invoke('request', arguments[0]);", {
@@ -187,7 +188,8 @@ def scenario(window, files, artifacts):
     window.wait(lambda: first.name in window.text(".server-pill")
                 and window.exists('.app[aria-busy="false"]'), "reabrir desde recientes")
     assert window.query("MATCH (p:Person) RETURN p.name") == [["Ana de prueba"]]
-    window.wait(lambda: window.text("main .cards .card:first-child .value") == "1", "mostrar los datos restaurados")
+    window.wait(lambda: window.text("main .cards .card:first-child .value") == "1", "mostrar los datos al reabrir")
+    assert not window.exists("main .error"), "la vista reabierta muestra un error anterior"
     window.capture(artifacts, "05-base-reabierta")
     checks.append("Cerrar y reabrir desde recientes conservando los datos confirmados.")
     for check in checks:
