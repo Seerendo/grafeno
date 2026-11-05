@@ -76,7 +76,7 @@ jobs:
         timeout-minutes: 10
         run: |
           # Evitar descargas retenidas en el espejo de Azure del runner.
-          for grafeno_apt_source in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
+          for grafeno_apt_source in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources /etc/apt/apt-mirrors.txt /etc/apt/apt-mirrors-security.txt; do
             if [ -f "$grafeno_apt_source" ]; then
               sudo sed -i -E 's|https?://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "$grafeno_apt_source"
             fi
