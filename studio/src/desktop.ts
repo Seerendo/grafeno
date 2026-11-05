@@ -12,7 +12,7 @@ const tauri = (window as unknown as { __TAURI__?: TauriGlobal }).__TAURI__;
 /** Whether the Studio runs inside the Grafeno desktop app. */
 export const isDesktop = tauri !== undefined;
 
-/** The address of the database opened in the app (never leaves the process). */
+/** Origen interno; cada sesión recibe una ruta propia y no sale del proceso. */
 export const LOCAL_URL = "http://grafeno.local";
 
 export interface DesktopSession {

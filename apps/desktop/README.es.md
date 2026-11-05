@@ -46,6 +46,9 @@ con el CLI de Tauri; consulta la [guía de contribución](../../CONTRIBUTING.md)
 - Cerrar una sesión libera sus referencias al archivo. Las solicitudes que ya
   se están ejecutando pueden conservar referencias hasta terminar.
 - Las rutas recientes y el título solo se actualizan tras una apertura exitosa.
+- Cada sesión tiene una dirección interna propia. Las solicitudes tardías de
+  otra sesión se rechazan; las que ya capturaron su router terminan sobre la
+  base original. Cerrar y reabrir un archivo invalida su dirección anterior.
 
 ## Pruebas
 
@@ -62,10 +65,10 @@ La prueba auxiliar marcada como ignorada se ejecuta desde la prueba de bloqueo.
 Las comprobaciones de permisos necesitan un usuario sin privilegios: la prueba
 informa cuando su usuario puede escribir pese a un permiso de solo lectura.
 
-Estas pruebas no abren la ventana ni sustituyen la comprobación completa de
-checksums de una base potencialmente dañada. La interacción visual y las
-solicitudes simultáneas durante un cambio de base requieren validaciones
-adicionales.
+Las pruebas incluyen solicitudes tardías y una escritura despachada antes de
+cambiar de base. No abren la ventana ni sustituyen la comprobación completa de
+checksums de una base potencialmente dañada. La interacción visual necesita
+validaciones adicionales.
 
 ## Organización
 

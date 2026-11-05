@@ -30,7 +30,9 @@ use tower::ServiceExt;
 mod local_database;
 #[cfg(test)]
 use local_database::router_for;
-use local_database::{LOCAL_URL, Session, SessionInfo, file_name, info, open_session};
+use local_database::{
+    Session, SessionInfo, file_name, info, local_path, open_session, request_target,
+};
 
 /// Recent databases kept in the menu and on the start screen.
 const RECENT: usize = 10;
@@ -296,18 +298,14 @@ async fn request(
     headers: BTreeMap<String, String>,
     body: Option<String>,
 ) -> Result<Reply, String> {
-    if let Some(path) = url.strip_prefix(LOCAL_URL) {
-        let router = desktop
-            .session
-            .lock()
-            .expect("not poisoned")
-            .as_ref()
-            .map(|session| (session.router.clone(), session.token.clone()))
-            .ok_or("no database is open")?;
-        let (router, token) = router;
+    if let Some(path) = local_path(&url) {
+        let (router, token, path) = {
+            let current = desktop.session.lock().expect("not poisoned");
+            request_target(current.as_ref(), path)?
+        };
         let mut headers = headers;
         headers.insert("authorization".into(), format!("Bearer {token}"));
-        return local_request(router, &method, path, &headers, body).await;
+        return local_request(router, &method, &path, &headers, body).await;
     }
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(format!("not a web address: {url}"));

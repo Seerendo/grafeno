@@ -12,6 +12,7 @@ use serde::Serialize;
 pub(super) const LOCAL_URL: &str = "http://grafeno.local";
 
 pub(super) struct Session {
+    id: String,
     pub path: PathBuf,
     pub db: Arc<Grafeno>,
     pub router: Router,
@@ -21,7 +22,7 @@ pub(super) struct Session {
 
 #[derive(Debug, Serialize)]
 pub(super) struct SessionInfo {
-    pub url: &'static str,
+    pub url: String,
     pub path: String,
     pub name: String,
 }
@@ -35,7 +36,7 @@ pub(super) fn file_name(path: &Path) -> String {
 
 pub(super) fn info(session: &Session) -> SessionInfo {
     SessionInfo {
-        url: LOCAL_URL,
+        url: format!("{LOCAL_URL}/session/{}", session.id),
         path: session.path.display().to_string(),
         name: file_name(&session.path),
     }
@@ -87,6 +88,7 @@ pub(super) fn open_session(
     let db = Arc::new(db);
     let router = router_for(db.clone(), Some(&token));
     let next = Session {
+        id: grafeno::NodeId::new().to_string(),
         path,
         db,
         router,
@@ -95,6 +97,33 @@ pub(super) fn open_session(
     let reply = info(&next);
     *current = Some(next);
     Ok(reply)
+}
+
+/// Solo el origen interno exacto se resuelve dentro del proceso.
+pub(super) fn local_path(url: &str) -> Option<&str> {
+    url.strip_prefix(LOCAL_URL)
+        .filter(|path| path.is_empty() || path.starts_with('/'))
+}
+
+/// Captura el destino antes de ejecutar: una solicitud antigua nunca se
+/// redirige a la base que acaba de sustituir a su sesión.
+pub(super) fn request_target(
+    current: Option<&Session>,
+    path: &str,
+) -> Result<(Router, String, String), String> {
+    let session = current.ok_or("no database is open")?;
+    let scoped = path
+        .strip_prefix("/session/")
+        .ok_or("missing database session; reopen the database")?;
+    let (id, path) = scoped.split_once('/').unwrap_or((scoped, ""));
+    if id != session.id {
+        return Err("database session changed; reopen the database before retrying".into());
+    }
+    Ok((
+        session.router.clone(),
+        session.token.clone(),
+        format!("/{path}"),
+    ))
 }
 
 #[cfg(test)]
@@ -138,7 +167,7 @@ mod tests {
         let mut current = None;
         let opened = open_session(&mut current, path.clone()).unwrap();
         assert_eq!(opened.name, "mi base de investigación.redb");
-        assert_eq!(opened.url, LOCAL_URL);
+        assert!(opened.url.starts_with(&format!("{LOCAL_URL}/session/")));
         let id = insert(current.as_ref().unwrap(), "Ana");
         drop(current.take());
 
@@ -314,6 +343,98 @@ mod tests {
         assert!(error.contains("cannot open"), "{error}");
         assert_eq!(token, current.as_ref().unwrap().token);
         insert(current.as_ref().unwrap(), "Sigue disponible");
+    }
+
+    #[test]
+    fn local_urls_do_not_match_other_hosts() {
+        assert_eq!(local_path(LOCAL_URL), Some(""));
+        assert_eq!(
+            local_path(&format!("{LOCAL_URL}/session/id/health")),
+            Some("/session/id/health")
+        );
+        assert!(local_path("http://grafeno.local.example/session/id/health").is_none());
+        assert!(local_path("http://grafeno.local@other.example/health").is_none());
+    }
+
+    #[test]
+    fn delayed_requests_cannot_target_the_next_database() {
+        let files = Files::new();
+        let mut current = None;
+        let first = open_session(&mut current, files.path("primera.redb")).unwrap();
+        let old_url = format!("{}/v1/lab/nodes?limit=2", first.url);
+        let old_path = local_path(&old_url).unwrap();
+        let second = open_session(&mut current, files.path("segunda.redb")).unwrap();
+        assert_ne!(first.url, second.url);
+        let error = request_target(current.as_ref(), old_path).err().unwrap();
+        assert!(error.contains("session changed"), "{error}");
+        assert!(request_target(current.as_ref(), "/v1/lab/nodes").is_err());
+        let new_url = format!("{}/v1/lab/nodes?limit=2", second.url);
+        let (_, _, path) = request_target(current.as_ref(), local_path(&new_url).unwrap()).unwrap();
+        assert_eq!(path, "/v1/lab/nodes?limit=2");
+        let same = open_session(&mut current, files.path("segunda.redb")).unwrap();
+        assert_eq!(second.url, same.url);
+        assert!(
+            current
+                .as_ref()
+                .unwrap()
+                .db
+                .begin_read()
+                .unwrap()
+                .namespaces()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn closing_and_reopening_a_file_invalidates_its_old_requests() {
+        let files = Files::new();
+        let mut current = None;
+        let first = open_session(&mut current, files.path("actual.redb")).unwrap();
+        let url = format!("{}/health", first.url);
+        drop(current.take());
+        assert!(request_target(current.as_ref(), local_path(&url).unwrap()).is_err());
+        let second = open_session(&mut current, files.path("actual.redb")).unwrap();
+        assert_ne!(first.url, second.url);
+        assert!(request_target(current.as_ref(), local_path(&url).unwrap()).is_err());
+    }
+
+    #[tokio::test]
+    async fn an_already_dispatched_write_stays_on_its_original_database() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+        let files = Files::new();
+        let mut current = None;
+        let first = open_session(&mut current, files.path("primera.redb")).unwrap();
+        let original = current.as_ref().unwrap().db.clone();
+        let url = format!("{}/v1/lab/query", first.url);
+        let (router, token, path) =
+            request_target(current.as_ref(), local_path(&url).unwrap()).unwrap();
+        open_session(&mut current, files.path("segunda.redb")).unwrap();
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"query":"CREATE (:Person {name: 'Ana'})"}"#))
+            .unwrap();
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            original.begin_read().unwrap().namespaces().unwrap()[0].name,
+            "lab"
+        );
+        assert!(
+            current
+                .as_ref()
+                .unwrap()
+                .db
+                .begin_read()
+                .unwrap()
+                .namespaces()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     struct LockHolder(Child);

@@ -86,3 +86,8 @@ The ignored helper test is executed by the lock test in a child process. Unix
 permission checks require an unprivileged user; the test reports when its user
 can bypass read-only permissions. These tests do not launch the window and do
 not replace a full checksum scan of a potentially damaged database.
+
+Each session has its own internal URL. Late requests from another session are
+rejected; requests that already captured their router finish on the original
+database. Closing and reopening a file invalidates its previous URL. Tests cover
+both delayed requests and a write dispatched before switching databases.

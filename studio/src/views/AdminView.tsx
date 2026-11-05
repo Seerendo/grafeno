@@ -97,7 +97,7 @@ export function AdminView() {
           >
             Export everything
           </button>
-          {(!isDesktop || connection.url === LOCAL_URL) && (
+          {(!isDesktop || connection.url.startsWith(`${LOCAL_URL}/session/`)) && (
             <button
               disabled={busy !== null}
               title="A copy of the whole database file (every namespace and the keys), taken while it keeps working. Owners only."

@@ -18,7 +18,7 @@ import { EdgeForm, NodeForm } from "./components/Forms.tsx";
 import { type ConfirmOptions, type NewEdgeOptions, type NewNodeOptions, type Studio, StudioContext, useStudio } from "./context.ts";
 import { Icon, type IconName, Logo } from "./icons.tsx";
 import { Modal, useNodeSearch } from "./ui.tsx";
-import { type DesktopSession, LOCAL_URL, desktop, isDesktop, saveText } from "./desktop.ts";
+import { type DesktopSession, desktop, isDesktop, saveText } from "./desktop.ts";
 import { AdminView } from "./views/AdminView.tsx";
 import { ExplorerView } from "./views/ExplorerView.tsx";
 import { GraphView } from "./views/GraphView.tsx";
@@ -411,7 +411,7 @@ export function App() {
             return;
           }
           setLocal(session);
-          return connect({ url: LOCAL_URL, token: "" });
+          return connect({ url: session.url, token: "" });
         })
         .catch((problem) => {
           setError(describeError(problem));
@@ -431,7 +431,7 @@ export function App() {
       try {
         const session = await desktop.open(path);
         setLocal(session);
-        await connect({ url: LOCAL_URL, token: "" });
+        await connect({ url: session.url, token: "" });
       } catch (problem) {
         // La apertura fallida conserva la sesión anterior en el motor y la UI.
         const message = describeError(problem);
