@@ -234,6 +234,11 @@ unnoticed. Node arguments are nodes or their ids as strings.
 | `algo.pageRank()` | `node`, `score` | `damping: 0.85`, `iterations: 20`, `tolerance: 1e-7`, `sources` (personalized PageRank: jumps land only on these nodes). Scores add up to 1 |
 | `algo.betweenness()` | `node`, `score` | shortest paths through each node (Brandes, on every core); `sample: n` estimates it from n sources, `seed` |
 | `algo.closeness()` | `node`, `score` | Wasserman-Faust closeness, or `harmonic: true` |
+
+The four scoring procedures above also take `top: n`, which keeps only the
+n best rows. Use it on large graphs: without it, every node's record is read
+and held (`CALL algo.pageRank({top: 10}) YIELD node, score` on a million
+nodes reads ten).
 | `algo.wcc()`, `algo.scc()` | `node`, `component` | weakly and strongly connected components |
 | `algo.labelPropagation()` | `node`, `community` | `iterations: 10`, `seed` |
 | `algo.louvain()` | `node`, `community`, `modularity` | `resolution: 1` (higher, smaller communities), `levels: 10`, `iterations: 10` |

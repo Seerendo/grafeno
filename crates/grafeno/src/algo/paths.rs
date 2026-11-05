@@ -4,18 +4,19 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 
-use grafeno_core::{EdgeId, Error, Result};
+use grafeno_core::{Error, Result};
 
 use super::{Projection, Stop, check};
 use crate::traverse::Direction;
 
-/// A path through a projection: positions of nodes, the edges between
-/// them (`edges[i]` joins `nodes[i]` and `nodes[i + 1]`), and the sum of
-/// the edge weights.
+/// A path through a projection: positions of nodes, the numbers of the
+/// edges between them (`edges[i]` joins `nodes[i]` and `nodes[i + 1]`;
+/// [`Projection::edge_id`] gives their ids when the projection keeps them),
+/// and the sum of the edge weights.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WeightedPath {
     pub nodes: Vec<u32>,
-    pub edges: Vec<EdgeId>,
+    pub edges: Vec<u32>,
     pub cost: f64,
 }
 
@@ -59,11 +60,11 @@ fn weight_of(weight: f64) -> Result<f64> {
 #[derive(Default)]
 struct Banned {
     nodes: HashSet<u32>,
-    edges: HashSet<EdgeId>,
+    edges: HashSet<u32>,
 }
 
 /// The cost of reaching each node, and the step that reached it.
-type Searched = (Vec<f64>, Vec<Option<(u32, EdgeId)>>);
+type Searched = (Vec<f64>, Vec<Option<(u32, u32)>>);
 
 /// Best-first search from `from`. With a target it stops when the target
 /// is settled; `estimate` is A*'s heuristic (0 for Dijkstra), which must
@@ -78,7 +79,7 @@ fn search(
     stop: Stop,
 ) -> Result<Searched> {
     let mut cost = vec![f64::INFINITY; p.len()];
-    let mut previous: Vec<Option<(u32, EdgeId)>> = vec![None; p.len()];
+    let mut previous: Vec<Option<(u32, u32)>> = vec![None; p.len()];
     let mut done = vec![false; p.len()];
     let mut queue = BinaryHeap::new();
     cost[from as usize] = 0.0;
@@ -115,7 +116,7 @@ fn search(
     Ok((cost, previous))
 }
 
-fn rebuild(previous: &[Option<(u32, EdgeId)>], from: u32, to: u32, cost: f64) -> WeightedPath {
+fn rebuild(previous: &[Option<(u32, u32)>], from: u32, to: u32, cost: f64) -> WeightedPath {
     let mut nodes = vec![to];
     let mut edges = Vec::new();
     let mut at = to;
@@ -179,7 +180,7 @@ pub fn distances(p: &Projection, from: u32, direction: Direction, stop: Stop) ->
 }
 
 /// The weight of the edge `edge` leaving `node`.
-fn edge_weight(p: &Projection, node: u32, edge: EdgeId, direction: Direction) -> f64 {
+fn edge_weight(p: &Projection, node: u32, edge: u32, direction: Direction) -> f64 {
     p.neighbors(node, direction)
         .find(|step| step.edge == edge)
         .map_or(0.0, |step| step.weight)
@@ -263,7 +264,7 @@ pub fn all_shortest_paths(
 ) -> Result<Vec<WeightedPath>> {
     let same_cost = |a: f64, b: f64| (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0);
     let mut cost = vec![f64::INFINITY; p.len()];
-    let mut parents: Vec<Vec<(u32, EdgeId)>> = vec![Vec::new(); p.len()];
+    let mut parents: Vec<Vec<(u32, u32)>> = vec![Vec::new(); p.len()];
     let mut done = vec![false; p.len()];
     let mut queue = BinaryHeap::new();
     cost[from as usize] = 0.0;

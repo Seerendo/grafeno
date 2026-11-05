@@ -11,13 +11,13 @@ use redb::ReadableTable;
 use serde::Serialize;
 
 use crate::db::{ReadTx, WriteTx};
-use crate::index::{INDEX_ENTRIES, expected_entries, stored_entries};
+use crate::index::{INDEX_ENTRIES, entries_of};
 use crate::memory::names_of;
 use crate::stats::{bump_edge_label, bump_namespace, label_counts};
 use crate::store::{
     ADJ_IN, ADJ_OUT, EDGE_LABEL_COUNTS, EDGES, HNSW_LINKS, LABEL_COUNTS, MEMORY, NAMES,
-    NODE_LABELS, NODES, NS_COUNTS, POSTINGS, TEXT_LENGTHS, TEXT_STATS, TEXTS, VECTOR_META, VECTORS,
-    adjacency_value, scan_records, storage,
+    NODE_LABELS, NODES, NS_COUNTS, POSTINGS, RecordKey, TEXT_LENGTHS, TEXT_STATS, TEXTS,
+    VECTOR_META, VECTORS, adjacency_value, decode, storage,
 };
 use crate::{text, vector};
 
@@ -66,17 +66,32 @@ impl ReadTx {
     /// Checks that every index and counter of the namespace agrees with its
     /// records, and that every vector can be reached by searches.
     pub fn check(&self, ns: &str) -> Result<CheckReport> {
+        // Every derived index is compared with its records through a
+        // fingerprint (a sum of hashes, so order does not matter): records
+        // and index are each read once, in order. Only an index whose
+        // fingerprint differs is looked at entry by entry, to say what is
+        // wrong. Memory grows with the node ids (to check edge ends) and the
+        // values of unique indexes, not with the records.
         let mut problems = Vec::new();
-        let nodes: Vec<Node> = scan_records(&self.nodes, ns)?;
-        let edges: Vec<Edge> = scan_records(&self.edges, ns)?;
-        let ids: HashSet<u128> = nodes.iter().map(|node| node.id.as_u128()).collect();
-        let by_id: HashMap<u128, &Node> =
-            nodes.iter().map(|node| (node.id.as_u128(), node)).collect();
+        let defs = self.index_defs(ns)?;
+        let mut ids: HashSet<u128> = HashSet::new();
+        let mut node_count = 0u64;
 
-        // Nodes and the label index.
+        // Nodes: what they call for in the label, name and property indexes.
         let mut node_labels: BTreeMap<String, u64> = BTreeMap::new();
-        for node in &nodes {
+        let (mut labels_expected, mut names_expected, mut index_expected) =
+            (Print::default(), Print::default(), Print::default());
+        let mut index_counts: BTreeMap<String, u64> = BTreeMap::new();
+        let mut unique_seen: Vec<HashMap<String, NodeId>> = vec![HashMap::new(); defs.len()];
+        for item in self.nodes.range((ns, 0u128)..).map_err(storage)? {
+            let (key, value) = item.map_err(storage)?;
+            if key.value().0 != ns {
+                break;
+            }
+            let node: Node = decode(value.value())?;
+            node_count += 1;
             let id = node.id;
+            ids.insert(id.as_u128());
             if node.labels.is_empty() {
                 problems.push(format!("node {id} has no labels"));
             }
@@ -85,71 +100,239 @@ impl ReadTx {
             }
             for label in &node.labels {
                 *node_labels.entry(label.clone()).or_default() += 1;
-                if self
-                    .labels
-                    .get((ns, label.as_str(), id.as_u128()))
-                    .map_err(storage)?
-                    .is_none()
+                labels_expected.add(&(label.as_str(), id.as_u128()));
+            }
+            for name in names_of(&node) {
+                names_expected.add(&(name.as_str(), id.as_u128()));
+            }
+            for (def, bytes) in entries_of(&defs, &node) {
+                *index_counts.entry(def.name.clone()).or_default() += 1;
+                index_expected.add(&(def.name.as_str(), bytes.as_slice(), id.as_u128()));
+            }
+            for (def, seen) in defs.iter().zip(unique_seen.iter_mut()) {
+                if def.unique
+                    && node.has_label(&def.label)
+                    && let Some(value) = node.props.get(&def.key)
+                    && let Some(other) = seen.insert(value.to_string(), id)
                 {
-                    problems.push(format!("label index misses node {id} under {label:?}"));
+                    problems.push(format!(
+                        "nodes {other} and {id} share {} = {value} in unique index {:?}",
+                        def.key, def.name
+                    ));
                 }
             }
         }
+        drop(unique_seen);
+
+        // Edges: their ends exist, and what they call for in adjacency.
+        let mut edge_labels: BTreeMap<String, u64> = BTreeMap::new();
+        let mut edge_count = 0u64;
+        let (mut out_expected, mut in_expected) = (Print::default(), Print::default());
+        for item in self.edges.range((ns, 0u128)..).map_err(storage)? {
+            let (key, value) = item.map_err(storage)?;
+            if key.value().0 != ns {
+                break;
+            }
+            let edge: Edge = decode(value.value())?;
+            edge_count += 1;
+            *edge_labels.entry(edge.label.clone()).or_default() += 1;
+            for end in [edge.from, edge.to] {
+                if !ids.contains(&end.as_u128()) && problems.len() < MAX_PROBLEMS {
+                    problems.push(format!("edge {} points to missing node {end}", edge.id));
+                }
+            }
+            let (label, edge_id) = (edge.label.as_str(), edge.id.as_u128());
+            out_expected.add(&(
+                edge.from.as_u128(),
+                label,
+                edge_id,
+                adjacency_value(&edge, edge.to),
+            ));
+            in_expected.add(&(
+                edge.to.as_u128(),
+                label,
+                edge_id,
+                adjacency_value(&edge, edge.from),
+            ));
+        }
+
+        // The indexes, each read once in order.
+        let mut labels_stored = Print::default();
+        let mut indexed_labels: BTreeMap<String, u64> = BTreeMap::new();
         for item in self.labels.range((ns, "", 0u128)..).map_err(storage)? {
             let (key, _) = item.map_err(storage)?;
             let (key_ns, label, id) = key.value();
             if key_ns != ns {
                 break;
             }
-            if !by_id.get(&id).is_some_and(|node| node.has_label(label)) {
-                problems.push(format!(
-                    "label index lists {} under {label:?}, but the node does not have it",
-                    NodeId::from_u128(id)
-                ));
+            labels_stored.add(&(label, id));
+            *indexed_labels.entry(label.to_owned()).or_default() += 1;
+        }
+        let mut names_stored = Print::default();
+        for item in self.names.range((ns, "", 0u128)..).map_err(storage)? {
+            let (key, _) = item.map_err(storage)?;
+            let (key_ns, name, id) = key.value();
+            if key_ns != ns {
+                break;
+            }
+            names_stored.add(&(name, id));
+        }
+        let empty: &[u8] = &[];
+        let mut index_stored = Print::default();
+        let mut stored_counts: BTreeMap<String, u64> = BTreeMap::new();
+        for item in self
+            .index_entries
+            .range((ns, "", empty, 0u128)..)
+            .map_err(storage)?
+        {
+            let (key, _) = item.map_err(storage)?;
+            let (key_ns, name, bytes, id) = key.value();
+            if key_ns != ns {
+                break;
+            }
+            index_stored.add(&(name, bytes, id));
+            *stored_counts.entry(name.to_owned()).or_default() += 1;
+        }
+        let mut adjacency_stored = [Print::default(), Print::default()];
+        for (table, print) in [&self.out, &self.inn]
+            .into_iter()
+            .zip(adjacency_stored.iter_mut())
+        {
+            for item in table.range((ns, 0u128, "", 0u128)..).map_err(storage)? {
+                let (key, value) = item.map_err(storage)?;
+                let (key_ns, node, label, edge) = key.value();
+                if key_ns != ns {
+                    break;
+                }
+                print.add(&(node, label, edge, value.value()));
             }
         }
 
-        // Edges and the adjacency lists.
-        let mut edge_labels: BTreeMap<String, u64> = BTreeMap::new();
-        for edge in &edges {
-            *edge_labels.entry(edge.label.clone()).or_default() += 1;
-            for end in [edge.from, edge.to] {
-                if !ids.contains(&end.as_u128()) {
-                    problems.push(format!("edge {} points to missing node {end}", edge.id));
+        // Where a fingerprint differs, find what is wrong.
+        if labels_stored != labels_expected {
+            let before = problems.len();
+            self.each_node(ns, &mut problems, |read, node, problems| {
+                for label in &node.labels {
+                    if read
+                        .labels
+                        .get((ns, label.as_str(), node.id.as_u128()))
+                        .map_err(storage)?
+                        .is_none()
+                    {
+                        problems.push(format!(
+                            "label index misses node {} under {label:?}",
+                            node.id
+                        ));
+                    }
+                }
+                Ok(())
+            })?;
+            for (label, count) in &indexed_labels {
+                let expected = node_labels.get(label).copied().unwrap_or(0);
+                if *count != expected {
+                    problems.push(format!(
+                        "label index lists {count} nodes under {label:?}, but {expected} nodes have it"
+                    ));
                 }
             }
-            let key = |node: NodeId| (ns, node.as_u128(), edge.label.as_str(), edge.id.as_u128());
-            let out = self
-                .out
-                .get(key(edge.from))
-                .map_err(storage)?
-                .map(|g| g.value());
-            if out != Some(adjacency_value(edge, edge.to)) {
-                problems.push(format!("outgoing adjacency of edge {} is wrong", edge.id));
-            }
-            let inn = self
-                .inn
-                .get(key(edge.to))
-                .map_err(storage)?
-                .map(|g| g.value());
-            if inn != Some(adjacency_value(edge, edge.from)) {
-                problems.push(format!("incoming adjacency of edge {} is wrong", edge.id));
+            if problems.len() == before {
+                problems.push("the label index does not match the nodes".into());
             }
         }
-        for (table, name) in [(&self.out, "outgoing"), (&self.inn, "incoming")] {
-            let mut entries = 0;
-            for item in table.range((ns, 0u128, "", 0u128)..).map_err(storage)? {
-                let (key, _) = item.map_err(storage)?;
-                if key.value().0 != ns {
+        if names_stored != names_expected {
+            let before = problems.len();
+            self.each_node(ns, &mut problems, |read, node, problems| {
+                for name in names_of(node) {
+                    if read
+                        .names
+                        .get((ns, name.as_str(), node.id.as_u128()))
+                        .map_err(storage)?
+                        .is_none()
+                    {
+                        problems.push(format!("names index misses {name:?} of node {}", node.id));
+                    }
+                }
+                Ok(())
+            })?;
+            if names_stored.count != names_expected.count {
+                problems.push(format!(
+                    "{} entries in the names index, expected {}",
+                    names_stored.count, names_expected.count
+                ));
+            }
+            if problems.len() == before {
+                problems.push("the names index does not match the nodes".into());
+            }
+        }
+        if index_stored != index_expected {
+            let before = problems.len();
+            self.each_node(ns, &mut problems, |read, node, problems| {
+                for (def, bytes) in entries_of(&defs, node) {
+                    if read
+                        .index_entries
+                        .get((ns, def.name.as_str(), bytes.as_slice(), node.id.as_u128()))
+                        .map_err(storage)?
+                        .is_none()
+                    {
+                        problems.push(format!("index {:?} misses node {}", def.name, node.id));
+                    }
+                }
+                Ok(())
+            })?;
+            for (name, count) in &stored_counts {
+                let expected = index_counts.get(name).copied().unwrap_or(0);
+                if *count > expected {
+                    problems.push(format!(
+                        "index {name:?} has {} stale entries ({count} for {expected} nodes)",
+                        count - expected
+                    ));
+                }
+            }
+            if problems.len() == before {
+                problems.push("a property index does not match the nodes".into());
+            }
+        }
+        for ((stored, expected), name) in adjacency_stored
+            .iter()
+            .zip([&out_expected, &in_expected])
+            .zip(["outgoing", "incoming"])
+        {
+            if stored == expected {
+                continue;
+            }
+            let before = problems.len();
+            let table = if name == "outgoing" {
+                &self.out
+            } else {
+                &self.inn
+            };
+            for item in self.edges.range((ns, 0u128)..).map_err(storage)? {
+                let (key, value) = item.map_err(storage)?;
+                if key.value().0 != ns || problems.len() >= MAX_PROBLEMS {
                     break;
                 }
-                entries += 1;
+                let edge: Edge = decode(value.value())?;
+                let (node, other) = if name == "outgoing" {
+                    (edge.from, edge.to)
+                } else {
+                    (edge.to, edge.from)
+                };
+                let found = table
+                    .get((ns, node.as_u128(), edge.label.as_str(), edge.id.as_u128()))
+                    .map_err(storage)?
+                    .map(|g| g.value());
+                if found != Some(adjacency_value(&edge, other)) {
+                    problems.push(format!("{name} adjacency of edge {} is wrong", edge.id));
+                }
             }
-            if entries != edges.len() {
+            if stored.count != edge_count {
                 problems.push(format!(
-                    "{entries} {name} adjacency entries for {} edges",
-                    edges.len()
+                    "{} {name} adjacency entries for {edge_count} edges",
+                    stored.count
                 ));
+            }
+            if problems.len() == before {
+                problems.push(format!("the {name} adjacency does not match the edges"));
             }
         }
 
@@ -160,7 +343,7 @@ impl ReadTx {
             .map_err(storage)?
             .map(|guard| guard.value())
             .unwrap_or((0, 0));
-        let actual = (nodes.len() as u64, edges.len() as u64);
+        let actual = (node_count, edge_count);
         if counted != actual {
             problems.push(format!(
                 "namespace counters say {counted:?} (nodes, edges), records say {actual:?}"
@@ -173,34 +356,7 @@ impl ReadTx {
             problems.push("edge label counters do not match the edges".into());
         }
 
-        // The names index and memory states.
-        let mut expected_names = 0usize;
-        for node in &nodes {
-            for name in names_of(node) {
-                expected_names += 1;
-                if self
-                    .names
-                    .get((ns, name.as_str(), node.id.as_u128()))
-                    .map_err(storage)?
-                    .is_none()
-                {
-                    problems.push(format!("names index misses {name:?} of node {}", node.id));
-                }
-            }
-        }
-        let mut indexed_names = 0usize;
-        for item in self.names.range((ns, "", 0u128)..).map_err(storage)? {
-            let (key, _) = item.map_err(storage)?;
-            if key.value().0 != ns {
-                break;
-            }
-            indexed_names += 1;
-        }
-        if indexed_names != expected_names {
-            problems.push(format!(
-                "{indexed_names} entries in the names index, expected {expected_names}"
-            ));
-        }
+        // Memory states.
         for item in self.memory.range((ns, 0u128)..).map_err(storage)? {
             let (key, value) = item.map_err(storage)?;
             let (key_ns, id) = key.value();
@@ -219,40 +375,6 @@ impl ReadTx {
                     "importance {importance} of node {} is out of range",
                     NodeId::from_u128(id)
                 ));
-            }
-        }
-
-        // Property indexes: the entries the nodes call for, and uniqueness.
-        let defs = self.index_defs(ns)?;
-        let expected = expected_entries(&defs, &nodes);
-        let stored = stored_entries(&self.index_entries, ns)?;
-        if expected != stored {
-            let expected_set: HashSet<_> = expected.iter().collect();
-            let stored_set: HashSet<_> = stored.iter().collect();
-            for (name, _, node) in expected_set.difference(&stored_set) {
-                problems.push(format!(
-                    "index {name:?} misses node {}",
-                    NodeId::from_u128(*node)
-                ));
-            }
-            for (name, _, node) in stored_set.difference(&expected_set) {
-                problems.push(format!(
-                    "index {name:?} has a stale entry for node {}",
-                    NodeId::from_u128(*node)
-                ));
-            }
-        }
-        for def in defs.iter().filter(|def| def.unique) {
-            let mut seen = HashMap::new();
-            for node in nodes.iter().filter(|node| node.has_label(&def.label)) {
-                if let Some(value) = node.props.get(&def.key)
-                    && let Some(other) = seen.insert(value.to_string(), node.id)
-                {
-                    problems.push(format!(
-                        "nodes {other} and {} share {} = {value} in unique index {:?}",
-                        node.id, def.key, def.name
-                    ));
-                }
             }
         }
 
@@ -281,14 +403,60 @@ impl ReadTx {
         }
         Ok(CheckReport {
             namespace: ns.to_owned(),
-            nodes: actual.0,
-            edges: actual.1,
+            nodes: node_count,
+            edges: edge_count,
             texts,
             vectors,
             dangling_links,
             unreachable_vectors,
             problems,
         })
+    }
+}
+
+impl ReadTx {
+    /// Runs `visit` on every node of `ns`, in order, until it has found
+    /// [`MAX_PROBLEMS`] problems.
+    fn each_node(
+        &self,
+        ns: &str,
+        problems: &mut Vec<String>,
+        mut visit: impl FnMut(&Self, &Node, &mut Vec<String>) -> Result<()>,
+    ) -> Result<()> {
+        for item in self.nodes.range((ns, 0u128)..).map_err(storage)? {
+            let (key, value) = item.map_err(storage)?;
+            if key.value().0 != ns || problems.len() >= MAX_PROBLEMS {
+                break;
+            }
+            let node: Node = decode(value.value())?;
+            visit(self, &node, problems)?;
+        }
+        Ok(())
+    }
+}
+
+/// A fingerprint of a set of entries: how many, and the sum of a 128-bit
+/// hash of each. Two sets with equal fingerprints are, but for a chance of
+/// about 2^-64, equal; the order the entries come in does not matter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Print {
+    count: u64,
+    sum: u128,
+}
+
+impl Print {
+    fn add(&mut self, entry: &impl std::hash::Hash) {
+        use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+        let hash = |seed: u8| {
+            let mut hasher = BuildHasherDefault::<DefaultHasher>::default().build_hasher();
+            std::hash::Hash::hash(&seed, &mut hasher);
+            entry.hash(&mut hasher);
+            std::hash::Hasher::finish(&hasher)
+        };
+        self.count += 1;
+        self.sum = self
+            .sum
+            .wrapping_add(u128::from(hash(1)) << 64 | u128::from(hash(2)));
     }
 }
 
@@ -299,8 +467,22 @@ impl WriteTx {
     /// links.
     pub fn rebuild_indexes(&mut self, ns: &str) -> Result<RebuildReport> {
         let tx = &self.tx;
-        let nodes: Vec<Node> = scan_records(&tx.open_table(NODES).map_err(storage)?, ns)?;
-        let edges: Vec<Edge> = scan_records(&tx.open_table(EDGES).map_err(storage)?, ns)?;
+        // Node and edge records stay where they are and are read back a page
+        // at a time below; only the node ids are kept meanwhile.
+        let mut ids: HashSet<u128> = HashSet::new();
+        for item in tx
+            .open_table(NODES)
+            .map_err(storage)?
+            .range((ns, 0u128)..)
+            .map_err(storage)?
+        {
+            let (key, _) = item.map_err(storage)?;
+            if key.value().0 != ns {
+                break;
+            }
+            ids.insert(key.value().1);
+        }
+        // Texts and vectors are removed and indexed again, so they are held.
         let mut texts = Vec::new();
         for item in tx
             .open_table(TEXTS)
@@ -347,7 +529,6 @@ impl WriteTx {
             .retain_in((ns, "", empty, 0u128).., |key, _| other(key.0))
             .map_err(storage)?;
         // Memory states are records too: only those of missing nodes go.
-        let ids: HashSet<u128> = nodes.iter().map(|node| node.id.as_u128()).collect();
         tx.open_table(MEMORY)
             .map_err(storage)?
             .retain_in((ns, 0u128).., |key, _| other(key.0) || ids.contains(&key.1))
@@ -404,24 +585,17 @@ impl WriteTx {
             namespace: ns.to_owned(),
             ..RebuildReport::default()
         };
-        let ids: HashSet<u128> = nodes.iter().map(|node| node.id.as_u128()).collect();
-        for node in &nodes {
-            self.put_node(ns, node, None)?;
-            report.nodes += 1;
+        let mut after = None;
+        while let Some(page) = page::<Node>(&self.tx, NODES, ns, &mut after)? {
+            for node in &page {
+                self.put_node(ns, node, None)?;
+                report.nodes += 1;
+            }
         }
-        for edge in &edges {
-            if ids.contains(&edge.from.as_u128()) && ids.contains(&edge.to.as_u128()) {
-                self.put_edge(ns, edge)?;
-                bump_namespace(&self.tx, ns, 0, 1)?;
-                bump_edge_label(&self.tx, ns, &edge.label, 1)?;
-                report.edges += 1;
-            } else {
-                self.tx
-                    .open_table(EDGES)
-                    .map_err(storage)?
-                    .remove((ns, edge.id.as_u128()))
-                    .map_err(storage)?;
-                report.dropped_edges += 1;
+        let mut after = None;
+        while let Some(page) = page::<Edge>(&self.tx, EDGES, ns, &mut after)? {
+            for edge in &page {
+                self.rebuild_edge(ns, edge, &ids, &mut report)?;
             }
         }
         for (id, content) in &texts {
@@ -442,6 +616,58 @@ impl WriteTx {
         }
         Ok(report)
     }
+
+    fn rebuild_edge(
+        &mut self,
+        ns: &str,
+        edge: &Edge,
+        ids: &HashSet<u128>,
+        report: &mut RebuildReport,
+    ) -> Result<()> {
+        if ids.contains(&edge.from.as_u128()) && ids.contains(&edge.to.as_u128()) {
+            self.put_edge(ns, edge)?;
+            bump_namespace(&self.tx, ns, 0, 1)?;
+            bump_edge_label(&self.tx, ns, &edge.label, 1)?;
+            report.edges += 1;
+        } else {
+            self.tx
+                .open_table(EDGES)
+                .map_err(storage)?
+                .remove((ns, edge.id.as_u128()))
+                .map_err(storage)?;
+            report.dropped_edges += 1;
+        }
+        Ok(())
+    }
+}
+
+/// The next records of `ns` after `after` (moved on past them), up to
+/// 10 000; `None` when there are no more.
+fn page<R: serde::de::DeserializeOwned>(
+    tx: &redb::WriteTransaction,
+    definition: redb::TableDefinition<RecordKey, &'static [u8]>,
+    ns: &str,
+    after: &mut Option<u128>,
+) -> Result<Option<Vec<R>>> {
+    use std::ops::Bound;
+    let table = tx.open_table(definition).map_err(storage)?;
+    let start = match *after {
+        Some(id) => Bound::Excluded((ns, id)),
+        None => Bound::Included((ns, 0u128)),
+    };
+    let mut out = Vec::new();
+    for item in table
+        .range::<(&str, u128)>((start, Bound::Unbounded))
+        .map_err(storage)?
+    {
+        let (key, value) = item.map_err(storage)?;
+        if key.value().0 != ns || out.len() == 10_000 {
+            break;
+        }
+        *after = Some(key.value().1);
+        out.push(decode(value.value())?);
+    }
+    Ok((!out.is_empty()).then_some(out))
 }
 
 #[cfg(test)]

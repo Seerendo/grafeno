@@ -13,6 +13,10 @@
 //! - `direction`: `'out'`, `'in'` or `'both'`.
 //! - `validAt`, `knownAt`: the time travel of `MATCH`.
 //!
+//! Scoring procedures (`degree`, `pageRank`, `betweenness`, `closeness`)
+//! also take `top: n`: only the n best rows, whose nodes are the only ones
+//! read (a million rows of nodes would take gigabytes).
+//!
 //! Results stream as rows, so `RETURN` aggregates them (stats) and `SET`
 //! stores them (`CALL algo.pageRank() YIELD node, score SET node.rank =
 //! score`).
@@ -66,25 +70,25 @@ pub(crate) const ALGORITHMS: &[Procedure] = &[
     },
     Procedure {
         name: "algo.degree",
-        args: "{direction: 'both', weight, …}",
+        args: "{direction: 'both', weight, top, …}",
         columns: &["node", "score"],
         description: "Degree centrality: edges per node (or the sum of their weights), highest first.",
     },
     Procedure {
         name: "algo.pageRank",
-        args: "{damping: 0.85, iterations: 20, tolerance: 1e-7, sources, weight, …}",
+        args: "{damping: 0.85, iterations: 20, tolerance: 1e-7, sources, weight, top, …}",
         columns: &["node", "score"],
         description: "PageRank (personalized with sources), highest first; scores add up to 1.",
     },
     Procedure {
         name: "algo.betweenness",
-        args: "{sample, seed, weight, direction: 'out', …}",
+        args: "{sample, seed, weight, direction: 'out', top, …}",
         columns: &["node", "score"],
         description: "Betweenness centrality (Brandes): shortest paths through each node, highest first. sample estimates it from that many sources.",
     },
     Procedure {
         name: "algo.closeness",
-        args: "{harmonic: false, weight, direction: 'out', …}",
+        args: "{harmonic: false, weight, direction: 'out', top, …}",
         columns: &["node", "score"],
         description: "Closeness centrality (Wasserman-Faust, or harmonic), highest first.",
     },
@@ -273,6 +277,11 @@ impl Settings {
             valid_at: self.time("validAt")?,
             known_at: self.time("knownAt")?,
             weight: self.text("weight")?,
+            // Only paths return edges; other algorithms skip their ids.
+            edge_ids: {
+                let name = self.procedure.to_lowercase();
+                name.contains("path") || name.contains("astar")
+            },
         })
     }
 
@@ -313,10 +322,16 @@ fn position(procedure: &str, p: &Projection, id: NodeId) -> Result<u32, QueryErr
     })
 }
 
+/// The node at `at` as a value of a result row, counted against the
+/// query's memory limit (a procedure can yield a row per node).
 fn node_value(ctx: &Context, p: &Projection, at: u32) -> Result<Value, QueryError> {
-    Ok(ctx
+    let value = ctx
         .node(p.id(at))?
-        .map_or(Value::Null, |node| Value::Node(Arc::new(node))))
+        .map_or(Value::Null, |node| Value::Node(Arc::new(node)));
+    ctx.budget.build(
+        200 + crate::limits::footprint(&value, crate::limits::MAX_VALUE_DEPTH).unwrap_or(0),
+    )?;
+    Ok(value)
 }
 
 fn path_row(ctx: &Context, p: &Projection, path: &WeightedPath) -> Result<Vec<Value>, QueryError> {
@@ -326,7 +341,11 @@ fn path_row(ctx: &Context, p: &Projection, path: &WeightedPath) -> Result<Vec<Va
         .map(|&at| node_value(ctx, p, at))
         .collect::<Result<Vec<_>, _>>()?;
     let mut edges = Vec::with_capacity(path.edges.len());
-    for &id in &path.edges {
+    for &edge in &path.edges {
+        let Some(id) = p.edge_id(edge) else {
+            edges.push(Value::Null);
+            continue;
+        };
         edges.push(
             ctx.edge(id)?
                 .map_or(Value::Null, |edge| Value::Edge(Arc::new(edge))),
@@ -339,14 +358,27 @@ fn path_row(ctx: &Context, p: &Projection, path: &WeightedPath) -> Result<Vec<Va
     ])
 }
 
-/// One row per node with its score, highest first.
-fn ranked(ctx: &Context, p: &Projection, scores: &[f64]) -> Result<Vec<Vec<Value>>, QueryError> {
+/// One row per node with its score, highest first; with `top`, only that
+/// many (their records are the only ones read).
+fn ranked(
+    ctx: &Context,
+    p: &Projection,
+    scores: &[f64],
+    top: Option<usize>,
+) -> Result<Vec<Vec<Value>>, QueryError> {
     let mut order: Vec<u32> = (0..p.len() as u32).collect();
-    order.sort_by(|a, b| {
+    let by_score = |a: &u32, b: &u32| {
         scores[*b as usize]
             .total_cmp(&scores[*a as usize])
             .then(a.cmp(b))
-    });
+    };
+    if let Some(top) = top.filter(|top| *top < order.len()) {
+        if top > 0 {
+            order.select_nth_unstable_by(top - 1, by_score);
+        }
+        order.truncate(top);
+    }
+    order.sort_by(by_score);
     order
         .into_iter()
         .map(|at| {
@@ -540,9 +572,10 @@ pub(crate) fn call(
         }
         "algo.degree" => {
             let direction = settings.direction(Direction::Both)?;
+            let top = settings.optional_count("top")?;
             settings.finish()?;
             let p = project(&spec)?;
-            ranked(ctx, &p, &algo::degree(&p, direction, p.is_weighted()))?
+            ranked(ctx, &p, &algo::degree(&p, direction, p.is_weighted()), top)?
         }
         "algo.pageRank" => {
             let defaults = PageRank::default();
@@ -560,6 +593,7 @@ pub(crate) fn call(
                 Some(Value::List(items)) => items.clone(),
                 Some(single) => vec![single.clone()],
             };
+            let top = settings.optional_count("top")?;
             settings.finish()?;
             let p = project(&spec)?;
             let sources = sources
@@ -574,24 +608,26 @@ pub(crate) fn call(
                 sources,
             };
             let (scores, _) = algo::page_rank(&p, &page_rank, &stop).map_err(stopped)?;
-            ranked(ctx, &p, &scores)?
+            ranked(ctx, &p, &scores, top)?
         }
         "algo.betweenness" => {
             let direction = settings.direction(Direction::Out)?;
             let sample = settings.optional_count("sample")?;
             let seed = settings.seed()?;
+            let top = settings.optional_count("top")?;
             settings.finish()?;
             let p = project(&spec)?;
             let scores = algo::betweenness(&p, direction, sample, seed, &stop).map_err(stopped)?;
-            ranked(ctx, &p, &scores)?
+            ranked(ctx, &p, &scores, top)?
         }
         "algo.closeness" => {
             let direction = settings.direction(Direction::Out)?;
             let harmonic = settings.flag("harmonic", false)?;
+            let top = settings.optional_count("top")?;
             settings.finish()?;
             let p = project(&spec)?;
             let scores = algo::closeness(&p, direction, harmonic, &stop).map_err(stopped)?;
-            ranked(ctx, &p, &scores)?
+            ranked(ctx, &p, &scores, top)?
         }
         "algo.wcc" | "algo.scc" => {
             settings.finish()?;

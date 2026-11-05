@@ -160,7 +160,7 @@ fn byte_range(range: &IndexRange) -> Option<(Vec<u8>, Vec<u8>)> {
 }
 
 /// The index entries a node should have under these definitions.
-fn entries_of<'a>(defs: &'a [IndexDef], node: &Node) -> Vec<(&'a IndexDef, Vec<u8>)> {
+pub(crate) fn entries_of<'a>(defs: &'a [IndexDef], node: &Node) -> Vec<(&'a IndexDef, Vec<u8>)> {
     defs.iter()
         .filter(|def| node.has_label(&def.label))
         .filter_map(|def| Some((def, encode_value(node.props.get(&def.key)?)?)))
@@ -439,37 +439,6 @@ impl WriteTx {
         }
         Ok(())
     }
-}
-
-/// The entries every node of `nodes` should have, as `(index, value, node)`.
-pub(crate) fn expected_entries(defs: &[IndexDef], nodes: &[Node]) -> Vec<(String, Vec<u8>, u128)> {
-    let mut out = Vec::new();
-    for node in nodes {
-        for (def, bytes) in entries_of(defs, node) {
-            out.push((def.name.clone(), bytes, node.id.as_u128()));
-        }
-    }
-    out.sort();
-    out
-}
-
-/// Every entry of a namespace, as `(index, value, node)`.
-pub(crate) fn stored_entries(
-    table: &impl ReadableTable<IndexKey, ()>,
-    ns: &str,
-) -> Result<Vec<(String, Vec<u8>, u128)>> {
-    let empty: &[u8] = &[];
-    let mut out = Vec::new();
-    for item in table.range((ns, "", empty, 0u128)..).map_err(storage)? {
-        let (key, _) = item.map_err(storage)?;
-        let (key_ns, name, bytes, node) = key.value();
-        if key_ns != ns {
-            break;
-        }
-        out.push((name.to_owned(), bytes.to_vec(), node));
-    }
-    out.sort();
-    Ok(out)
 }
 
 #[cfg(test)]

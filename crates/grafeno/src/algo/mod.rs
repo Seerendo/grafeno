@@ -20,7 +20,6 @@ mod embedding;
 mod paths;
 mod similarity;
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -61,6 +60,9 @@ pub struct ProjectionSpec {
     /// The edge property that weighs each edge. Edges without it, or with
     /// a value that is not a number, weigh 1.
     pub weight: Option<String>,
+    /// Keep the id of every edge (16 bytes each), for algorithms that
+    /// return edges (paths). Without it, [`Projection::edge_id`] is `None`.
+    pub edge_ids: bool,
 }
 
 impl ProjectionSpec {
@@ -76,91 +78,170 @@ impl ProjectionSpec {
     }
 }
 
-/// One direction of the adjacency: the edges of node `i` are
-/// `start[i]..start[i + 1]` in the other arrays.
+/// The out-edges of every node: the edges of node `i` are
+/// `start[i]..start[i + 1]` in the other arrays. An edge's position there
+/// is its number in the projection.
 #[derive(Debug, Default)]
-struct Csr {
-    start: Vec<usize>,
+struct Out {
+    start: Vec<u32>,
     other: Vec<u32>,
+    /// Empty unless the projection keeps edge ids.
     edge: Vec<EdgeId>,
     /// Empty when the projection is not weighted.
     weight: Vec<f64>,
 }
 
-impl Csr {
-    fn build(len: usize, edges: &[Link], weighted: bool, reverse: bool) -> Self {
-        let mut start = vec![0usize; len + 1];
-        for link in edges {
-            let from = if reverse { link.to } else { link.from };
-            start[from as usize + 1] += 1;
+/// The in-edges of every node, by the positions of the out-edges.
+#[derive(Debug, Default)]
+struct In {
+    start: Vec<u32>,
+    /// The node each in-edge comes from.
+    other: Vec<u32>,
+    /// The out-edge each in-edge is.
+    edge: Vec<u32>,
+}
+
+fn range(start: &[u32], node: u32) -> std::ops::Range<usize> {
+    start[node as usize] as usize..start[node as usize + 1] as usize
+}
+
+/// Builds a projection from out-edges given in order of their source
+/// node: `push` them, then `finish`.
+pub(crate) struct Builder {
+    ids: Vec<NodeId>,
+    out: Out,
+    weighted: bool,
+    edge_ids: bool,
+    /// The source of the last edge pushed.
+    last: u32,
+}
+
+impl Builder {
+    /// `ids` must be sorted and without duplicates.
+    pub(crate) fn new(ids: Vec<NodeId>, weighted: bool, edge_ids: bool) -> Self {
+        let mut start = Vec::with_capacity(ids.len() + 1);
+        start.push(0);
+        Self {
+            ids,
+            out: Out {
+                start,
+                ..Out::default()
+            },
+            weighted,
+            edge_ids,
+            last: 0,
         }
-        for i in 0..len {
+    }
+
+    pub(crate) fn position(&self, id: NodeId) -> Option<u32> {
+        self.ids.binary_search(&id).ok().map(|at| at as u32)
+    }
+
+    fn reserve(&mut self, edges: usize) {
+        self.out.other.reserve_exact(edges);
+        if self.edge_ids {
+            self.out.edge.reserve_exact(edges);
+        }
+        if self.weighted {
+            self.out.weight.reserve_exact(edges);
+        }
+    }
+
+    /// Adds an edge; sources must not decrease.
+    pub(crate) fn push(&mut self, from: u32, to: u32, edge: EdgeId, weight: f64) -> Result<()> {
+        debug_assert!(from >= self.last, "edges pushed in source order");
+        if self.out.other.len() >= u32::MAX as usize {
+            return Err(Error::Invalid(
+                "a projection holds at most 4 294 967 295 edges".into(),
+            ));
+        }
+        self.close_up_to(from);
+        self.out.other.push(to);
+        if self.edge_ids {
+            self.out.edge.push(edge);
+        }
+        if self.weighted {
+            self.out.weight.push(weight);
+        }
+        Ok(())
+    }
+
+    /// Ends the edge lists of every node before `node`.
+    fn close_up_to(&mut self, node: u32) {
+        let at = self.out.other.len() as u32;
+        while self.out.start.len() <= node as usize {
+            self.out.start.push(at);
+        }
+        self.last = node;
+    }
+
+    pub(crate) fn finish(mut self) -> Projection {
+        let len = self.ids.len() as u32;
+        self.close_up_to(len);
+        // The ends: `start` has `len + 1` entries.
+        let total = self.out.other.len() as u32;
+        self.out.start.truncate(len as usize);
+        self.out.start.push(total);
+        // A copy to shrink is worth it only for much room left over.
+        let used = self.out.other.len();
+        if self.out.other.capacity() > used + used / 8 + 1024 {
+            self.out.other.shrink_to_fit();
+            self.out.edge.shrink_to_fit();
+            self.out.weight.shrink_to_fit();
+        }
+        // The in-edges, by counting.
+        let mut start = vec![0u32; len as usize + 1];
+        for &to in &self.out.other {
+            start[to as usize + 1] += 1;
+        }
+        for i in 0..len as usize {
             start[i + 1] += start[i];
         }
         let mut next = start.clone();
-        let mut other = vec![0u32; edges.len()];
-        let mut edge = vec![EdgeId::from_u128(0); edges.len()];
-        let mut weight = if weighted {
-            vec![0.0; edges.len()]
-        } else {
-            Vec::new()
-        };
-        for link in edges {
-            let (from, to) = if reverse {
-                (link.to, link.from)
-            } else {
-                (link.from, link.to)
-            };
-            let at = next[from as usize];
-            next[from as usize] += 1;
-            other[at] = to;
-            edge[at] = link.edge;
-            if weighted {
-                weight[at] = link.weight;
+        let mut other = vec![0u32; total as usize];
+        let mut edge = vec![0u32; total as usize];
+        for from in 0..len {
+            for at in range(&self.out.start, from) {
+                let to = self.out.other[at] as usize;
+                let slot = next[to] as usize;
+                next[to] += 1;
+                other[slot] = from;
+                edge[slot] = at as u32;
             }
         }
-        Self {
-            start,
-            other,
-            edge,
-            weight,
+        Projection {
+            ids: self.ids,
+            out: self.out,
+            inn: In { start, other, edge },
+            weighted: self.weighted,
         }
     }
-
-    fn range(&self, node: u32) -> std::ops::Range<usize> {
-        self.start[node as usize]..self.start[node as usize + 1]
-    }
 }
 
-struct Link {
-    from: u32,
-    to: u32,
-    edge: EdgeId,
-    weight: f64,
-}
-
-/// One edge seen from a node: the node at the other end, the edge, and its
-/// weight (1 when the projection is not weighted).
+/// One edge seen from a node: the node at the other end, the edge's
+/// number in the projection (see [`Projection::edge_id`]), and its weight
+/// (1 when the projection is not weighted).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Step {
     pub node: u32,
-    pub edge: EdgeId,
+    pub edge: u32,
     pub weight: f64,
 }
 
-/// The nodes of a namespace and the edges among them, in memory.
+/// The nodes of a namespace and the edges among them, in memory: about 12
+/// bytes per edge, 16 more with edge ids and 8 more with weights, and 24
+/// per node.
 #[derive(Debug, Default)]
 pub struct Projection {
     ids: Vec<NodeId>,
-    index: HashMap<NodeId, u32>,
-    out: Csr,
-    inn: Csr,
+    out: Out,
+    inn: In,
     weighted: bool,
 }
 
 impl Projection {
-    /// A projection of these nodes and edges `(from, to, edge, weight)`.
-    /// Edges with an end outside `ids` are left out.
+    /// A projection of these nodes and edges `(from, to, edge, weight)`,
+    /// keeping edge ids. Edges with an end outside `ids` are left out.
     pub fn from_edges(
         mut ids: Vec<NodeId>,
         edges: impl IntoIterator<Item = (NodeId, NodeId, EdgeId, f64)>,
@@ -168,31 +249,20 @@ impl Projection {
     ) -> Self {
         ids.sort_unstable();
         ids.dedup();
-        let index: HashMap<NodeId, u32> = ids
-            .iter()
-            .enumerate()
-            .map(|(at, id)| (*id, at as u32))
-            .collect();
-        let links: Vec<Link> = edges
+        let mut builder = Builder::new(ids, weighted, true);
+        let mut links: Vec<(u32, u32, EdgeId, f64)> = edges
             .into_iter()
             .filter_map(|(from, to, edge, weight)| {
-                Some(Link {
-                    from: *index.get(&from)?,
-                    to: *index.get(&to)?,
-                    edge,
-                    weight,
-                })
+                Some((builder.position(from)?, builder.position(to)?, edge, weight))
             })
             .collect();
-        let out = Csr::build(ids.len(), &links, weighted, false);
-        let inn = Csr::build(ids.len(), &links, weighted, true);
-        Self {
-            ids,
-            index,
-            out,
-            inn,
-            weighted,
+        links.sort_by_key(|link| link.0);
+        for (from, to, edge, weight) in links {
+            builder
+                .push(from, to, edge, weight)
+                .expect("fewer than 2^32 edges");
         }
+        builder.finish()
     }
 
     /// How many nodes it holds.
@@ -214,6 +284,26 @@ impl Projection {
         self.weighted
     }
 
+    /// Whether it keeps the ids of its edges ([`ProjectionSpec::edge_ids`]).
+    pub fn has_edge_ids(&self) -> bool {
+        !self.out.edge.is_empty() || self.out.other.is_empty()
+    }
+
+    /// The id of edge number `edge`, when the projection keeps edge ids.
+    pub fn edge_id(&self, edge: u32) -> Option<EdgeId> {
+        self.out.edge.get(edge as usize).copied()
+    }
+
+    /// The memory it takes, in bytes.
+    pub fn bytes(&self) -> usize {
+        use std::mem::size_of;
+        self.ids.capacity() * size_of::<NodeId>()
+            + (self.out.start.capacity() + self.out.other.capacity()) * 4
+            + self.out.edge.capacity() * size_of::<EdgeId>()
+            + self.out.weight.capacity() * 8
+            + (self.inn.start.capacity() + self.inn.other.capacity() + self.inn.edge.capacity()) * 4
+    }
+
     /// The id of the node at `position`.
     pub fn id(&self, position: u32) -> NodeId {
         self.ids[position as usize]
@@ -221,43 +311,57 @@ impl Projection {
 
     /// The position of a node, if the projection holds it.
     pub fn position(&self, id: NodeId) -> Option<u32> {
-        self.index.get(&id).copied()
+        self.ids.binary_search(&id).ok().map(|at| at as u32)
     }
 
     /// The edges of `node` in `direction`. With `Both`, a self-loop shows
     /// up once.
     pub fn neighbors(&self, node: u32, direction: Direction) -> impl Iterator<Item = Step> + '_ {
         let out = match direction {
-            Direction::Out | Direction::Both => self.out.range(node),
+            Direction::Out | Direction::Both => range(&self.out.start, node),
             Direction::In => 0..0,
         };
         let inn = match direction {
-            Direction::In | Direction::Both => self.inn.range(node),
+            Direction::In | Direction::Both => range(&self.inn.start, node),
             Direction::Out => 0..0,
         };
         let both = direction == Direction::Both;
-        let step = |csr: &Csr, at: usize| Step {
-            node: csr.other[at],
-            edge: csr.edge[at],
-            weight: if self.weighted { csr.weight[at] } else { 1.0 },
+        let weight = move |edge: usize| {
+            if self.weighted {
+                self.out.weight[edge]
+            } else {
+                1.0
+            }
         };
-        out.map(move |at| step(&self.out, at)).chain(
+        out.map(move |at| Step {
+            node: self.out.other[at],
+            edge: at as u32,
+            weight: weight(at),
+        })
+        .chain(
             inn.filter(move |&at| !(both && self.inn.other[at] == node))
-                .map(move |at| step(&self.inn, at)),
+                .map(move |at| {
+                    let edge = self.inn.edge[at];
+                    Step {
+                        node: self.inn.other[at],
+                        edge,
+                        weight: weight(edge as usize),
+                    }
+                }),
         )
     }
 
     /// The nodes the out-edges of `node` lead to.
     pub(crate) fn targets(&self, node: u32) -> &[u32] {
-        &self.out.other[self.out.range(node)]
+        &self.out.other[range(&self.out.start, node)]
     }
 
     /// How many edges `node` has in `direction` (a self-loop counts once
     /// with `Both`).
     pub fn degree(&self, node: u32, direction: Direction) -> usize {
         match direction {
-            Direction::Out => self.out.range(node).len(),
-            Direction::In => self.inn.range(node).len(),
+            Direction::Out => range(&self.out.start, node).len(),
+            Direction::In => range(&self.inn.start, node).len(),
             Direction::Both => self.neighbors(node, direction).count(),
         }
     }
@@ -289,6 +393,7 @@ fn project(
     edges: &impl ReadableTable<RecordKey, &'static [u8]>,
     ns: &str,
     spec: &ProjectionSpec,
+    edge_count: u64,
 ) -> Result<Projection> {
     let ids = if spec.labels.is_empty() {
         let mut ids = Vec::new();
@@ -308,8 +413,19 @@ fn project(
         }
         ids
     };
+    let mut ids = ids;
+    ids.sort_unstable();
+    ids.dedup();
+    let mut builder = Builder::new(ids, spec.weight.is_some(), spec.edge_ids);
+    // Without a label filter nearly every edge goes in: room for all of them
+    // up front, instead of arrays that double as they grow (and briefly
+    // take up to three times their size).
+    if spec.edge_labels.is_empty() && spec.labels.is_empty() {
+        builder.reserve(usize::try_from(edge_count).unwrap_or(0));
+    }
     let filter = spec.filter();
-    let mut links = Vec::new();
+    // Adjacency is in order of the source id, as positions are.
+    let mut source: Option<(u128, Option<u32>)> = None;
     for item in out.range((ns, 0u128, "", 0u128)..).map_err(storage)? {
         let (key, value) = item.map_err(storage)?;
         let (key_ns, from, label, edge) = key.value();
@@ -319,7 +435,21 @@ fn project(
         if !spec.edge_labels.is_empty() && !spec.edge_labels.iter().any(|l| l == label) {
             continue;
         }
+        let from_position = match source {
+            Some((id, position)) if id == from => position,
+            _ => {
+                let position = builder.position(NodeId::from_u128(from));
+                source = Some((from, position));
+                position
+            }
+        };
+        let Some(from_position) = from_position else {
+            continue;
+        };
         let (to, recorded_at, expired_at, valid_from, valid_to) = value.value();
+        let Some(to_position) = builder.position(NodeId::from_u128(to)) else {
+            continue;
+        };
         let entry = Adjacent {
             edge: EdgeId::from_u128(edge),
             other: NodeId::from_u128(to),
@@ -342,23 +472,35 @@ fn project(
                 None => 1.0,
             },
         };
-        links.push((NodeId::from_u128(from), entry.other, entry.edge, weight));
+        builder.push(from_position, to_position, entry.edge, weight)?;
     }
-    Ok(Projection::from_edges(ids, links, spec.weight.is_some()))
+    Ok(builder.finish())
 }
 
 // ---------------------------------------------------------------- cache
 
-/// Projections kept between read transactions.
-const CACHED: usize = 4;
+/// The memory projections kept between read transactions may take, by
+/// default (see [`crate::OpenOptions`]).
+pub const DEFAULT_PROJECTION_CACHE: usize = 256 * 1024 * 1024;
 
 /// What every transaction of a database shares: a commit counter and the
 /// projection cache.
-#[derive(Default)]
 pub(crate) struct Shared {
     /// Odd while a commit is under way; it grows by two with each commit.
     generation: AtomicU64,
     projections: Mutex<Vec<Cached>>,
+    /// The bytes the cached projections may take.
+    projection_budget: std::sync::atomic::AtomicUsize,
+}
+
+impl Default for Shared {
+    fn default() -> Self {
+        Self {
+            generation: AtomicU64::new(0),
+            projections: Mutex::default(),
+            projection_budget: std::sync::atomic::AtomicUsize::new(DEFAULT_PROJECTION_CACHE),
+        }
+    }
 }
 
 struct Cached {
@@ -369,6 +511,20 @@ struct Cached {
 }
 
 impl Shared {
+    pub(crate) fn set_projection_budget(&self, bytes: usize) {
+        self.projection_budget.store(bytes, Ordering::Relaxed);
+        let mut cached = self.projections.lock().unwrap_or_else(|e| e.into_inner());
+        while cached.iter().map(|c| c.projection.bytes()).sum::<usize>() > bytes {
+            cached.remove(0);
+        }
+    }
+
+    /// The bytes the cached projections take now.
+    pub(crate) fn projection_bytes(&self) -> usize {
+        let cached = self.projections.lock().unwrap_or_else(|e| e.into_inner());
+        cached.iter().map(|c| c.projection.bytes()).sum()
+    }
+
     /// Runs a commit, so that readers know the data changed.
     pub(crate) fn committing<T>(&self, commit: impl FnOnce() -> T) -> T {
         self.generation.fetch_add(1, Ordering::SeqCst);
@@ -399,7 +555,13 @@ impl Shared {
         let mut cached = self.projections.lock().unwrap_or_else(|e| e.into_inner());
         // Older generations will not be asked for again by new readers.
         cached.retain(|c| c.generation >= generation);
-        if cached.len() == CACHED {
+        let budget = self.projection_budget.load(Ordering::Relaxed);
+        let bytes = projection.bytes();
+        if bytes > budget {
+            return;
+        }
+        // The oldest go first, until the new one fits.
+        while cached.iter().map(|c| c.projection.bytes()).sum::<usize>() + bytes > budget {
             cached.remove(0);
         }
         cached.push(Cached {
@@ -420,6 +582,7 @@ impl ReadTx {
         {
             return Ok(hit);
         }
+        let edge_count = self.stats(ns)?.edges;
         let projection = Arc::new(project(
             &self.nodes,
             &self.labels,
@@ -427,6 +590,7 @@ impl ReadTx {
             &self.edges,
             ns,
             spec,
+            edge_count,
         )?);
         if let Some(generation) = self.generation {
             self.shared.put(generation, ns, spec, projection.clone());
@@ -444,7 +608,16 @@ impl WriteTx {
         let labels = self.tx.open_table(NODE_LABELS).map_err(storage)?;
         let out = self.tx.open_table(ADJ_OUT).map_err(storage)?;
         let edges = self.tx.open_table(EDGES).map_err(storage)?;
-        Ok(Arc::new(project(&nodes, &labels, &out, &edges, ns, spec)?))
+        let edge_count = self
+            .tx
+            .open_table(crate::store::NS_COUNTS)
+            .map_err(storage)?
+            .get(ns)
+            .map_err(storage)?
+            .map_or(0, |guard| guard.value().1);
+        Ok(Arc::new(project(
+            &nodes, &labels, &out, &edges, ns, spec, edge_count,
+        )?))
     }
 }
 

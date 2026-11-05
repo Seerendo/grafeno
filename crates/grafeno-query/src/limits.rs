@@ -84,6 +84,9 @@ pub(crate) struct Budget {
     started: Instant,
     reads: Cell<u64>,
     work: Cell<u64>,
+    /// Bytes of rows being built by one step (a procedure), until the step
+    /// ends and its rows are checked with [`Budget::held`].
+    building: Cell<usize>,
 }
 
 impl Budget {
@@ -93,7 +96,16 @@ impl Budget {
             started: Instant::now(),
             reads: Cell::new(0),
             work: Cell::new(0),
+            building: Cell::new(0),
         }
+    }
+
+    /// Counts `bytes` more of rows a step is building, and checks the
+    /// memory limit before the step ends.
+    pub(crate) fn build(&self, bytes: usize) -> Result<(), QueryError> {
+        let total = self.building.get().saturating_add(bytes);
+        self.building.set(total);
+        self.memory(total, "built rows")
     }
 
     pub(crate) fn max_cost(&self) -> Option<f64> {
@@ -145,6 +157,7 @@ impl Budget {
         rows: &'r [R],
         values: impl Fn(&'r R) -> Box<dyn Iterator<Item = &'r Value> + 'r>,
     ) -> Result<(), QueryError> {
+        self.building.set(0);
         self.rows(rows.len())?;
         if self.limits.max_memory.is_none() || rows.is_empty() {
             return Ok(());
@@ -153,9 +166,10 @@ impl Budget {
         let (mut sampled, mut bytes) = (0usize, 0usize);
         for row in rows.iter().step_by(step) {
             sampled += 1;
-            bytes += 48;
+            // A row is a map from column names to values.
+            bytes += 64;
             for value in values(row) {
-                bytes += 32 + footprint(value, MAX_VALUE_DEPTH).unwrap_or(0);
+                bytes += 96 + footprint(value, MAX_VALUE_DEPTH).unwrap_or(0);
             }
         }
         self.memory(bytes / sampled * rows.len(), "held rows")
@@ -226,17 +240,64 @@ impl Budget {
     }
 }
 
+/// The bytes properties take: a tree node per eleven entries, and the
+/// keys and values.
+fn props_footprint(props: &grafeno::Props) -> usize {
+    if props.is_empty() {
+        return 0;
+    }
+    let mut bytes = props.len().div_ceil(11) * 640;
+    for (key, value) in props {
+        bytes += key.len() + json_footprint(value, 8);
+    }
+    bytes
+}
+
+fn json_footprint(value: &serde_json::Value, depth: usize) -> usize {
+    match value {
+        serde_json::Value::String(s) => s.len(),
+        serde_json::Value::Array(items) if depth > 0 => {
+            items.len() * 32
+                + items
+                    .iter()
+                    .map(|item| json_footprint(item, depth - 1))
+                    .sum::<usize>()
+        }
+        serde_json::Value::Object(map) if depth > 0 => map
+            .iter()
+            .map(|(key, item)| 96 + key.len() + json_footprint(item, depth - 1))
+            .sum(),
+        _ => 0,
+    }
+}
+
 /// The bytes a value takes, roughly; `None` when lists and maps nest deeper
-/// than `depth`. Nodes and edges are shared, and count only a reference.
+/// than `depth`. A node or an edge counts whole: each row read its own copy
+/// from storage.
 pub(crate) fn footprint(value: &Value, depth: usize) -> Option<usize> {
     const SLOT: usize = std::mem::size_of::<Value>();
     Some(match value {
+        Value::Node(node) => {
+            160 + node
+                .labels
+                .iter()
+                .map(|label| 40 + label.len())
+                .sum::<usize>()
+                + node.sources.len() * 16
+                + props_footprint(&node.props)
+        }
+        Value::Edge(edge) => {
+            200 + edge.label.len() + edge.sources.len() * 16 + props_footprint(&edge.props)
+        }
         Value::Str(s) => s.len(),
         Value::List(items) => {
             let depth = depth.checked_sub(1)?;
             let mut bytes = items.len() * SLOT;
             for item in items {
-                if matches!(item, Value::Str(_) | Value::List(_) | Value::Map(_)) {
+                if !matches!(
+                    item,
+                    Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_)
+                ) {
                     bytes += footprint(item, depth)?;
                 }
             }

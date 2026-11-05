@@ -208,11 +208,29 @@ max_reads = 50000000        # nodes, edges and index entries read
 max_rows = 1000000          # rows held at once
 max_memory_mb = 512         # one value a query builds, or the rows it holds at once
 max_cost = 0                # refuse queries EXPLAIN estimates above this (0: off)
+
+[memory]                    # caches, in MiB (see "Memory" below)
+cache_mb = 256              # pages of the database file
+projection_cache_mb = 256   # graphs kept for graph algorithms
+vector_cache_mb = 128       # vectors decoded while inserting embeddings
 ```
 
 Flags and environment variables (`GRAFENO_DB`, `GRAFENO_ADDR`,
 `GRAFENO_TOKEN`) take precedence over the file. Expose the port beyond
 `127.0.0.1` only behind TLS (a reverse proxy) and with a token.
+
+### Memory
+
+Grafeno's caches are the main memory it keeps: pages of the database file
+(`cache_mb`), graphs projected for algorithms (`projection_cache_mb`) and
+vectors decoded while inserting (`vector_cache_mb`). Everything else is
+per request and bounded by the `[query]` limits. With 10 million edges a
+server stays near 300 MiB with the defaults; on a 512 MiB machine set
+`cache_mb = 128` and `projection_cache_mb = 64` (graph algorithms on such
+a graph then build their projection, about 140 MiB, each time, and may
+need a longer `timeout_secs`). Loading many embeddings goes about twice as
+fast with `vector_cache_mb = 1024` and large write transactions, if the
+memory is there. Numbers in [benchmarks](benchmarks.md).
 
 ## Grafeno Studio on its own
 

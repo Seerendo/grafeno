@@ -111,6 +111,11 @@ The design, phases and open decisions are in [DESIGN.md](DESIGN.md).
   emails, a person and a company, two birth dates) unless forced; duplicate
   detection follows the same identity rules and catches typos; every merge
   is recorded (who, when, both nodes as they were) and can be undone.
+- **Phase 10.6, memory under large graphs:** measured with 10 M edges and
+  1 M vectors in 2 GiB and 512 MiB containers; caches sized by bytes
+  (`[memory]`), projections at about 12 bytes per edge, a streaming
+  `check` ten times faster, and GQ algorithms bounded by `max_memory` and
+  `top`.
 
 ## Installing
 

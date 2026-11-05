@@ -16,6 +16,11 @@
 //! max_rows = 1000000     # rows held at once
 //! max_memory_mb = 512    # one value built, or the rows held at once
 //! max_cost = 0           # refuse queries EXPLAIN estimates above this (off)
+//!
+//! [memory]               # caches, in MiB
+//! cache_mb = 256         # pages of the file
+//! projection_cache_mb = 256  # graphs kept for algorithms
+//! vector_cache_mb = 128  # vectors decoded while inserting
 //! ```
 
 use std::net::SocketAddr;
@@ -45,6 +50,41 @@ pub struct Config {
     pub max_requests: Option<usize>,
     #[serde(default, skip_serializing_if = "QueryConfig::is_empty")]
     pub query: QueryConfig,
+    #[serde(default, skip_serializing_if = "MemoryConfig::is_empty")]
+    pub memory: MemoryConfig,
+}
+
+/// Cache sizes, in MiB; missing values take [`grafeno::OpenOptions`]'s
+/// defaults.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_cache_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector_cache_mb: Option<u64>,
+}
+
+impl MemoryConfig {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn options(&self) -> grafeno::OpenOptions {
+        let base = grafeno::OpenOptions::default();
+        let bytes = |mb: Option<u64>, default: usize| {
+            mb.map_or(default, |mb| {
+                usize::try_from(mb.saturating_mul(1024 * 1024)).unwrap_or(usize::MAX)
+            })
+        };
+        grafeno::OpenOptions {
+            cache_bytes: bytes(self.cache_mb, base.cache_bytes),
+            projection_cache_bytes: bytes(self.projection_cache_mb, base.projection_cache_bytes),
+            vector_cache_bytes: bytes(self.vector_cache_mb, base.vector_cache_bytes),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,6 +231,7 @@ pub fn init(path: &Path, db: &Path, addr: SocketAddr, force: bool) -> Result<Con
         durability: None,
         max_requests: None,
         query: QueryConfig::default(),
+        memory: MemoryConfig::default(),
     };
     let text = format!(
         "# Grafeno server settings. Restart the service after changing them.\n\

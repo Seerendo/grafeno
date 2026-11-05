@@ -505,7 +505,8 @@ records are read only for a weight property) and keeps both directions as
 CSR arrays. The projection cache lives in the database: every commit bumps
 a counter twice (odd while committing), and a read transaction records the
 counter it saw if no commit ran while it opened, so it can reuse a
-projection built for the same snapshot; up to four are kept. Write
+projection built for the same snapshot; they are kept up to a budget in
+bytes (256 MiB by default, see 10.6). Write
 transactions project their own state and never cache. In GQ, statistics
 and writing need no special modes: rows are aggregated with `RETURN` or
 stored with `SET`, and `POST /v1/{ns}/algo/{name}` with `write` builds that
@@ -922,13 +923,54 @@ word and in a full name, gendered and suffixed names that are not typos,
 a nickname and a translation through aliases, and a merge undone exactly
 (names index, text index, vectors, counters and the check all agree).
 
-**10.6 RAM under large graphs.**
+**10.6 RAM under large graphs** (done).
 
 - Benchmarks with 10 million edges and 1 million vectors, in containers
   with 512 MB and 2 GB of memory: peak and steady memory per operation.
 - Caps by bytes, not entries, for the projection cache and the vector
   cache; cheaper projections (u32 positions, no edge ids unless asked).
 - Measures decide the next steps (vector quantization lands in 12.3).
+
+As built: `crates/grafeno-query/examples/ram_bench.rs` builds 1 M nodes and
+10 M edges, and 1 M vectors of dimension 128, and measures each common
+operation's resident and peak memory in containers of 2 GiB and 512 MiB
+(numbers in `docs/benchmarks.md`). What it found and what changed:
+
+- `Grafeno::open_with(path, &OpenOptions)` sizes the caches: redb's page
+  cache (256 MiB by default, it was redb's 1 GiB), the projection cache
+  (256 MiB, by bytes instead of four entries) and the vector cache of a
+  write transaction (128 MiB, by bytes instead of 262 144 entries).
+  `OpenOptions::with_memory(bytes)` splits one budget. The server reads
+  `[memory]` in `grafeno.toml`.
+- Projections are built in one pass straight into CSR arrays of `u32`
+  positions (no intermediate list of edges, no hash map from ids:
+  positions are found by binary search in the sorted ids), reserved up
+  front. The in-edges point at the out-edges instead of copying them, and
+  edge ids are kept only with `ProjectionSpec::edge_ids` (path algorithms
+  ask for them). About 12 bytes per edge and 24 per node; `Step::edge` is
+  now the edge's number, and `Projection::edge_id` its id.
+- `check` streams: one ordered pass over each record table and each
+  index, compared by fingerprints, with point lookups only to explain a
+  mismatch. Memory: the node ids and the values of unique indexes.
+  `rebuild_indexes` reads nodes and edges a page at a time (texts and
+  vectors are still held, as they are reindexed from scratch).
+- GQ: rows a procedure builds count against `max_memory` while it builds
+  them, node and edge values are estimated with their properties, and the
+  scoring algorithms take `top: n`.
+
+Measured (`docs/benchmarks.md`): with 10 M edges every operation fits in
+512 MiB with small caches, and stays near 300 MiB with the defaults
+outside graph algorithms; `check` went from killed at 2 GiB to 249 s; a
+million vectors are searched in about 5 ms with 140 MiB.
+
+Left for later, from the numbers: aggregates that stream (counting 10 M
+edges in GQ times out; 12.3); vector inserts slow down as the index
+grows (each 100 000 took 96 s at first and 809 s at the million) and a
+cache that keeps the most used vectors instead of starting over would
+help, as would quantization (12.3); projections are rebuilt per query
+when the cache is too small for them; the edge-label filter of
+projections reads every adjacency entry; and duplicate detection
+(`find_duplicates`) still loads every node of the namespace.
 
 **10.7 One writer.**
 
@@ -941,6 +983,31 @@ a nickname and a translation through aliases, and a merge undone exactly
   bulk and interactive writes so an import cannot starve an agent).
 
 #### Phase 11: memory that keeps itself
+
+**11.0 Entity resolution and text similarity.** Deciding that two records
+are the same thing (record linkage), for any kind of entity: the base of
+11.1's reconciliation, and useful on its own (contacts from several
+systems, products from several suppliers, companies, addresses, authors,
+assets).
+
+- Measures on normalized text: Levenshtein, Damerau-Levenshtein, Jaro and
+  Jaro-Winkler, Jaccard and Dice over n-grams, longest common
+  subsequence; phonetic codes as an option per language; numbers and
+  dates with tolerances (a day and a month swapped). As GQ functions
+  (`text.jaroWinkler(a, b)` and the like) and in the library.
+- Comparison rules declared per label, not coded: which properties
+  identify (strong keys, from 10.5), which compare and how, with weights
+  and thresholds for "same", "maybe, to review" and "different"
+  (Fellegi-Sunter style), and an explanation of every score field by
+  field.
+- Candidates found at query time, not only in batch: a trigram index (or
+  MinHash with LSH) answers "who looks like this?" without comparing
+  with everything, so the same rules serve deduplication of a namespace
+  and linking a new record as it arrives.
+- The graph as evidence: two similar records that share neighbors (an
+  address, an employer, contacts) are likelier the same.
+- Merges keep the rules and the undo of 10.5. No language model, CPU
+  only; an agent may add its own judgment through the API.
 
 **11.1 Incremental extraction and reconciliation of entities.**
 

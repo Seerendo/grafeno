@@ -214,7 +214,95 @@ A weight property costs a read of each edge record while projecting;
 without one, building reads only the adjacency. In GQ, each row an
 algorithm yields also reads its node (about 2 µs), so streaming a score
 for every one of 100,000 nodes adds about 0.2 s; `LIMIT` does not save
-that work, since rows are ranked first.
+that work, since rows are ranked first, but the `top` setting does (10.6).
+
+## Memory under a large graph (`crates/grafeno-query/examples/ram_bench.rs`)
+
+1 million nodes and 10 million edges (four labels, skewed toward a few
+hubs), a 6.4 GB file, in Docker containers with a hard memory limit (no
+swap) on a Windows host: the file lives on a Docker volume, whose disk is
+slow, so times are pessimistic. Steady is the resident memory after an
+operation, peak the most during it (`VmRSS` and `VmHWM`, the peak reset
+before each). 2 GiB with the default caches (256 MiB of pages, 256 MiB of
+projections); 512 MiB with `cache_mb = 128`, `projection_cache_mb = 64`.
+Release build, 2026-11-05.
+
+| Operation | 2 GiB: s | steady / peak MiB | 512 MiB: s | steady / peak MiB |
+| --- | --- | --- | --- | --- |
+| create 1 M nodes (transactions of 20 000) | 17 | 286 / 286 | | |
+| create 10 M edges (transactions of 20 000) | 3 598 | 298 / 299 | | |
+| open (closed cleanly) | 0.0 | 5 / 5 | 0.0 | 5 / 5 |
+| open after a crash (redb repairs the file) | 461 | 274 / 274 | 523 | 139 / 139 |
+| list every node id | 1.8 | 293 / 293 | 1.3 | 207 / 207 |
+| 10 000 neighbor lookups | 54 | 324 / 324 | 62 | 207 / 207 |
+| 100 two-hop neighborhoods | 0.3 | 324 / 324 | 0.3 | 207 / 207 |
+| GQ `MATCH ()-[r]->() RETURN count(r)` | 30 (timeout) | 365 / 371 | 30 (timeout) | 221 / 221 |
+| GQ lookup by property, no index | 4.2 | 385 / 385 | 1.9 | 223 / 223 |
+| export (streamed) | 145 | 385 / 385 | 180 | 223 / 223 |
+| check | 249 | 393 / 443 | 368 | 223 / 273 |
+| projection, no edge ids (138 MiB) | 68 | 535 / 535 | 63 | 356 / 356 |
+| PageRank (projection cached, or built again) | 1.8 | 550 / 550 | 66 | 223 / 382 |
+| projection with edge ids (291 MiB) | 61 | 830 / 830 | 61 | 509 / 509 |
+| GQ `algo.pageRank({top: 5})` | 1.9 | 550 / 550 | 30 (timeout) | 242 / 355 |
+| GQ `algo.pageRank()`, every row, `LIMIT 5` | 8 (refused, `max_memory`) | 989 / 989 | 30 (timeout) | 242 / 355 |
+
+What the first runs found, and what changed:
+
+- **`check` read every record into memory** (10 M decoded edges): killed
+  at 2 GiB. It now reads records and indexes once each, in order, and
+  compares fingerprints (a sum of 128-bit hashes per index); only an
+  index whose fingerprint differs is looked at entry by entry. The first
+  streaming version, with a point lookup per edge, took 2 562 s; the
+  fingerprints take 249 s, about twice an export.
+- **A GQ algorithm yields a row per node**: `CALL algo.pageRank() …
+  ORDER BY score DESC LIMIT 5` held a million node records (1.8 GiB) and
+  was killed. Rows built by a procedure now count against `max_memory` as
+  they are built (it stops at 512 MiB of estimated rows), a node's
+  estimated size counts its properties, and `top: n` keeps only the n best
+  rows (1.9 s, no growth).
+- **Projections** kept a 16-byte edge id and a hash map entry per node and
+  per edge twice; they now take about 12 bytes per edge without edge ids
+  (asked for only by path algorithms), 28 with them, and 24 per node, and
+  reserve their arrays up front instead of doubling them. The projection
+  cache is bounded by bytes (it held four projections of any size).
+- **The page cache** was redb's default (1 GiB), over a 512 MiB container
+  by itself; it is now 256 MiB by default and set with `[memory]`.
+
+- **Opening after a crash** takes minutes on a file this size: redb
+  repairs it (the runs killed above left it so). A file closed cleanly
+  opens at once.
+
+What 512 MiB holds: everything, with small caches. A projection of 10 M
+edges (138 MiB) and PageRank on it fit, and so does one with edge ids (291
+MiB, for path algorithms on the whole graph; before projections reserved
+their arrays, building it was killed). But a 64 MiB projection cache
+keeps neither, so each algorithm builds its projection again (about 60 s
+here), and GQ algorithms then hit the 30 s query timeout: on a small
+machine with a large graph, raise `timeout_secs` for algorithms or give
+the projection cache room. Counting every edge in GQ hits the 30 s limit
+on any machine: aggregates do not stream yet (12.3); `db.stats()` has the
+counts.
+
+### Vectors
+
+1 M vectors of dimension 128 (256 clusters) on 1 M nodes, set in
+transactions of 5 000, then 1 000 searches for the 10 nearest (`ef` 64),
+same containers.
+
+| Operation | s | steady / peak MiB |
+| --- | --- | --- |
+| set 1 M vectors (2 GiB, vector cache 128 MiB) | 4 976 | 442 / 442 |
+| 1 000 searches (2 GiB) | 5.0 | 442 / 442 |
+| 1 000 searches (512 MiB, page cache 128 MiB) | 5.0 | 140 / 140 |
+| set 300 000 vectors, vector cache 128 MiB | 539 | about 440 |
+| set 300 000 vectors, vector cache 1 GiB | 284 | 535 / 583 |
+
+Inserts slow down as the index grows: each 100 000 took 96 s at first and
+809 s at the end (an HNSW insert searches a larger graph, and reads more
+of a file larger than the page cache). A larger vector cache halves the
+time; it lives for one write transaction, so large transactions make the
+most of it. Searches stay at about 5 ms and need little memory: 140 MiB
+with a million vectors (512 MiB of vectors on disk).
 
 ## Remaining limits
 

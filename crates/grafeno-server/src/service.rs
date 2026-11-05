@@ -27,6 +27,8 @@ pub struct ServerSettings {
     pub durability: grafeno::Durability,
     /// Requests served at once.
     pub max_requests: usize,
+    /// Cache sizes.
+    pub memory: grafeno::OpenOptions,
 }
 
 /// Values given on the command line (or in the environment), if any.
@@ -72,12 +74,13 @@ impl ServerSettings {
             limits: config.query.limits(),
             durability: config.durability.map(Into::into).unwrap_or_default(),
             max_requests: config.max_requests.unwrap_or(http::MAX_REQUESTS),
+            memory: config.memory.options(),
         }
     }
 
     fn open(&self) -> grafeno::Result<Grafeno> {
         match &self.db {
-            Some(path) => Grafeno::open(path),
+            Some(path) => Grafeno::open_with(path, &self.memory),
             None => Grafeno::in_memory(),
         }
     }

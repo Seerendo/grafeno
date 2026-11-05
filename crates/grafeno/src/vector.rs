@@ -31,9 +31,10 @@ const EF_CONSTRUCTION: usize = 100;
 /// The search that finds new neighbors for the neighbors of a removed node.
 const REPAIR_EF: usize = 16;
 const MAX_LEVEL: u8 = 16;
-/// Above this many cached vectors (or link lists) a namespace's cache starts
-/// over, which bounds the memory of very large write transactions.
-const MAX_CACHED: usize = 1 << 18;
+/// The memory, by default, of the vectors and link lists a write
+/// transaction keeps decoded (see [`crate::OpenOptions`]); past it the
+/// cache starts over, which bounds very large write transactions.
+pub const DEFAULT_VECTOR_CACHE: usize = 128 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct VectorMeta {
@@ -164,18 +165,36 @@ pub(crate) fn embedding(
 
 /// Decoded vectors (`None`: the node has none) and link lists of one
 /// namespace's graph.
-#[derive(Default)]
 struct NamespaceCache {
     vectors: HashMap<u128, Option<Arc<[f32]>>>,
     links: HashMap<(u128, u8), Arc<[u128]>>,
+    /// The bytes it may take, roughly.
+    budget: usize,
+    /// The bytes of one cached vector, entry included (from the dimension).
+    vector_bytes: usize,
 }
 
 impl NamespaceCache {
-    fn trim(&mut self) {
-        if self.vectors.len() > MAX_CACHED {
-            self.vectors.clear();
+    fn new(budget: usize) -> Self {
+        Self {
+            vectors: HashMap::new(),
+            links: HashMap::new(),
+            budget,
+            vector_bytes: 0,
         }
-        if self.links.len() > MAX_CACHED {
+    }
+
+    /// The bytes it takes, estimated: a map entry, a vector of the
+    /// namespace's dimension, and link lists of up to `M0` neighbors.
+    fn bytes(&self) -> usize {
+        const ENTRY: usize = 64;
+        self.vectors.len() * (ENTRY + self.vector_bytes) + self.links.len() * (ENTRY + M0 * 16)
+    }
+
+    fn trim(&mut self, dimension: usize) {
+        self.vector_bytes = dimension * 4;
+        if self.bytes() > self.budget {
+            self.vectors.clear();
             self.links.clear();
         }
     }
@@ -183,16 +202,30 @@ impl NamespaceCache {
 
 /// The vector-graph cache of a write transaction, per namespace. It lives
 /// as long as the transaction, so it never outlives the data it copies.
-#[derive(Default)]
 pub(crate) struct Cache {
     namespaces: HashMap<String, NamespaceCache>,
+    /// The bytes each namespace's cache may take.
+    budget: usize,
+}
+
+impl Default for Cache {
+    fn default() -> Self {
+        Self::new(DEFAULT_VECTOR_CACHE)
+    }
 }
 
 impl Cache {
+    pub(crate) fn new(budget: usize) -> Self {
+        Self {
+            namespaces: HashMap::new(),
+            budget,
+        }
+    }
+
     fn namespace(&mut self, ns: &str) -> &mut NamespaceCache {
         if !self.namespaces.contains_key(ns) {
             self.namespaces
-                .insert(ns.to_owned(), NamespaceCache::default());
+                .insert(ns.to_owned(), NamespaceCache::new(self.budget));
         }
         self.namespaces.get_mut(ns).expect("inserted above")
     }
@@ -419,7 +452,7 @@ pub(crate) fn insert(
         .map_err(storage)?;
     let mut links = tx.open_table(HNSW_LINKS).map_err(storage)?;
     let cache = cache.namespace(ns);
-    cache.trim();
+    cache.trim(query.len());
     cache.vectors.insert(id, Some(Arc::from(query.as_slice())));
     let level = level_of(node);
 

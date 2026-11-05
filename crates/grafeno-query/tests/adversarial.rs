@@ -246,3 +246,36 @@ fn explain_estimates_rank_queries_and_max_cost_refuses_the_costly() {
     .unwrap();
     assert_eq!(fine.rows.len(), 3);
 }
+
+/// A procedure that yields a row per node stops at the memory limit while
+/// it builds them, and `top` keeps it within.
+#[test]
+fn procedure_rows_count_against_max_memory() {
+    let db = world();
+    let small = Limits {
+        max_memory: Some(256 * 1024),
+        ..Limits::standard()
+    };
+    let every = execute_with(
+        &db,
+        NS,
+        "CALL algo.pageRank() YIELD node, score RETURN node.name ORDER BY score DESC LIMIT 5",
+        &Params::new(),
+        &small,
+    )
+    .unwrap_err();
+    assert!(
+        every.limit && every.message.contains("max_memory"),
+        "{}",
+        every.message
+    );
+    let top = execute_with(
+        &db,
+        NS,
+        "CALL algo.pageRank({top: 5}) YIELD node, score RETURN node.name",
+        &Params::new(),
+        &small,
+    )
+    .unwrap();
+    assert_eq!(top.rows.len(), 5);
+}

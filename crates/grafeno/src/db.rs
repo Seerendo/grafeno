@@ -51,6 +51,46 @@ const OLD_POSTINGS: TableDefinition<PostingKey, u32> = TableDefinition::new("pos
 
 const SCHEMA_KEY: &str = "schema_version";
 
+/// How much memory a database may use for caches. Everything else a
+/// process holds is per request: rows of a query, a projection being
+/// built, a transaction's changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpenOptions {
+    /// Pages of the file kept in memory (redb's cache), shared by readers
+    /// and the writer. More makes repeated reads faster.
+    pub cache_bytes: usize,
+    /// Graph projections kept for algorithms between reads.
+    pub projection_cache_bytes: usize,
+    /// Decoded vectors and link lists a write transaction keeps while it
+    /// inserts vectors.
+    pub vector_cache_bytes: usize,
+}
+
+/// The default page cache: 256 MiB.
+pub const DEFAULT_CACHE: usize = 256 * 1024 * 1024;
+
+impl Default for OpenOptions {
+    fn default() -> Self {
+        Self {
+            cache_bytes: DEFAULT_CACHE,
+            projection_cache_bytes: crate::algo::DEFAULT_PROJECTION_CACHE,
+            vector_cache_bytes: crate::vector::DEFAULT_VECTOR_CACHE,
+        }
+    }
+}
+
+impl OpenOptions {
+    /// Every cache sized from one budget: half for pages, a quarter each
+    /// for projections and vectors.
+    pub fn with_memory(bytes: usize) -> Self {
+        Self {
+            cache_bytes: bytes / 2,
+            projection_cache_bytes: bytes / 4,
+            vector_cache_bytes: bytes / 4,
+        }
+    }
+}
+
 /// What checking a database file found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -85,13 +125,36 @@ pub struct Grafeno {
     unflushed: AtomicBool,
     /// The commit counter and the projections cached for algorithms.
     shared: Arc<Shared>,
+    vector_cache: usize,
 }
 
 impl Grafeno {
     /// Opens the file, creating it if it does not exist, and upgrades its
     /// layout if it was written by an older version.
     pub fn open(path: impl AsRef<FsPath>) -> Result<Self> {
-        Self::init(Database::create(path).map_err(storage)?)
+        Self::open_with(path, &OpenOptions::default())
+    }
+
+    /// [`Grafeno::open`] with caches of these sizes.
+    pub fn open_with(path: impl AsRef<FsPath>, options: &OpenOptions) -> Result<Self> {
+        let db = Database::builder()
+            .set_cache_size(options.cache_bytes)
+            .create(path)
+            .map_err(storage)?;
+        let grafeno = Self::init(db)?;
+        Ok(grafeno.with_options(options))
+    }
+
+    fn with_options(mut self, options: &OpenOptions) -> Self {
+        self.shared
+            .set_projection_budget(options.projection_cache_bytes);
+        self.vector_cache = options.vector_cache_bytes;
+        self
+    }
+
+    /// The bytes the projection cache holds now.
+    pub fn projection_cache_bytes(&self) -> usize {
+        self.shared.projection_bytes()
     }
 
     /// Checks every page of a database file against its checksum, which
@@ -199,6 +262,7 @@ impl Grafeno {
             eventual: AtomicBool::new(false),
             unflushed: AtomicBool::new(false),
             shared: Arc::default(),
+            vector_cache: crate::vector::DEFAULT_VECTOR_CACHE,
         })
     }
 
@@ -266,7 +330,7 @@ impl Grafeno {
         }
         Ok(WriteTx {
             tx,
-            vectors: vector::Cache::default(),
+            vectors: vector::Cache::new(self.vector_cache),
             shared: self.shared.clone(),
             actor: None,
         })

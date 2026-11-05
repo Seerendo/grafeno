@@ -182,6 +182,20 @@ fn centrality() {
          RETURN node.name, score LIMIT 2",
     );
     assert_eq!(degree, json!([["Cy", 3.0], ["Dan", 3.0]]));
+    // `top` keeps the best rows only, in the same order.
+    let top = rows(
+        &db,
+        "CALL algo.degree({labels: 'Person', edgeLabels: 'knows', top: 2}) YIELD node, score
+         RETURN node.name, score",
+    );
+    assert_eq!(top, degree);
+    assert_eq!(
+        rows(
+            &db,
+            "CALL algo.pageRank({top: 0}) YIELD node RETURN count(node)"
+        ),
+        json!([[0]])
+    );
 
     let rank = rows(
         &db,
