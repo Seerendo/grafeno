@@ -135,6 +135,11 @@ measured speed, memory and limits, with charts, in
   `mentions` edges; namesakes are settled by context or queued for
   review; runs read only what changed (`grafeno extract`, the `extract`
   MCP tool); agents can send their own mentions.
+- **Phase 11.2, contradicting facts:** edge constraints (`REQUIRE ONE PER
+  SOURCE`, `TARGET` or `PAIR`) end the old fact in valid time when a new
+  one contradicts it, as a new version so `KNOWN AT` keeps what was
+  believed; or flag, or reject; functional properties keep their
+  earlier values (`history(n, 'city')`).
 
 ## Installing
 

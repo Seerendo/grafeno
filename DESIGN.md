@@ -89,9 +89,10 @@ short-lived agents.
 | `principals`   | key name                      | secret hash, grants, owner, `own_only` (JSON) |
 | `merges`       | `(ns, merge_id)`              | merge record: who, when, both nodes before, edges moved and dropped |
 | `match_rules`  | `(ns, label)`                 | match rule: strong keys, fields with measures and weights, thresholds (JSON) |
+| `constraints`  | `(ns, name)`                  | a constraint on facts (one per source, target or pair) or a functional property (JSON) |
 | `state`        | `(ns, kind, key)`             | bytes kept by features on the engine (extraction's text hashes, review queue and decisions) |
 
-- The layout has a version (`SCHEMA_VERSION`, now 10) in `meta`. Opening an
+- The layout has a version (`SCHEMA_VERSION`, now 11) in `meta`. Opening an
   older file upgrades it in one transaction: version 1 gets its counters
   computed, version 2 gets the new adjacency and posting tables (built from
   the records) and loses the old ones, version 3 gets the names index,
@@ -99,8 +100,9 @@ short-lived agents.
   registry (every namespace with data), version 6 the (empty) principals,
   version 7 the (empty) merge records, and version 8 the (empty) match
   rules and the possibility of fuzzy indexes (whose trigram entries an
-  older Grafeno would read as values), and version 9 the (empty) state
-  table. A newer layout is refused.
+  older Grafeno would read as values), version 9 the (empty) state
+  table, and version 10 the (empty) constraints. A newer layout is
+  refused.
 - Adjacency entries hold the edge's record time and valid time
   (`recorded_at`, `expired_at`, `valid_from`, `valid_to`), so traversals
   filter without reading edge records. Postings hold the length of their
@@ -1172,7 +1174,7 @@ As built (`grafeno-memory`: `extract` finds, `reconcile` decides):
   are read from nodes by label; and the review queue is scanned whole when
   texts change, which is fine for thousands of items, not millions.
 
-**11.2 Automatic invalidation of contradicting facts.**
+**11.2 Automatic invalidation of contradicting facts** (done).
 
 - Edge cardinality constraints: `CREATE CONSTRAINT FOR ()-[r:works_at]->()
   REQUIRE ONE PER SOURCE` (one current fact per source), also per target
@@ -1183,6 +1185,48 @@ As built (`grafeno-memory`: `extract` finds, `reconcile` decides):
   shows what was believed.
 - The same for functional properties; a report of what was invalidated,
   and an option to only flag instead of invalidating.
+
+As built (`crates/grafeno/src/constraints.rs`, table `constraints`, layout
+version 11):
+
+- `Constraint::Edge { label, scope, on_conflict }` with scope `source`,
+  `target` or `pair`, declared in GQ as `CREATE CONSTRAINT [name] FOR
+  ()-[r:works_at]->() REQUIRE ONE PER SOURCE [ON CONFLICT INVALIDATE |
+  FLAG | REJECT]`. Every `create_edge` checks the constraints of its
+  label (read once per transaction): the current, not retracted facts
+  that overlap the new one in valid time, from the same source (to
+  another target), to the same target (from another source), or between
+  the same pair. The same fact again is no contradiction.
+- `invalidate`: a new fact without a start begins when it is recorded. An
+  old fact that starts earlier ends where the new one starts; it is not
+  edited in place but versioned: the old record is expired (record time)
+  and a copy with the new `valid_to` is written, so `KNOWN AT` an earlier
+  moment still sees the fact as it was believed then. A new fact older
+  than a current one (a late report) ends where the current one starts
+  (`shortened`); two facts that start at the same moment: the old record
+  is retracted (`replaced`). An `own_only` agent cannot end someone else's
+  fact: the contradiction is flagged instead. `flag` keeps both; `reject`
+  refuses the new fact (409).
+- Every action is recorded (`ConstraintEvent`: constraint, action, new
+  and old fact, the replacement version, where it now ends, who, when) in
+  the state table: `constraint_events`, `GET /v1/{ns}/contradictions`, and
+  per transaction `take_constraint_events` (GQ counts them in
+  `facts_invalidated` and `conflicts_flagged`; the MCP `relate` tool tells
+  the agent what its fact contradicted). Declaring a constraint on facts
+  that already contradict each other flags them, and changes nothing.
+- `Constraint::Functional { label, key }` (`REQUIRE p.city IS
+  FUNCTIONAL`): a node property has no valid time, so each change of the
+  property keeps the earlier value with when it held (since the change
+  before, or the node's creation) and who changed it: `property_history`,
+  GQ `history(n, 'city')`, `GET /v1/{ns}/nodes/{id}/history/{key}`.
+- `SHOW CONSTRAINTS` lists unique, edge and functional constraints
+  (`name`, `kind`, `label`, `property`, `rule`); `DROP CONSTRAINT` drops
+  either kind.
+- Measured (`examples/constraint_bench.rs`): 50 000 job changes for
+  10 000 people go from 44 000 to 14 000 facts a second with a one
+  employer constraint (each write reads the source's other facts of the
+  label); every person ends with exactly one current employer, and 40 069
+  earlier jobs stay in valid time.
 
 **11.3 Hierarchical community summaries.**
 
@@ -1311,6 +1355,7 @@ spinning disk, on ARM, or for days at a time.
 | Hostile GQ queries | 32 of 32 end within their limits, none crashes | E1-mem | `hostile_queries.csv` |
 | Fuzzy search for a damaged name among 100 000 people | 20 ms p50 (469 ms comparing with every node) | E1-mem | `resolve_speed.csv` |
 | Entity resolution by a match rule (2 000 damaged duplicates, 2 000 namesakes) | 95% found as same or review, precision of `same` 0.994 | E1-mem | `resolve_quality.csv` |
+| One current fact per source (50 000 job changes) | 14 000 facts/s (44 000 without); every person one current employer | E1-mem | `constraint_cost.csv` |
 | Extraction of 20 000 memories naming 5 000 entities | 3 200 texts/s; 99.4% of mentions linked right, none wrong; 0.06 s when nothing changed | E1-mem | `extract_*.csv` |
 
 ### Guarantees and the tests that hold them
@@ -1330,6 +1375,7 @@ real binary. The ones that carry each guarantee:
 | Group commit is correct | `grafeno/tests/writer.rs` | concurrent writes all commit; a failing write leaves the others; a full queue answers busy; imports through the bulk lane let interactive writes in; metrics count what happened |
 | Vector search keeps its quality | `grafeno/tests/vector_churn.rs` | deletes, reinserts, three rounds of churn and a compaction keep recall@10 at 0.95 or more, and reinserted vectors are found |
 | Records are matched by rule, with reasons | `grafeno/tests/resolve.rs`, `property_index.rs` (fuzzy), `src/textsim.rs` tests | measures against published values; strong keys decide either way; typos, swapped dates and namesakes; neighbors as evidence (and no links as no evidence); scans without indexes; pairs for deduplication; fuzzy indexes through updates, check and export |
+| Contradicting facts are ended, not lost | `grafeno/tests/constraints.rs` | invalidation as a new version (`KNOWN AT` sees what was believed), late facts shortened, facts without dates starting now, the same fact again, flag, reject, target and pair scopes, `own_only` agents flagged, existing contradictions, property history |
 | Texts link to what they mention | `grafeno-memory/tests/extraction.rs`, `src/extract.rs` tests | patterns and their normalized values and offsets, phrases and sentence openers, the gazetteer on normalized text; known names, emails by index, value nodes, new names after two texts, namesakes settled by context or queued, decisions that last, dismissals, incremental runs, an agent's mentions through match rules |
 | Merges are right and reversible | `grafeno/tests/merges.rs`, `grafeno-memory/tests/maintenance.rs` | strong keys, labels, conflicting facts and functional edges; namesakes, typos, nicknames, translations; a merge undone exactly (indexes, counters and the check agree) |
 | Isolation between principals | `grafeno-server/tests/access.rs` | a matrix of keys, grants and endpoints: no read or write outside a key's grants, `own_only` keys change only their own records |
@@ -1351,6 +1397,7 @@ cargo run --release -p grafeno --example saturation -- 3
 cargo run --release -p grafeno-query --example index_bench
 cargo run --release -p grafeno --example resolve_bench -- 100000
 cargo run --release -p grafeno-memory --example extract_bench -- 5000 20000
+cargo run --release -p grafeno --example constraint_bench -- 10000 50000
 cargo test --release -p grafeno-query --test adversarial -- --nocapture
 ```
 

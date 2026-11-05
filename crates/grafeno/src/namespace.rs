@@ -253,6 +253,11 @@ impl WriteTx {
         clear!(EDGE_LABEL_COUNTS, (ns, ""), (end.as_str(), ""));
         clear!(INDEXES, (ns, ""), (end.as_str(), ""));
         clear!(crate::resolve::MATCH_RULES, (ns, ""), (end.as_str(), ""));
+        clear!(
+            crate::constraints::CONSTRAINTS,
+            (ns, ""),
+            (end.as_str(), "")
+        );
         clear!(crate::state::STATE, (ns, "", ""), (end.as_str(), "", ""));
         let empty: &[u8] = &[];
         clear!(

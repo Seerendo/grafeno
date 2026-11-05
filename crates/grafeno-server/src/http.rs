@@ -211,6 +211,9 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/{ns}/fuzzy", get(fuzzy))
         .route("/{ns}/match", post(find_matches))
         .route("/{ns}/matches", get(match_pairs))
+        .route("/{ns}/constraints", get(constraints))
+        .route("/{ns}/contradictions", get(contradictions))
+        .route("/{ns}/nodes/{id}/history/{key}", get(property_history))
         .route("/{ns}/extract", post(extract))
         .route("/{ns}/review", get(review_queue))
         .route("/{ns}/review/{key}", post(resolve_review))
@@ -2001,6 +2004,48 @@ async fn find_matches(
     })
     .await?;
     Ok(Json(found))
+}
+
+/// The constraints on facts and properties (`CREATE CONSTRAINT` declares
+/// them).
+async fn constraints(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+) -> ApiResult<Json<Vec<grafeno::Constraint>>> {
+    let found = blocking(&state, move |db| db.begin_read()?.constraints(&ns)).await?;
+    Ok(Json(found))
+}
+
+#[derive(Deserialize)]
+struct ContradictionsParams {
+    limit: Option<usize>,
+}
+
+/// What constraints did: facts ended, shortened, replaced or flagged,
+/// newest first.
+async fn contradictions(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Params(params): Params<ContradictionsParams>,
+) -> ApiResult<Json<Vec<grafeno::ConstraintEvent>>> {
+    let limit = params.limit.unwrap_or(50).min(MAX_PAGE);
+    let events = blocking(&state, move |db| {
+        db.begin_read()?.constraint_events(&ns, limit)
+    })
+    .await?;
+    Ok(Json(events))
+}
+
+/// The earlier values of a functional property of a node.
+async fn property_history(
+    State(state): State<AppState>,
+    Path((ns, id, key)): Path<(String, NodeId, String)>,
+) -> ApiResult<Json<Vec<grafeno::HistoryEntry>>> {
+    let entries = blocking(&state, move |db| {
+        db.begin_read()?.property_history(&ns, id, &key)
+    })
+    .await?;
+    Ok(Json(entries))
 }
 
 /// Reads the namespace's new and changed texts and reconciles what they

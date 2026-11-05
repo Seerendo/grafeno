@@ -1373,3 +1373,43 @@ async fn extraction_endpoints() {
     .await;
     assert!(ana.as_array().unwrap().len() >= 2, "{ana}");
 }
+
+#[tokio::test]
+async fn constraint_endpoints() {
+    let app = app(None);
+    let q = |query: &str| json!({ "query": query });
+    for query in [
+        "CREATE (:Person {name: 'Ana', city: 'Lima'}), (:Company {name: 'Acme'}), (:Company {name: 'Globex'})",
+        "CREATE CONSTRAINT FOR ()-[r:works_at]->() REQUIRE ONE PER SOURCE",
+        "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.city IS FUNCTIONAL",
+        "MATCH (p:Person), (c:Company {name: 'Acme'}) CREATE (p)-[:works_at]->(c)",
+        "MATCH (p:Person), (c:Company {name: 'Globex'}) CREATE (p)-[:works_at]->(c)",
+        "MATCH (p:Person) SET p.city = 'Quito'",
+    ] {
+        let (status, body) = call(&app, "POST", "/v1/k/query", Some(q(query))).await;
+        assert_eq!(status, StatusCode::OK, "{query}: {body}");
+    }
+    let (status, constraints) = call(&app, "GET", "/v1/k/constraints", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(constraints.as_array().unwrap().len(), 2, "{constraints}");
+    let (_, events) = call(&app, "GET", "/v1/k/contradictions", None).await;
+    assert_eq!(events[0]["action"], "invalidated", "{events}");
+    assert!(events[0]["replacement"].is_string());
+    let (_, found) = call(
+        &app,
+        "POST",
+        "/v1/k/query",
+        Some(q("MATCH (p:Person) RETURN p.@id")),
+    )
+    .await;
+    let ana = found["rows"][0][0].as_str().unwrap().to_owned();
+    let (status, history) = call(
+        &app,
+        "GET",
+        &format!("/v1/k/nodes/{ana}/history/city"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    assert_eq!(history[0]["value"], "Lima");
+}

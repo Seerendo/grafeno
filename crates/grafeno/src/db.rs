@@ -11,6 +11,7 @@ use redb::{
 
 use crate::access::PRINCIPALS;
 use crate::algo::Shared;
+use crate::constraints::CONSTRAINTS;
 use crate::index::{INDEX_ENTRIES, INDEXES, IndexKey};
 use crate::memory::names_of;
 use crate::merge::MERGES;
@@ -47,7 +48,8 @@ use crate::{Hit, text, vector};
 /// 9. Allows fuzzy indexes (`IndexDef::fuzzy`), whose trigram entries an
 ///    older Grafeno would read as values, and adds `match_rules`.
 /// 10. Adds `state` (what extraction read, its review queue), empty.
-pub const SCHEMA_VERSION: u64 = 10;
+/// 11. Adds `constraints` (on facts and properties), empty.
+pub const SCHEMA_VERSION: u64 = 11;
 
 /// The tables replaced in version 3, by name (their types no longer matter).
 const OLD_ADJ_OUT: TableDefinition<AdjKey, u128> = TableDefinition::new("adj_out");
@@ -219,6 +221,7 @@ impl Grafeno {
         tx.open_table(MERGES).map_err(storage)?;
         tx.open_table(MATCH_RULES).map_err(storage)?;
         tx.open_table(STATE).map_err(storage)?;
+        tx.open_table(CONSTRAINTS).map_err(storage)?;
 
         let stored = tx
             .open_table(META)
@@ -327,6 +330,7 @@ impl Grafeno {
             merges: tx.open_table(MERGES).map_err(storage)?,
             match_rules: tx.open_table(MATCH_RULES).map_err(storage)?,
             state: tx.open_table(STATE).map_err(storage)?,
+            constraints: tx.open_table(CONSTRAINTS).map_err(storage)?,
             tx,
         })
     }
@@ -348,6 +352,8 @@ impl Grafeno {
             vectors: vector::Cache::new(self.vector_cache),
             shared: self.shared.clone(),
             actor: None,
+            constraint_cache: None,
+            constraint_log: Vec::new(),
         })
     }
 
@@ -558,6 +564,7 @@ pub struct ReadTx {
     pub(crate) merges: ReadOnlyTable<RecordKey, &'static [u8]>,
     pub(crate) match_rules: ReadOnlyTable<(&'static str, &'static str), &'static [u8]>,
     pub(crate) state: ReadOnlyTable<crate::state::StateKey, &'static [u8]>,
+    pub(crate) constraints: ReadOnlyTable<(&'static str, &'static str), &'static [u8]>,
     pub(crate) shared: Arc<Shared>,
     /// The commit this snapshot sees, when known (for the projection cache).
     pub(crate) generation: Option<u64>,
@@ -730,6 +737,10 @@ pub struct WriteTx {
     pub(crate) vectors: vector::Cache,
     pub(crate) shared: Arc<Shared>,
     pub(crate) actor: Option<Actor>,
+    /// The constraints of the namespace last written, read once.
+    pub(crate) constraint_cache: Option<(String, Vec<crate::constraints::Constraint>)>,
+    /// What constraints did in this transaction.
+    pub(crate) constraint_log: Vec<crate::constraints::ConstraintEvent>,
 }
 
 impl WriteTx {
@@ -1057,8 +1068,11 @@ impl WriteTx {
             expired_at: None,
             recorded_by: self.actor.as_ref().map(|actor| actor.name.clone()),
         };
+        let mut edge = edge;
+        let pending = self.check_edge(ns, &mut edge)?;
         let id = edge.id;
-        self.restore_edge(ns, edge)?;
+        self.restore_edge(ns, edge.clone())?;
+        self.settle_edge(ns, &edge, pending)?;
         Ok(id)
     }
 
@@ -1168,6 +1182,7 @@ impl WriteTx {
             .map_err(storage)?;
 
         self.index_node(ns, Some(node), previous)?;
+        self.record_history(ns, node, previous)?;
 
         let old_names = previous.map(names_of).unwrap_or_default();
         let new_names = names_of(node);

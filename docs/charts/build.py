@@ -517,6 +517,12 @@ def main():
           [(f"{r['run']} ({r['texts_read']} read)", [num(r['seconds'])], 0 if r['run'] == 'first run' else 2) for r in rows],
           ' s', log=True, note='Data: docs/data/extract_runs.csv')
 
+    # Edge constraints.
+    rows = read('constraint_cost.csv')
+    hbars('constraint-cost', 'Writing 50 000 job changes, with and without a constraint', 'Facts per second; 10 000 people, one current employer each. E1-mem.',
+          [(r['writes'], [num(r['facts_per_s'])], 0 if 'one employer' in r['writes'] else False) for r in rows],
+          '', note='With the constraint every person ends with one current employer and 40 069 earlier jobs in valid time. Data: docs/data/constraint_cost.csv')
+
     print('charts written to', OUT)
 
 

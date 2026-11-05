@@ -10,6 +10,7 @@ use redb::{
 use serde::Serialize;
 
 use crate::access::PRINCIPALS;
+use crate::constraints::CONSTRAINTS;
 use crate::db::ReadTx;
 use crate::index::{INDEX_ENTRIES, INDEXES};
 use crate::merge::MERGES;
@@ -89,6 +90,7 @@ impl ReadTx {
                 MERGES.name(),
                 MATCH_RULES.name(),
                 STATE.name(),
+                CONSTRAINTS.name(),
             ];
             for table in from.list_tables().map_err(storage)? {
                 if !known.contains(&table.name()) {
@@ -124,6 +126,7 @@ impl ReadTx {
             entries += copy(from, &tx, MERGES)?;
             entries += copy(from, &tx, MATCH_RULES)?;
             entries += copy(from, &tx, STATE)?;
+            entries += copy(from, &tx, CONSTRAINTS)?;
             tx.commit().map_err(storage)?;
             drop(db);
             Ok(entries)
@@ -140,7 +143,7 @@ impl ReadTx {
         })?;
         let bytes = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
         Ok(BackupStats {
-            tables: 25,
+            tables: 26,
             entries,
             bytes,
         })

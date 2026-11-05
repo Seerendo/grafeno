@@ -21,6 +21,7 @@ test environments").
 | Hostile queries (cartesian products, huge loops, deep nesting) | 32 of 32 stopped within their limits |
 | Finding a person by a misspelled name among 100 000 | 20 ms with a fuzzy index |
 | Telling duplicates from namesakes (match rule) | 95% of duplicates found, 99.4% of "same" right |
+| One current fact per person (constraint) | 14 000 facts/s, every person one current employer |
 | Linking what memories mention to known entities | 3 200 texts/s, 99.4% linked right, none wrong |
 
 ## Test environments
@@ -162,6 +163,20 @@ person), a rule on name, birth date and city found 95% of the duplicates
 of its "same" decisions were right. Every decision lists each field's
 similarity, so a rule can be checked and tuned; with a looser date
 tolerance (a year instead of 30 days) 115 namesakes passed as "same".
+
+## Facts that replace facts
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/charts/constraint-cost-dark.svg">
+  <img alt="50 000 job changes: 44 000 facts per second without a constraint, 14 000 with one current employer per person" src="assets/charts/constraint-cost-light.svg">
+</picture>
+
+`CREATE CONSTRAINT FOR ()-[r:works_at]->() REQUIRE ONE PER SOURCE` makes a
+new job end the old one in valid time, while what was believed before
+stays visible with `KNOWN AT`. With 50 000 job changes for 10 000 people,
+every person ended with exactly one current employer and every earlier
+job in history, at a third of the write speed (each new fact looks at
+the person's other ones).
 
 ## Extraction
 

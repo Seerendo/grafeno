@@ -442,6 +442,23 @@ phrases are words only: the 200 projects, named with a number ("Proyecto
 Andina 3"), collapsed into 16 entities by their words. Names with digits
 need an identifier pattern.
 
+## Edge constraints (`crates/grafeno/examples/constraint_bench.rs`)
+
+10 000 people and 500 companies; 50 000 job changes, an hour apart in
+valid time, in transactions of 1 000, in memory, release build,
+2026-11-05.
+
+| Writes | Seconds | Facts per second |
+| --- | --- | --- |
+| without a constraint | 1.14 | 44 013 |
+| one employer per person (`invalidate`) | 3.52 | 14 202 |
+
+With the constraint every person who ever had a job has exactly one
+current employer (9 931; the other 69 were never picked), and 40 069
+earlier jobs stay as facts that ended in valid time, each invalidation
+recorded. Each write reads the source's other facts of the label to find
+contradictions, and an invalidation writes a new version of the old fact.
+
 ## Remaining limits
 
 - **Vector search reads each visited vector from redb** (about 0.4 µs per

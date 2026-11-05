@@ -256,6 +256,54 @@ impl Parser<'_> {
             }));
         }
         self.expect_keyword("FOR")?;
+        // FOR ()-[r:label]->() REQUIRE ONE PER SOURCE | TARGET | PAIR
+        if unique && self.peek() == &Token::LParen && self.peek_at(1) == &Token::RParen {
+            let pattern = self.pattern()?;
+            let label = match pattern.steps.as_slice() {
+                [(rel, _)] if rel.labels.len() == 1 && rel.direction == grafeno::Direction::Out => {
+                    rel.labels[0].clone()
+                }
+                _ => {
+                    return Err(self.error(
+                        "an edge constraint is on one label: FOR ()-[r:label]->() REQUIRE ONE PER SOURCE",
+                    ));
+                }
+            };
+            self.expect_keyword("REQUIRE")?;
+            self.expect_keyword("ONE")?;
+            self.expect_keyword("PER")?;
+            let scope = if self.eat_keyword("SOURCE") {
+                grafeno::Scope::Source
+            } else if self.eat_keyword("TARGET") {
+                grafeno::Scope::Target
+            } else if self.eat_keyword("PAIR") {
+                grafeno::Scope::Pair
+            } else {
+                return Err(self.unexpected("SOURCE, TARGET or PAIR"));
+            };
+            let mut on_conflict = grafeno::OnConflict::Invalidate;
+            if self.eat_keyword("ON") {
+                self.expect_keyword("CONFLICT")?;
+                on_conflict = if self.eat_keyword("INVALIDATE") {
+                    grafeno::OnConflict::Invalidate
+                } else if self.eat_keyword("FLAG") {
+                    grafeno::OnConflict::Flag
+                } else if self.eat_keyword("REJECT") {
+                    grafeno::OnConflict::Reject
+                } else {
+                    return Err(self.unexpected("INVALIDATE, FLAG or REJECT"));
+                };
+            }
+            return Ok(Some(Schema::Constrain {
+                constraint: grafeno::Constraint::Edge {
+                    name: name.unwrap_or_default(),
+                    label,
+                    scope,
+                    on_conflict,
+                },
+                if_not_exists,
+            }));
+        }
         self.expect(Token::LParen, "`(`")?;
         let var = self.ident("a variable")?;
         self.expect(Token::Colon, "`:Label`")?;
@@ -278,6 +326,16 @@ impl Parser<'_> {
             self.expect_keyword("REQUIRE")?;
             let key = property(self)?;
             self.expect_keyword("IS")?;
+            if self.eat_keyword("FUNCTIONAL") {
+                return Ok(Some(Schema::Constrain {
+                    constraint: grafeno::Constraint::Functional {
+                        name: name.unwrap_or_default(),
+                        label,
+                        key,
+                    },
+                    if_not_exists,
+                }));
+            }
             self.expect_keyword("UNIQUE")?;
             key
         } else {

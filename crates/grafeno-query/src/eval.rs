@@ -1382,6 +1382,30 @@ fn function(ctx: &Context, name: &str, args: Vec<Value>) -> Result<Value, QueryE
                 }
             }
         }
+        "history" => {
+            arity(name, &args, 2..=2)?;
+            let Value::Node(node) = &args[0] else {
+                return Err(error("history(node, property) needs a node"));
+            };
+            let key = string_arg(name, &args[1])?;
+            let entries = match ctx.write {
+                Some(tx) => tx.property_history(ctx.ns, node.id, key)?,
+                None => ctx.read.property_history(ctx.ns, node.id, key)?,
+            };
+            Value::List(
+                entries
+                    .into_iter()
+                    .map(|entry| {
+                        let mut map = std::collections::BTreeMap::new();
+                        map.insert("value".to_owned(), Value::from_json(&entry.value));
+                        map.insert("from".to_owned(), Value::Time(entry.from));
+                        map.insert("to".to_owned(), Value::Time(entry.to));
+                        map.insert("by".to_owned(), entry.by.map_or(Value::Null, Value::Str));
+                        Value::Map(map)
+                    })
+                    .collect(),
+            )
+        }
         "range" => {
             arity(name, &args, 2..=3)?;
             let (start, end) = (int_arg(name, &args[0])?, int_arg(name, &args[1])?);

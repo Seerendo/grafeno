@@ -529,3 +529,52 @@ fn text_similarity_functions() {
     .unwrap_err();
     assert!(error.message.contains("knows exact"), "{}", error.message);
 }
+
+#[test]
+fn constraints_in_gq() {
+    let db = grafeno::Grafeno::in_memory().unwrap();
+    let run = |q: &str| {
+        grafeno_query::execute(&db, "c", q, &grafeno_query::Params::new())
+            .unwrap_or_else(|e| panic!("{q}: {}", e.message))
+    };
+    run(
+        "CREATE (:Person {name: 'Ana', city: 'Lima'}), (:Company {name: 'Acme'}), (:Company {name: 'Globex'})",
+    );
+    let made = run("CREATE CONSTRAINT FOR ()-[r:works_at]->() REQUIRE ONE PER SOURCE").to_json();
+    assert_eq!(made["rows"][0][0], "works_at_one_per_source", "{made}");
+    assert_eq!(made["rows"][0][1], "edge");
+    run("CREATE CONSTRAINT IF NOT EXISTS FOR ()-[r:works_at]->() REQUIRE ONE PER SOURCE");
+    run("CREATE CONSTRAINT FOR (p:Person) REQUIRE p.city IS FUNCTIONAL");
+    run(
+        "MATCH (p:Person), (c:Company {name: 'Acme'}) CREATE (p)-[:works_at {@valid_from: '2020-01-01'}]->(c)",
+    );
+    let moved = run(
+        "MATCH (p:Person), (c:Company {name: 'Globex'}) CREATE (p)-[:works_at {@valid_from: '2024-06-01'}]->(c)",
+    );
+    assert_eq!(moved.stats.facts_invalidated, 1);
+    let now = run("MATCH (:Person)-[:works_at]->(c) VALID AT '2025-01-01' RETURN c.name").to_json();
+    assert_eq!(now["rows"], serde_json::json!([["Globex"]]));
+    let then =
+        run("MATCH (:Person)-[:works_at]->(c) VALID AT '2021-01-01' RETURN c.name").to_json();
+    assert_eq!(then["rows"], serde_json::json!([["Acme"]]));
+
+    run("MATCH (p:Person) SET p.city = 'Cusco'");
+    let history = run("MATCH (p:Person) RETURN [h IN history(p, 'city') | h.value]").to_json();
+    assert_eq!(history["rows"][0][0], serde_json::json!(["Lima"]));
+    let shown = run("SHOW CONSTRAINTS").to_json();
+    assert_eq!(
+        shown["columns"],
+        serde_json::json!(["name", "kind", "label", "property", "rule"])
+    );
+    assert_eq!(shown["rows"].as_array().unwrap().len(), 2);
+    run("DROP CONSTRAINT works_at_one_per_source");
+    assert_eq!(run("SHOW CONSTRAINTS").rows.len(), 1);
+    let error = grafeno_query::execute(
+        &db,
+        "c",
+        "CREATE CONSTRAINT FOR ()-[r:a|b]->() REQUIRE ONE PER SOURCE",
+        &grafeno_query::Params::new(),
+    )
+    .unwrap_err();
+    assert!(error.message.contains("one label"), "{}", error.message);
+}

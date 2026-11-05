@@ -35,6 +35,12 @@ pub(crate) enum Schema {
         constraint: bool,
         if_exists: bool,
     },
+    /// `CREATE CONSTRAINT … REQUIRE ONE PER SOURCE` or `… IS FUNCTIONAL`
+    /// (the name is empty when not given).
+    Constrain {
+        constraint: grafeno::Constraint,
+        if_not_exists: bool,
+    },
     /// `SHOW INDEXES` / `SHOW CONSTRAINTS`.
     Show { constraints: bool },
     /// `SHOW NAMESPACES`.

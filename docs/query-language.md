@@ -483,6 +483,44 @@ ones decide it.
 | `exists(pattern)`, `exists(n.key)` | pattern predicate; whether a property is set |
 | `text.levenshtein`, `text.damerau`, `text.jaroWinkler`, `text.similarity(a, b[, measure])`, … | text similarity (see *Similar text and entity resolution*) |
 
+## Constraints on facts
+
+A person works at one company at a time. An edge constraint says so, and
+a new fact that contradicts a current one ends it in valid time instead
+of keeping both (or of failing):
+
+```text
+CREATE CONSTRAINT FOR ()-[r:works_at]->() REQUIRE ONE PER SOURCE;      // works_at_one_per_source
+CREATE CONSTRAINT seat FOR ()-[r:sits_in]->() REQUIRE ONE PER TARGET ON CONFLICT REJECT;
+CREATE CONSTRAINT FOR ()-[r:rates]->() REQUIRE ONE PER PAIR ON CONFLICT FLAG;
+CREATE CONSTRAINT FOR (p:Person) REQUIRE p.city IS FUNCTIONAL;         // keeps earlier values
+SHOW CONSTRAINTS;                                                       // name, kind, label, property, rule
+DROP CONSTRAINT works_at_one_per_source;
+```
+
+| `ON CONFLICT` | A new fact that overlaps a current one in valid time |
+| --- | --- |
+| `INVALIDATE` (default) | the old fact ends where the new one starts (a new fact without `@valid_from` starts now); a new fact older than the current one ends where that one starts |
+| `FLAG` | both are kept, and the contradiction is recorded |
+| `REJECT` | the write fails |
+
+`ONE PER SOURCE` is one current fact per node it starts from (to another
+target), `ONE PER TARGET` per node it ends at, `ONE PER PAIR` per pair
+(any two facts between them). The same fact again is no contradiction.
+The old fact is not edited: its record is expired and a new version ends
+where the new fact starts, so `KNOWN AT` an earlier time still shows what
+was believed then:
+
+```text
+MATCH (p:Person {name: 'Ana'})-[:works_at]->(c) RETURN c.name;                         // now
+MATCH (p:Person {name: 'Ana'})-[:works_at]->(c) VALID AT '2021-01-01' RETURN c.name;   // then
+```
+
+A write reports `facts_invalidated` and `conflicts_flagged` in its stats;
+`GET /v1/{ns}/contradictions` lists what constraints did. A functional
+property keeps its earlier values: `history(p, 'city')` is a list of
+`{value, from, to, by}`, oldest first.
+
 ## Similar text and entity resolution
 
 Functions that say how alike two strings are. Distances count characters;

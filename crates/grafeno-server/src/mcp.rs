@@ -514,10 +514,30 @@ impl McpServer {
             .map(TimeInput::resolve)
             .transpose()
             .map_err(describe)?;
-        let id = self
-            .write(|tx| tx.create_edge(ns, edge))
+        let (id, events) = self
+            .write(|tx| {
+                let id = tx.create_edge(ns, edge)?;
+                Ok((id, tx.take_constraint_events()))
+            })
             .map_err(describe)?;
-        Ok(ToolOutput::Json(json!({ "id": id })))
+        if events.is_empty() {
+            return Ok(ToolOutput::Json(json!({ "id": id })));
+        }
+        // Say what the new fact contradicted, and what was done.
+        let changed: Vec<Value> = events
+            .iter()
+            .map(|event| {
+                json!({
+                    "fact": event.old_edge,
+                    "action": event.action,
+                    "constraint": event.constraint,
+                    "until": event.at,
+                })
+            })
+            .collect();
+        Ok(ToolOutput::Json(
+            json!({ "id": id, "contradicted": changed }),
+        ))
     }
 
     fn update(&self, arguments: Value) -> ToolResult {

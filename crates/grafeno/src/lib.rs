@@ -25,6 +25,7 @@ mod access;
 pub mod algo;
 mod backup;
 mod check;
+mod constraints;
 mod db;
 mod dump;
 mod index;
@@ -44,6 +45,7 @@ mod writer;
 pub use access::{Grant, Principal, Role, check_principal_name};
 pub use backup::BackupStats;
 pub use check::{CheckReport, CompactReport, RebuildReport};
+pub use constraints::{Action, Constraint, ConstraintEvent, HistoryEntry, OnConflict, Scope};
 pub use db::{
     Actor, DEFAULT_CACHE, Durability, FileIntegrity, Grafeno, OpenOptions, ReadTx, SCHEMA_VERSION,
     WriteTx,

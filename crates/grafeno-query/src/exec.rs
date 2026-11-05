@@ -33,6 +33,10 @@ pub struct WriteStats {
     pub edges_created: u64,
     pub edges_deleted: u64,
     pub edges_retracted: u64,
+    /// Facts ended (or retracted) because a new one contradicted them under
+    /// an edge constraint, and contradictions only flagged.
+    pub facts_invalidated: u64,
+    pub conflicts_flagged: u64,
     pub properties_set: u64,
     pub labels_added: u64,
     pub labels_removed: u64,
@@ -211,6 +215,36 @@ fn plan_info(read: &ReadTx, ns: &str) -> Result<PlanInfo, QueryError> {
     })
 }
 
+const CONSTRAINT_COLUMNS: [&str; 5] = ["name", "kind", "label", "property", "rule"];
+
+fn constraint_row(constraint: &grafeno::Constraint) -> Vec<Value> {
+    match constraint {
+        grafeno::Constraint::Edge {
+            name,
+            label,
+            scope,
+            on_conflict,
+        } => vec![
+            Value::Str(name.clone()),
+            Value::Str("edge".into()),
+            Value::Str(label.clone()),
+            Value::Null,
+            Value::Str(format!(
+                "one per {}, on conflict {}",
+                format!("{scope:?}").to_lowercase(),
+                format!("{on_conflict:?}").to_lowercase()
+            )),
+        ],
+        grafeno::Constraint::Functional { name, label, key } => vec![
+            Value::Str(name.clone()),
+            Value::Str("functional".into()),
+            Value::Str(label.clone()),
+            Value::Str(key.clone()),
+            Value::Str("one value at a time, earlier ones kept".into()),
+        ],
+    }
+}
+
 const INDEX_COLUMNS: [&str; 6] = ["name", "label", "property", "unique", "entries", "fuzzy"];
 
 fn index_row(def: &IndexDef, entries: u64) -> Vec<Value> {
@@ -266,13 +300,75 @@ fn run_schema(
             stats: WriteStats::default(),
             profile: None,
         }),
-        Schema::Show { constraints } => Ok(table(
+        Schema::Show { constraints: true } => {
+            let mut rows: Vec<Vec<Value>> = read
+                .indexes(ns)?
+                .into_iter()
+                .filter(|info| info.def.unique)
+                .map(|info| {
+                    vec![
+                        Value::Str(info.def.name),
+                        Value::Str("unique".into()),
+                        Value::Str(info.def.label),
+                        Value::Str(info.def.key),
+                        Value::Null,
+                    ]
+                })
+                .collect();
+            for constraint in read.constraints(ns)? {
+                rows.push(constraint_row(&constraint));
+            }
+            Ok(QueryResult {
+                columns: CONSTRAINT_COLUMNS.map(String::from).to_vec(),
+                rows,
+                stats: WriteStats::default(),
+                profile: None,
+            })
+        }
+        Schema::Show { constraints: false } => Ok(table(
             read.indexes(ns)?
                 .into_iter()
-                .filter(|info| !constraints || info.def.unique)
                 .map(|info| index_row(&info.def, info.entries))
                 .collect(),
         )),
+        Schema::Constrain {
+            constraint,
+            if_not_exists,
+        } => {
+            let tx = tx.expect("schema writes run with a write transaction");
+            let mut constraint = constraint.clone();
+            if constraint.name().is_empty() {
+                let name = constraint.default_name();
+                match &mut constraint {
+                    grafeno::Constraint::Edge { name: slot, .. }
+                    | grafeno::Constraint::Functional { name: slot, .. } => *slot = name,
+                }
+            }
+            if *if_not_exists
+                && let Some(existing) = tx
+                    .constraints(ns)?
+                    .into_iter()
+                    .find(|other| other.name() == constraint.name())
+            {
+                return Ok(QueryResult {
+                    columns: CONSTRAINT_COLUMNS.map(String::from).to_vec(),
+                    rows: vec![constraint_row(&existing)],
+                    stats: WriteStats::default(),
+                    profile: None,
+                });
+            }
+            let flagged = tx.create_constraint(ns, constraint.clone())?;
+            let mut row = constraint_row(&constraint);
+            row.push(Value::Int(flagged as i64));
+            let mut columns = CONSTRAINT_COLUMNS.map(String::from).to_vec();
+            columns.push("contradictions".into());
+            Ok(QueryResult {
+                columns,
+                rows: vec![row],
+                stats: WriteStats::default(),
+                profile: None,
+            })
+        }
         Schema::Create {
             name,
             label,
@@ -315,6 +411,17 @@ fn run_schema(
             if_exists,
         } => {
             let tx = tx.expect("schema writes run with a write transaction");
+            if *constraint
+                && let Some(found) = tx.constraints(ns)?.into_iter().find(|c| c.name() == name)
+            {
+                tx.drop_constraint(ns, name)?;
+                return Ok(QueryResult {
+                    columns: CONSTRAINT_COLUMNS.map(String::from).to_vec(),
+                    rows: vec![constraint_row(&found)],
+                    stats: WriteStats::default(),
+                    profile: None,
+                });
+            }
             let existing = tx.index_defs(ns)?.into_iter().find(|def| def.name == *name);
             match existing {
                 None if *if_exists => Ok(table(Vec::new())),
@@ -1604,6 +1711,12 @@ impl Runner<'_> {
             edge.props = to_props(props)?;
             let id = self.tx().create_edge(ns, edge)?;
             self.stats.edges_created += 1;
+            for event in self.tx().take_constraint_events() {
+                match event.action {
+                    grafeno::Action::Flagged => self.stats.conflicts_flagged += 1,
+                    _ => self.stats.facts_invalidated += 1,
+                }
+            }
             if let Some(var) = &rel.var {
                 let created = self.tx().edge(ns, id)?.expect("just created");
                 row.insert(var.clone(), Value::Edge(Arc::new(created)));
@@ -2018,6 +2131,10 @@ fn explain(statement: &Statement, info: &PlanInfo) -> Result<QueryResult, QueryE
                 } else {
                     "index"
                 }
+            ),
+            Schema::Constrain { constraint, .. } => format!(
+                "constraint on :{}, checked against the current facts",
+                constraint.label()
             ),
             Schema::Drop { name, .. } => format!("drop {name}"),
             Schema::Show { .. } => "list the indexes".into(),
