@@ -135,8 +135,8 @@ cargo test --workspace --locked --exclude grafeno-desktop
 
 The [contribution workflow](.github/workflows/ci.yml) checks the Studio and
 TypeScript client, engine and server, client integration, Tauri bridge tests
-and the desktop build on Linux. Visual interaction and installers need
-additional checks.
+and the desktop build and window flows on Linux, with screenshots. Manual
+visual review and installers need additional checks.
 
 ## Design, performance and scope
 

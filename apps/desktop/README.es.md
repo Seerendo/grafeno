@@ -77,3 +77,31 @@ validaciones adicionales.
 - `../../studio/src/desktop.ts`: comunicación de la interfaz con los comandos.
 - `recent.json`: historial en el directorio de configuración de la aplicación
   (`~/.config/dev.grafeno.desktop` en Linux, `%APPDATA%\\dev.grafeno.desktop` en Windows).
+
+## Prueba automatizada de la ventana en Linux
+
+La prueba ejecuta el binario Tauri real con WebKitWebDriver en una pantalla
+virtual, siguiendo la [guía oficial de Tauri](https://v2.tauri.app/develop/tests/webdriver/ci/).
+No modifica la configuración del usuario: utiliza directorios temporales para
+preferencias, historial y datos del WebView.
+
+Después de preparar las bibliotecas de escritorio y compilar Studio:
+
+```bash
+sudo apt-get install -y webkit2gtk-driver xvfb xauth dbus-x11
+cargo install tauri-driver --locked
+cargo build --locked -p grafeno-desktop
+dbus-run-session -- xvfb-run -a -s "-screen 0 1600x1000x24" python3 apps/desktop/tests/ui_smoke.py
+```
+
+Comprueba la pantalla inicial, creación de una base, guardado de un nodo desde
+su formulario, error de apertura sin desconexión, separación entre bases,
+rechazo de una escritura de la sesión anterior, cierre de borradores al cambiar
+de base y reapertura desde recientes.
+Las aperturas se solicitan mediante el evento que usa el menú; no se simulan
+ni se consideran probados los selectores nativos de archivos.
+
+Las capturas y el diagnóstico se escriben en `reports/desktop-e2e/` (ignorado
+por Git) y CI los conserva durante siete días como artefacto
+`pruebas-escritorio-linux`. La prueba no sustituye la revisión manual en los
+sistemas operativos soportados ni verifica instaladores.

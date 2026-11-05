@@ -101,8 +101,9 @@ npm run build -- --ci
 
 Packaging requires additional tools depending on the format and operating
 system; the release workflow contains the configuration used for installers.
-Contribution CI builds the application and runs its bridge tests, but does not
-open the window, automate clicks or generate installers.
+Contribution CI builds the application, runs bridge tests and checks window
+flows on a Linux virtual display. It saves screenshots and diagnostics, but does
+not test native file pickers or generate installers.
 
 ## Contribution checks
 
@@ -113,10 +114,12 @@ It checks separately:
 
 - Studio and TypeScript client types and builds.
 - Rust engine and server tests, plus the client against the real server.
-- Tauri bridge tests and the desktop build on Linux.
+- Tauri bridge tests, the desktop build and window flows on Linux.
 
-These checks do not validate the visual interface, performance, installers or
-Windows. Those still require specific tests.
+These checks do not replace manual visual review or validate performance,
+installers or Windows. Those still require specific tests. See the
+[desktop guide](apps/desktop/README.md#automated-window-test-on-linux) to repeat
+the window test and inspect its screenshots.
 
 Work on a branch and open a focused PR. Describe the problem, resulting behavior
 and checks performed, including any you could not run. For these contributions,

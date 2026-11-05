@@ -430,6 +430,16 @@ export function App() {
       setChecking(true);
       try {
         const session = await desktop.open(path);
+        if (local?.url !== session.url) {
+          // Un borrador y sus sugerencias pertenecen a la base anterior.
+          setNodeForm(null);
+          setEdgeForm(null);
+          setPalette(false);
+          setNamespaces([]);
+          setNamespaceState("");
+          setSchema({ labels: {}, edgeLabels: {} });
+          go("overview");
+        }
         setLocal(session);
         await connect({ url: session.url, token: "" });
       } catch (problem) {
@@ -440,7 +450,7 @@ export function App() {
         setChecking(false);
       }
     },
-    [connect, toast],
+    [connect, toast, local],
   );
 
   const closeLocal = useCallback(async () => {
@@ -471,23 +481,34 @@ export function App() {
 
   useEffect(() => {
     if (!client) return;
+    let cancelled = false;
     client
       .namespaces()
       .then((list) => {
+        if (cancelled) return;
         setNamespaces(list);
         // A remembered namespace that was dropped falls back to the first one.
         setNamespaceState((value) => (list.some((info) => info.name === value) ? value : list[0]?.name || value || "default"));
       })
-      .catch((problem) => toast(describeError(problem), "error"));
+      .catch((problem) => {
+        if (!cancelled) toast(describeError(problem), "error");
+      });
+    return () => { cancelled = true; };
   }, [client, revision, toast]);
 
   useEffect(() => {
     if (!client) return;
+    let cancelled = false;
     client
       .namespace(current)
       .stats()
-      .then((stats) => setSchema({ labels: stats.node_labels, edgeLabels: stats.edge_labels }))
-      .catch(() => setSchema({ labels: {}, edgeLabels: {} }));
+      .then((stats) => {
+        if (!cancelled) setSchema({ labels: stats.node_labels, edgeLabels: stats.edge_labels });
+      })
+      .catch(() => {
+        if (!cancelled) setSchema({ labels: {}, edgeLabels: {} });
+      });
+    return () => { cancelled = true; };
   }, [client, current, revision]);
 
   const setNamespace = useCallback((name: string) => {

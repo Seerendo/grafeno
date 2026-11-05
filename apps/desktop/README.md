@@ -91,3 +91,29 @@ Each session has its own internal URL. Late requests from another session are
 rejected; requests that already captured their router finish on the original
 database. Closing and reopening a file invalidates its previous URL. Tests cover
 both delayed requests and a write dispatched before switching databases.
+
+## Automated window test on Linux
+
+The test runs the real Tauri binary with WebKitWebDriver on a virtual display,
+following the [official Tauri guide](https://v2.tauri.app/develop/tests/webdriver/ci/).
+Temporary configuration, data and cache directories isolate the user's settings
+and WebView storage. After preparing desktop libraries and building Studio:
+
+```bash
+sudo apt-get install -y webkit2gtk-driver xvfb xauth dbus-x11
+cargo install tauri-driver --locked
+cargo build --locked -p grafeno-desktop
+dbus-run-session -- xvfb-run -a -s "-screen 0 1600x1000x24" python3 apps/desktop/tests/ui_smoke.py
+```
+
+It checks startup, database creation, saving a node through its form, failed
+opening without disconnection, separation between databases, rejection of a
+write from the previous session, closing drafts when switching databases, and
+reopening through the recent-files list.
+File opens use the same event as the menu; native file pickers are neither
+mocked nor considered tested.
+
+Screenshots and diagnostics go to `reports/desktop-e2e/` (ignored by Git).
+CI retains them for seven days in the `pruebas-escritorio-linux` artifact.
+These tests do not replace manual checks on supported operating systems or
+validate installers.

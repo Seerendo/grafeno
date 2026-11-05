@@ -102,8 +102,9 @@ npm run build -- --ci
 
 El empaquetado requiere herramientas adicionales según el formato y el sistema;
 el workflow de publicación contiene la configuración utilizada para los
-instaladores. CI de contribuciones compila la aplicación y ejecuta sus pruebas
-del puente, pero no abre la ventana, automatiza clics ni genera instaladores.
+instaladores. CI de contribuciones compila la aplicación, prueba el puente y
+verifica flujos de la ventana en una pantalla virtual de Linux. Guarda capturas
+y diagnóstico; no prueba los selectores nativos de archivos ni genera instaladores.
 
 ## Comprobaciones de cada contribución
 
@@ -114,10 +115,12 @@ Comprueba por separado:
 
 - Tipos y compilación de Studio y del cliente TypeScript.
 - Pruebas Rust del motor y servidor, más el cliente contra el servidor real.
-- Pruebas del puente Tauri y compilación del escritorio en Linux.
+- Pruebas del puente Tauri, compilación y flujos de la ventana en Linux.
 
-No equivale a validar la interfaz visual, el rendimiento, los instaladores ni
-Windows. Esas comprobaciones siguen requiriendo pruebas específicas.
+No equivale a una revisión visual manual ni valida rendimiento, instaladores
+o Windows. Esas comprobaciones siguen requiriendo pruebas específicas. Consulta
+la [guía de escritorio](apps/desktop/README.es.md#prueba-automatizada-de-la-ventana-en-linux)
+para repetir la prueba de ventana y revisar las capturas.
 
 Trabaja en una rama y abre un PR acotado. Describe el problema, el comportamiento
 resultante y las comprobaciones ejecutadas, incluyendo las que no pudiste

@@ -136,8 +136,8 @@ cargo test --workspace --locked --exclude grafeno-desktop
 
 El [workflow de contribuciones](.github/workflows/ci.yml) verifica interfaz y
 cliente TypeScript, motor y servidor, integración del cliente, pruebas del
-puente Tauri y compilación del escritorio en Linux. La interacción visual y
-los instaladores requieren comprobaciones adicionales.
+puente Tauri, compilación y flujos de la ventana en Linux con capturas.
+La revisión visual manual y los instaladores requieren comprobaciones adicionales.
 
 ## Diseño, rendimiento y alcance
 
