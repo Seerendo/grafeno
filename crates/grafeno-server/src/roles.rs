@@ -76,6 +76,9 @@ pub struct RoleInput {
     grants: Vec<Grant>,
     #[serde(default)]
     roles: Vec<String>,
+    /// Record policies (14.4).
+    #[serde(default)]
+    policies: Vec<grafeno::Policy>,
     description: Option<String>,
 }
 
@@ -94,6 +97,7 @@ pub async fn put_role(
             privileges: input.privileges.clone(),
             grants: input.grants.clone(),
             roles: input.roles.clone(),
+            policies: input.policies.clone(),
             description: input.description.clone().filter(|d| !d.trim().is_empty()),
             created_at: old.as_ref().map_or_else(Timestamp::now, |o| o.created_at),
         };

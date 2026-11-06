@@ -188,8 +188,8 @@ where
             }
         }
     };
-    let (read, ns, params, edges, info, budget) = (
-        ctx.read, ctx.ns, ctx.params, ctx.edges, ctx.info, ctx.budget,
+    let (read, ns, params, edges, info, budget, view) = (
+        ctx.read, ctx.ns, ctx.params, ctx.edges, ctx.info, ctx.budget, ctx.view,
     );
     std::thread::scope(|scope| {
         for _ in 1..threads {
@@ -203,6 +203,7 @@ where
                     edges,
                     info,
                     budget,
+                    view,
                 };
                 run(&ctx);
             });

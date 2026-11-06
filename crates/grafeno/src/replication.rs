@@ -44,10 +44,11 @@ pub const FENCE: (&str, &str) = ("cluster", "moved");
 /// The newest version of [`Entry`]'s format this build reads and writes.
 /// 1: records and bulk work (13.1). 2: also change log entries copied as
 /// they are ([`Op::Change`], 13.5). 3: accounts, API keys and sessions
-/// instead of principals (14.1). 4: roles (14.2). An entry carries the oldest format that
+/// instead of principals (14.1). 4: roles (14.2). 5: record policies and
+/// account attributes (14.4). An entry carries the oldest format that
 /// can hold it, so a member of the version before reads every entry that
 /// does not need the new one.
-pub const ENTRY_FORMAT: u32 = 4;
+pub const ENTRY_FORMAT: u32 = 5;
 
 pub(crate) const ENABLED: &str = "replication_enabled";
 const FIRST: &str = "replication_first";
@@ -586,7 +587,21 @@ impl WriteTx {
                 ops.push(self.after_image(&Touch::Namespace(ns))?);
             }
         }
-        let format = if ops.iter().any(|op| matches!(op, Op::Role { .. })) {
+        // Record policies and account attributes (14.4) would be dropped,
+        // unseen, by a member that does not know them.
+        let nonempty = |value: &Option<Json>, field: &str| {
+            value.as_ref().and_then(|v| v.get(field)).is_some_and(|v| {
+                v.as_array().is_some_and(|a| !a.is_empty())
+                    || v.as_object().is_some_and(|o| !o.is_empty())
+            })
+        };
+        let format = if ops.iter().any(|op| match op {
+            Op::Role { role, .. } => nonempty(role, "policies"),
+            Op::Account { account, .. } => nonempty(account, "attributes"),
+            _ => false,
+        }) {
+            5
+        } else if ops.iter().any(|op| matches!(op, Op::Role { .. })) {
             4
         } else if ops.iter().any(|op| {
             matches!(

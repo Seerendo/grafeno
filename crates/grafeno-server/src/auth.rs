@@ -267,7 +267,7 @@ pub struct Credentials {
     accounts: std::sync::atomic::AtomicBool,
     /// Each account's effective rights (14.2), with the access generation
     /// they were computed at: any change of accounts or roles bumps it.
-    rights: RwLock<HashMap<String, (u64, Arc<grafeno::Rights>)>>,
+    rights: RwLock<HashMap<String, (u64, Arc<grafeno::View>)>>,
 }
 
 impl Default for Credentials {
@@ -282,29 +282,32 @@ impl Default for Credentials {
 }
 
 impl Credentials {
-    /// `account`'s rights as of `read`: cached until accounts or roles
-    /// change.
-    pub fn rights(
+    /// `account`'s rights as of `read`, as a view of the records it may
+    /// see and change (14.4): cached until accounts or roles change.
+    pub fn view(
         &self,
         read: &grafeno::ReadTx,
         account: &Account,
-    ) -> grafeno::Result<Arc<grafeno::Rights>> {
+    ) -> grafeno::Result<Arc<grafeno::View>> {
         let generation = read.access_generation()?;
-        if let Some((at, rights)) = self
+        if let Some((at, view)) = self
             .rights
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .get(&account.name)
             && *at == generation
         {
-            return Ok(rights.clone());
+            return Ok(view.clone());
         }
-        let rights = Arc::new(read.rights(account)?);
+        let view = Arc::new(grafeno::View::new(
+            Arc::new(read.rights(account)?),
+            Some(account),
+        ));
         let mut cache = self.rights.write().unwrap_or_else(|e| e.into_inner());
         // Entries of an older generation are all stale.
         cache.retain(|_, (at, _)| *at >= generation);
-        cache.insert(account.name.clone(), (generation, rights.clone()));
-        Ok(rights)
+        cache.insert(account.name.clone(), (generation, view.clone()));
+        Ok(view)
     }
 
     pub fn load(db: &Grafeno) -> grafeno::Result<Self> {
@@ -383,8 +386,8 @@ pub enum Caller {
     Anonymous,
     Account {
         account: Arc<Account>,
-        /// Its effective rights (its grants and roles).
-        rights: Arc<grafeno::Rights>,
+        /// Its effective rights (its grants and roles), record by record.
+        view: Arc<grafeno::View>,
         /// A key's scope, narrowing the account's rights.
         scope: Option<KeyScope>,
         via: Via,
@@ -397,8 +400,18 @@ impl Caller {
         match self {
             Caller::Owner => true,
             Caller::Anonymous => false,
-            Caller::Account { rights, scope, .. } => {
-                rights.on_namespace(action, ns)
+            Caller::Account { view, scope, .. } => {
+                let rights = &view.rights;
+                // Label and property rules let a request through; each record
+                // is then checked (14.4).
+                let by_record = match action {
+                    Act::Read => rights.per_record(ns),
+                    Act::Create | Act::Update | Act::Delete | Act::Merge | Act::Retract => {
+                        rights.writes_labels_in(ns)
+                    }
+                    _ => false,
+                };
+                (rights.on_namespace(action, ns) || by_record)
                     && scope
                         .as_ref()
                         .is_none_or(|scope| scope_allows(scope, action, ns))
@@ -416,7 +429,7 @@ impl Caller {
         match self {
             Caller::Owner => true,
             Caller::Anonymous => false,
-            Caller::Account { rights, scope, .. } => scope.is_none() && rights.on_server(action),
+            Caller::Account { view, scope, .. } => scope.is_none() && view.rights.on_server(action),
         }
     }
 
@@ -443,6 +456,15 @@ impl Caller {
         }
     }
 
+    /// What the caller may see and change record by record (`None`: every
+    /// record, the owner's token or a superuser).
+    pub fn view(&self) -> Option<Arc<grafeno::View>> {
+        match self {
+            Caller::Account { view, .. } if !view.rights.superuser => Some(view.clone()),
+            _ => None,
+        }
+    }
+
     /// The account behind the caller, if any.
     pub fn account(&self) -> Option<&Arc<Account>> {
         match self {
@@ -455,9 +477,10 @@ impl Caller {
     pub fn actor(&self) -> Option<Actor> {
         match self {
             Caller::Owner | Caller::Anonymous => None,
-            Caller::Account { account, .. } => Some(Actor {
+            Caller::Account { account, view, .. } => Some(Actor {
                 name: account.name.clone(),
                 own_only: account.own_only,
+                view: (!view.rights.superuser).then(|| view.clone()),
             }),
         }
     }
@@ -517,7 +540,7 @@ pub fn access_context(caller: &Caller) -> grafeno_query::AccessContext {
         manage_accounts: caller.can_server(Act::ManageAccounts),
         manage_roles: caller.can_server(Act::ManageRoles),
         effective_roles: match caller {
-            Caller::Account { rights, .. } => rights.roles.clone(),
+            Caller::Account { view, .. } => view.rights.roles.clone(),
             _ => Vec::new(),
         },
         hash_password: Some(hasher),

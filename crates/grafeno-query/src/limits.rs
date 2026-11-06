@@ -37,6 +37,9 @@ pub struct Limits {
     /// Who runs access statements and what they may manage (14.3);
     /// everything when `None`.
     pub access: Option<crate::access::AccessContext>,
+    /// What the caller may see and change record by record (14.4): hidden
+    /// nodes, edges and properties are absent; every record when `None`.
+    pub view: Option<Arc<grafeno::View>>,
 }
 
 /// Which namespaces a caller may see.
@@ -72,6 +75,7 @@ impl Limits {
             cancel: None,
             visible: None,
             access: None,
+            view: None,
         }
     }
 

@@ -117,3 +117,33 @@ test("roles and grants (14.3)", async () => {
   assert.deepEqual((await admin.roles()).map((role) => role.name), ["team-reader"]);
   await admin.deleteRole("team-reader");
 });
+
+test("record policies and attributes (14.4)", async () => {
+  const admin = new Grafeno({ url, token });
+  const crm = admin.namespace("crm14");
+  await crm.createNode({ labels: ["Person"], props: { name: "Ana", team: "red", email: "ana@example.com" } });
+  await crm.createNode({ labels: ["Person"], props: { name: "Bob", team: "blue", email: "bob@example.com" } });
+  await admin.putRole("team-reader", {
+    grants: [{ namespace: "crm14", role: "read" }],
+    privileges: [
+      { action: "read", object: { on: "property", namespace: "crm14", label: "Person", property: "email" }, deny: true },
+    ],
+    policies: [
+      {
+        namespace: "crm14",
+        label: "Person",
+        applies: "read",
+        condition: { kind: "property", key: "team", equals: { from: "attribute", name: "team" } },
+      },
+    ],
+  });
+  await admin.createAccount({ name: "red-bot", kind: "service", roles: ["team-reader"] });
+  const changed = await admin.changeAccount("red-bot", { attributes: { team: "red" } });
+  assert.deepEqual(changed.attributes, { team: "red" });
+  const { secret } = await admin.createKey({ name: "red-bot-key", account: "red-bot" });
+  const bot = new Grafeno({ url, token: secret });
+  const seen = await bot.namespace("crm14").query("MATCH (n:Person) RETURN n.name AS name, n.email AS email");
+  assert.deepEqual(seen.rows, [["Ana", null]]);
+  const privileges = await admin.privilegesOf("team-reader");
+  assert.ok(privileges.rows.some((row) => row[1] === "policy"));
+});

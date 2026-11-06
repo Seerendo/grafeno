@@ -132,7 +132,9 @@ impl FilterInput {
         if let Some(at) = resolve_time(&self.known_at)? {
             filter = filter.known_at(at);
         }
-        Ok(filter)
+        // Traversals see what the caller may (14.4): this runs in the
+        // request, where the caller is known.
+        Ok(filter.with_view(crate::auth::current().view()))
     }
 }
 

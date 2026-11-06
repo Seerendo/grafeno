@@ -127,7 +127,12 @@ pub fn execute_with(
     let statement = crate::cache::parsed(query)?;
     validate(&statement)?;
     if statement.mode == Mode::Explain {
-        return explain(&statement, &plan_info(&db.begin_read()?, ns)?, params);
+        return explain(
+            &statement,
+            &plan_info(&db.begin_read()?, ns)?,
+            params,
+            hides(limits, ns),
+        );
     }
     if statement.writes() {
         // Holding the write lock first makes the snapshot the latest state.
@@ -169,7 +174,7 @@ pub fn execute_in(
     let statement = crate::cache::parsed(query)?;
     validate(&statement)?;
     if statement.mode == Mode::Explain {
-        return explain(&statement, &plan_info(read, ns)?, params);
+        return explain(&statement, &plan_info(read, ns)?, params, hides(limits, ns));
     }
     match &statement.schema {
         Some(schema) => run_schema(read, Some(tx), ns, schema, params, limits),
@@ -198,7 +203,7 @@ pub fn execute_read_with(
     let statement = crate::cache::parsed(query)?;
     validate(&statement)?;
     if statement.mode == Mode::Explain {
-        return explain(&statement, &plan_info(read, ns)?, params);
+        return explain(&statement, &plan_info(read, ns)?, params, hides(limits, ns));
     }
     if statement.writes() {
         return Err(QueryError::runtime(
@@ -311,10 +316,23 @@ fn run_schema(
                         .is_none_or(|filter| filter.allows(&info.name))
                 })
                 .map(|info| {
+                    // Counts of a namespace seen record by record would tell
+                    // how much is hidden (14.4).
+                    let hidden = limits
+                        .view
+                        .as_ref()
+                        .is_some_and(|v| v.per_record(&info.name));
+                    let count = |n: u64| {
+                        if hidden {
+                            Value::Null
+                        } else {
+                            Value::Int(n as i64)
+                        }
+                    };
                     vec![
                         Value::Str(info.name),
-                        Value::Int(info.nodes as i64),
-                        Value::Int(info.edges as i64),
+                        count(info.nodes),
+                        count(info.edges),
                         Value::Time(info.created_at),
                         info.description.map_or(Value::Null, Value::Str),
                     ]
@@ -631,6 +649,8 @@ struct Runner<'a> {
     reads_seen: u64,
     /// On a part of a split query, its share of the first match.
     slice: Option<crate::eval::Slice>,
+    /// What the caller may see and change (14.4).
+    view: Option<std::sync::Arc<grafeno::View>>,
 }
 
 /// The rows flowing between clauses and the variables they bind, in order.
@@ -674,6 +694,7 @@ impl<'a> Runner<'a> {
             folded: None,
             reads_seen: 0,
             slice: None,
+            view: limits.view.clone(),
         })
     }
 
@@ -700,6 +721,7 @@ impl<'a> Runner<'a> {
             folded: None,
             reads_seen: 0,
             slice: None,
+            view: limits.view.clone(),
         }
     }
 
@@ -712,6 +734,7 @@ impl<'a> Runner<'a> {
             edges,
             info: &self.info,
             budget: &self.budget,
+            view: self.view.as_ref(),
         }
     }
 
@@ -2476,10 +2499,42 @@ fn skip_limit(ctx: &Context, projection: &Projection) -> Result<(usize, usize), 
 // ---------------------------------------------------------------- EXPLAIN
 
 /// The plan as a table: one row per step.
+/// Whether a plan must not show counts: they come from every record of the
+/// namespace, and some are hidden from the caller (14.4).
+fn hides(limits: &Limits, ns: &str) -> bool {
+    limits.view.as_ref().is_some_and(|view| view.per_record(ns))
+}
+
+/// `details` without the counts of nodes the planner read in statistics
+/// (`…, 1200 nodes)` and `…, ~40 nodes)` become `…)`).
+fn without_counts(details: &str) -> String {
+    let mut out = String::with_capacity(details.len());
+    let mut rest = details;
+    while let Some(at) = rest.find(", ") {
+        let (before, after) = rest.split_at(at);
+        out.push_str(before);
+        let tail = &after[2..];
+        let digits = tail.trim_start_matches('~');
+        let number = digits.len()
+            - digits
+                .trim_start_matches(|c: char| c.is_ascii_digit())
+                .len();
+        if number > 0 && digits[number..].starts_with(" nodes)") {
+            rest = &digits[number + " nodes".len()..];
+        } else {
+            out.push_str(", ");
+            rest = tail;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn explain(
     statement: &Statement,
     info: &PlanInfo,
     params: &Params,
+    hide: bool,
 ) -> Result<QueryResult, QueryError> {
     let value_of = |expr: &Expr| constant(expr, Some(params));
     if let Some(schema) = &statement.schema {
@@ -2552,12 +2607,25 @@ fn explain(
             .zip(estimates)
             .enumerate()
             .map(|(index, ((operation, details), estimate))| {
+                let details = if hide {
+                    without_counts(&details)
+                } else {
+                    details
+                };
                 vec![
                     Value::Int(index as i64 + 1),
                     Value::Str(operation),
                     Value::Str(details),
-                    Value::Float(estimate.rows.round()),
-                    Value::Float(estimate.cost.round()),
+                    if hide {
+                        Value::Null
+                    } else {
+                        Value::Float(estimate.rows.round())
+                    },
+                    if hide {
+                        Value::Null
+                    } else {
+                        Value::Float(estimate.cost.round())
+                    },
                 ]
             })
             .collect(),
@@ -2804,5 +2872,20 @@ fn describe(
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+    }
+}
+
+#[cfg(test)]
+mod hiding {
+    #[test]
+    fn plans_lose_their_counts() {
+        assert_eq!(
+            super::without_counts("start at n (scan of :Person, 1200 nodes)"),
+            "start at n (scan of :Person)"
+        );
+        assert_eq!(
+            super::without_counts("start at n (index i: n.k = …, ~40 nodes), then a, b"),
+            "start at n (index i: n.k = …), then a, b"
+        );
     }
 }

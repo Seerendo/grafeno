@@ -28,6 +28,9 @@ pub struct EdgeFilter {
     labels: Vec<String>,
     valid_at: Option<Timestamp>,
     known_at: Option<Timestamp>,
+    /// Only what this caller may see (14.4): traversals do not go through
+    /// hidden nodes or edges, and records come without hidden properties.
+    view: Option<std::sync::Arc<crate::View>>,
 }
 
 impl EdgeFilter {
@@ -39,6 +42,17 @@ impl EdgeFilter {
     pub fn label(mut self, label: impl Into<String>) -> Self {
         self.labels.push(label.into());
         self
+    }
+
+    /// Only what `view` may see (14.4).
+    pub fn with_view(mut self, view: Option<std::sync::Arc<crate::View>>) -> Self {
+        self.view = view;
+        self
+    }
+
+    /// The view the filter applies, if any.
+    pub fn view(&self) -> Option<&crate::View> {
+        self.view.as_deref()
     }
 
     /// Only facts that are true at `at`.
@@ -108,9 +122,14 @@ impl ReadTx {
     ) -> Result<Vec<Neighbor>> {
         let mut out = Vec::new();
         for entry in self.adjacent(ns, node, direction, filter)? {
-            let edge = self
+            let mut edge = self
                 .edge(ns, entry.edge)?
                 .ok_or(Error::EdgeNotFound(entry.edge))?;
+            if let Some(view) = filter.view() {
+                edge = view
+                    .edge(ns, edge, |_| Ok(true))?
+                    .ok_or(Error::EdgeNotFound(entry.edge))?;
+            }
             out.push(Neighbor {
                 node: entry.other,
                 edge,
@@ -145,7 +164,35 @@ impl ReadTx {
         direction: Direction,
         filter: &EdgeFilter,
     ) -> Result<Vec<Adjacent>> {
-        adjacent(&self.out, &self.inn, ns, node, direction, filter)
+        let entries = adjacent(&self.out, &self.inn, ns, node, direction, filter)?;
+        let Some(view) = filter.view().or(self.view.as_deref()) else {
+            return Ok(entries);
+        };
+        if !view.reads(ns) {
+            return Ok(Vec::new());
+        }
+        if !view.per_record(ns) {
+            return Ok(entries);
+        }
+        let sees = |id: NodeId| -> Result<bool> {
+            let node: Option<Node> = crate::store::read_record(&self.nodes, ns, id.as_u128())?;
+            Ok(node.is_some_and(|n| view.node_visible(ns, &n)))
+        };
+        // From a node the caller may not see, nothing leads anywhere.
+        if !sees(node)? {
+            return Ok(Vec::new());
+        }
+        let mut visible = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let edge: Option<Edge> =
+                crate::store::read_record(&self.edges, ns, entry.edge.as_u128())?;
+            if let Some(edge) = edge
+                && view.edge_visible(ns, &edge, sees)?
+            {
+                visible.push(entry);
+            }
+        }
+        Ok(visible)
     }
 
     /// Nodes `1..=depth` hops away from `start`, with their distance, in BFS order.
@@ -239,9 +286,12 @@ impl ReadTx {
         let mut result = Subgraph::default();
         let mut seen_edges = HashSet::new();
         for &id in &order {
-            result
-                .nodes
-                .push(self.node(ns, id)?.ok_or(Error::NodeNotFound(id))?);
+            let node = self.node(ns, id)?.ok_or(Error::NodeNotFound(id))?;
+            let node = match filter.view() {
+                Some(view) => view.node(ns, node).ok_or(Error::NodeNotFound(id))?,
+                None => node,
+            };
+            result.nodes.push(node);
             for neighbor in self.neighbors(ns, id, Direction::Out, filter)? {
                 if members.contains(&neighbor.node) && seen_edges.insert(neighbor.edge.id) {
                     result.edges.push(neighbor.edge);

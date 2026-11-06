@@ -20,6 +20,11 @@
 //! has every right. A denial wins over any grant at any level, so "read
 //! everything in `crm` except `Salary`" is one grant and one denial.
 //!
+//! A role can also hold record policies (14.4): limits to the records that
+//! match a condition (`@recorded_by` is the caller, `tenant` is the
+//! caller's `tenant` attribute), for reads, writes or both. Policies narrow,
+//! like denials: a record must match every policy that applies to it.
+//!
 //! [`Rights`] is what an account may do, computed once (from the account
 //! and every role) and kept until a role or the account changes
 //! ([`ReadTx::access_generation`]), so that a check is a lookup.
@@ -200,9 +205,90 @@ pub struct RoleDef {
     /// Roles it has (their rights are its own).
     #[serde(default)]
     pub roles: Vec<String>,
+    /// Record policies (14.4): who holds the role sees and changes only
+    /// the records that match them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policies: Vec<Policy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub created_at: Timestamp,
+}
+
+/// A limit to the records that match a condition, in the namespaces of a
+/// pattern, on the nodes with a label (or on every node and edge).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Policy {
+    /// A namespace pattern: a name, `prefix-*` or `*`.
+    pub namespace: String,
+    /// Nodes with this label only; every node and edge when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Reads, writes or both.
+    #[serde(default)]
+    pub applies: Applies,
+    pub condition: Condition,
+}
+
+/// What a policy limits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Applies {
+    Read,
+    Write,
+    #[default]
+    All,
+}
+
+/// What a record must match.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Condition {
+    /// It was recorded by the caller (`@recorded_by = current_user()`).
+    RecordedByCaller,
+    /// A property equals a value.
+    Property { key: String, equals: PolicyValue },
+}
+
+/// The value a property is compared with.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "from", rename_all = "snake_case")]
+pub enum PolicyValue {
+    /// The caller's account name.
+    Caller,
+    /// One of the caller's attributes (`$account.tenant`).
+    Attribute { name: String },
+    /// A JSON value written in the policy.
+    Value { value: serde_json::Value },
+}
+
+impl std::fmt::Display for Policy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = match &self.condition {
+            Condition::RecordedByCaller => "@recorded_by = current_user()".to_owned(),
+            Condition::Property { key, equals } => format!(
+                "{key} = {}",
+                match equals {
+                    PolicyValue::Caller => "current_user()".to_owned(),
+                    PolicyValue::Attribute { name } => format!("$account.{name}"),
+                    PolicyValue::Value { value } => value.to_string(),
+                }
+            ),
+        };
+        write!(
+            f,
+            "{} in {}{}: {what}",
+            match self.applies {
+                Applies::Read => "reads",
+                Applies::Write => "writes",
+                Applies::All => "reads and writes",
+            },
+            self.namespace,
+            self.label
+                .as_ref()
+                .map(|label| format!(", nodes {label}"))
+                .unwrap_or_default()
+        )
+    }
 }
 
 /// What a built-in level allows on a namespace.
@@ -327,6 +413,8 @@ pub struct Rights {
     properties: Patterns<(String, String)>,
     /// The roles followed, in the order met (for display).
     pub roles: Vec<String>,
+    /// The record policies of every role followed (14.4).
+    pub policies: Vec<Policy>,
 }
 
 impl Rights {
@@ -357,6 +445,11 @@ impl Rights {
             }
             for privilege in &role.privileges {
                 rights.add(privilege);
+            }
+            for policy in &role.policies {
+                if !rights.policies.contains(policy) {
+                    rights.policies.push(policy.clone());
+                }
             }
             pending.extend(role.roles.iter().cloned());
         }
@@ -389,6 +482,107 @@ impl Rights {
                 .properties
                 .add(namespace, (label.clone(), property.clone()), action, deny),
         }
+    }
+
+    /// Whether reading in `ns` depends on the record: label or property
+    /// rules or record policies apply there. Without them, a namespace's
+    /// records are all visible or all hidden, and nothing is checked per
+    /// record.
+    pub fn per_record(&self, ns: &str) -> bool {
+        if self.superuser {
+            return false;
+        }
+        let matches = |pattern: &str| match pattern.strip_suffix('*') {
+            Some(prefix) => ns.starts_with(prefix),
+            None => pattern == ns,
+        };
+        self.labels.exact.keys().any(|(p, _)| p == ns)
+            || self
+                .labels
+                .prefixes
+                .iter()
+                .any(|(p, _, _)| ns.starts_with(p.as_str()))
+            || self.properties.exact.keys().any(|(p, _)| p == ns)
+            || self
+                .properties
+                .prefixes
+                .iter()
+                .any(|(p, _, _)| ns.starts_with(p.as_str()))
+            || self
+                .policies
+                .iter()
+                .any(|policy| matches(&policy.namespace))
+    }
+
+    /// Whether some label or property of `ns` may be written: the route may
+    /// let a write through and leave each record to [`Rights::on_label`].
+    pub fn writes_labels_in(&self, ns: &str) -> bool {
+        let write = |bits: &Bits| bits.allow & Act::Write.bit() != 0;
+        self.labels
+            .exact
+            .iter()
+            .any(|((p, _), bits)| p == ns && write(bits))
+            || self
+                .labels
+                .prefixes
+                .iter()
+                .any(|(p, _, bits)| ns.starts_with(p.as_str()) && write(bits))
+            || self
+                .properties
+                .exact
+                .iter()
+                .any(|((p, _), bits)| p == ns && write(bits))
+            || self
+                .properties
+                .prefixes
+                .iter()
+                .any(|(p, _, bits)| ns.starts_with(p.as_str()) && write(bits))
+    }
+
+    /// May the account do `action` on a record with these labels (nodes),
+    /// or this label (`edges`)? Every label must be allowed it at the
+    /// namespace or label level, or one label granted it with no other
+    /// denying it: a denial on any label wins.
+    pub fn on_labels(&self, action: Act, ns: &str, labels: &[String], edges: bool) -> bool {
+        if self.superuser {
+            return true;
+        }
+        let mut allowed = false;
+        for label in labels {
+            let (allow, deny) = self.label_bits(action, ns, label, edges);
+            if deny {
+                return false;
+            }
+            allowed |= allow;
+        }
+        allowed || (labels.is_empty() && self.on_namespace(action, ns))
+    }
+
+    /// Is `property` hidden (for `Act::Read`) or not writable (any other
+    /// action) on a record with these labels? A denial on any label's
+    /// property wins.
+    pub fn property_denied(
+        &self,
+        action: Act,
+        ns: &str,
+        labels: &[String],
+        property: &str,
+    ) -> bool {
+        if self.superuser {
+            return false;
+        }
+        let level = if action == Act::Read {
+            Act::Read
+        } else {
+            Act::Write
+        };
+        labels.iter().any(|label| {
+            self.properties
+                .bits(ns, &(label.clone(), property.to_owned()))
+                .deny
+                & level.bit()
+                != 0
+        })
     }
 
     /// May the account do `action` on the server?
@@ -547,6 +741,18 @@ impl WriteTx {
         check_role_name(&role.name)?;
         for privilege in &role.privileges {
             privilege.check()?;
+        }
+        for policy in &role.policies {
+            if policy.namespace.trim().is_empty() {
+                return Err(Error::Invalid("a policy needs a namespace pattern".into()));
+            }
+            if let Condition::Property { key, .. } = &policy.condition
+                && key.trim().is_empty()
+            {
+                return Err(Error::Invalid(
+                    "a policy compares a property: name it".into(),
+                ));
+            }
         }
         for name in &role.roles {
             if name != &role.name && self.role(name)?.is_none() {

@@ -52,6 +52,8 @@ pub(crate) struct Context<'a> {
     pub(crate) edges: &'a EdgeFilter,
     pub(crate) info: &'a PlanInfo,
     pub(crate) budget: &'a Budget,
+    /// What the caller may see (14.4); everything when `None`.
+    pub(crate) view: Option<&'a std::sync::Arc<grafeno::View>>,
 }
 
 /// Part `part` of `parts` of the candidates of a query's first match (a
@@ -79,35 +81,102 @@ impl Slice {
 }
 
 impl Context<'_> {
-    pub(crate) fn node(&self, id: NodeId) -> Result<Option<Node>, QueryError> {
-        self.budget.read(1)?;
+    /// The view, when records of this namespace are checked one by one.
+    pub(crate) fn per_record(&self) -> Option<&grafeno::View> {
+        self.view
+            .map(|view| view.as_ref())
+            .filter(|view| view.per_record(self.ns))
+    }
+
+    /// Whether nothing of this namespace may be read.
+    fn blind(&self) -> bool {
+        self.view.is_some_and(|view| !view.reads(self.ns))
+    }
+
+    fn raw_node(&self, id: NodeId) -> Result<Option<Node>, QueryError> {
         Ok(match self.write {
             Some(tx) => tx.node(self.ns, id)?,
             None => self.read.node(self.ns, id)?,
         })
     }
 
-    pub(crate) fn edge(&self, id: EdgeId) -> Result<Option<Edge>, QueryError> {
+    /// Whether the node `id` exists and the caller may see it.
+    pub(crate) fn visible(&self, id: NodeId) -> Result<bool, QueryError> {
+        if self.blind() {
+            return Ok(false);
+        }
+        match self.per_record() {
+            None => Ok(true),
+            Some(view) => Ok(self
+                .raw_node(id)?
+                .is_some_and(|node| view.node_visible(self.ns, &node))),
+        }
+    }
+
+    pub(crate) fn node(&self, id: NodeId) -> Result<Option<Node>, QueryError> {
         self.budget.read(1)?;
-        Ok(match self.write {
-            Some(tx) => tx.edge(self.ns, id)?,
-            None => self.read.edge(self.ns, id)?,
+        if self.blind() {
+            return Ok(None);
+        }
+        let node = self.raw_node(id)?;
+        Ok(match self.per_record() {
+            Some(view) => node.and_then(|node| view.node(self.ns, node)),
+            None => node,
         })
     }
 
-    /// Up to `limit` nodes after `after`, of `label` or of every label.
+    pub(crate) fn edge(&self, id: EdgeId) -> Result<Option<Edge>, QueryError> {
+        self.budget.read(1)?;
+        if self.blind() {
+            return Ok(None);
+        }
+        let edge = match self.write {
+            Some(tx) => tx.edge(self.ns, id)?,
+            None => self.read.edge(self.ns, id)?,
+        };
+        match (edge, self.per_record()) {
+            (Some(edge), Some(view)) => Ok(view.edge(self.ns, edge, |end| {
+                self.visible(end)
+                    .map_err(|e| grafeno::Error::Invalid(e.message))
+            })?),
+            (edge, _) => Ok(edge),
+        }
+    }
+
+    /// Up to `limit` visible nodes after `after`, of `label` or of every
+    /// label (fewer only at the end).
     pub(crate) fn nodes_page(
         &self,
         label: Option<&str>,
         after: Option<NodeId>,
         limit: usize,
     ) -> Result<Vec<Node>, QueryError> {
-        let page = match self.write {
-            Some(tx) => tx.nodes_page(self.ns, label, after, limit)?,
-            None => self.read.nodes_page(self.ns, label, after, limit)?,
+        if self.blind() {
+            return Ok(Vec::new());
+        }
+        let fetch = |after: Option<NodeId>| -> Result<Vec<Node>, QueryError> {
+            let page = match self.write {
+                Some(tx) => tx.nodes_page(self.ns, label, after, limit)?,
+                None => self.read.nodes_page(self.ns, label, after, limit)?,
+            };
+            self.budget.read(page.len())?;
+            Ok(page)
         };
-        self.budget.read(page.len())?;
-        Ok(page)
+        let Some(view) = self.per_record() else {
+            return fetch(after);
+        };
+        let mut out = Vec::new();
+        let mut after = after;
+        loop {
+            let page = fetch(after)?;
+            let full = page.len() == limit;
+            after = page.last().map(|node| node.id).or(after);
+            out.extend(page.into_iter().filter_map(|node| view.node(self.ns, node)));
+            if out.len() >= limit || !full {
+                out.truncate(limit);
+                return Ok(out);
+            }
+        }
     }
 
     pub(crate) fn neighbor_ids(
@@ -116,12 +185,24 @@ impl Context<'_> {
         direction: Direction,
         filter: &EdgeFilter,
     ) -> Result<Vec<(EdgeId, NodeId)>, QueryError> {
+        if self.blind() {
+            return Ok(Vec::new());
+        }
         let found = match self.write {
             Some(tx) => tx.neighbor_ids(self.ns, from, direction, filter)?,
             None => self.read.neighbor_ids(self.ns, from, direction, filter)?,
         };
         self.budget.read(found.len().max(1))?;
-        Ok(found)
+        if self.per_record().is_none() {
+            return Ok(found);
+        }
+        let mut visible = Vec::with_capacity(found.len());
+        for (edge, node) in found {
+            if self.edge(edge)?.is_some() {
+                visible.push((edge, node));
+            }
+        }
+        Ok(visible)
     }
 
     pub(crate) fn index_lookup(
@@ -129,14 +210,37 @@ impl Context<'_> {
         name: &str,
         range: &IndexRange,
     ) -> Result<Vec<NodeId>, QueryError> {
+        if self.blind() {
+            return Ok(Vec::new());
+        }
+        // An index on a property the caller may not read finds nothing.
+        if let Some(view) = self.per_record()
+            && let Some(def) = self.info.indexes.iter().find(|def| def.name == name)
+            && view.property_hidden(self.ns, std::slice::from_ref(&def.label), &def.key)
+        {
+            return Ok(Vec::new());
+        }
         let found = match self.write {
             Some(tx) => tx.index_lookup(self.ns, name, range, usize::MAX)?,
             None => self.read.index_lookup(self.ns, name, range, usize::MAX)?,
         };
         self.budget.read(found.len().max(1))?;
-        Ok(found)
+        if self.per_record().is_none() {
+            return Ok(found);
+        }
+        let mut visible = Vec::with_capacity(found.len());
+        for id in found {
+            if self.visible(id)? {
+                visible.push(id);
+            }
+        }
+        Ok(visible)
     }
+
     fn text(&self, id: NodeId) -> Result<Option<String>, QueryError> {
+        if !self.visible(id)? {
+            return Ok(None);
+        }
         Ok(match self.write {
             Some(tx) => tx.text(self.ns, id)?,
             None => self.read.text(self.ns, id)?,
@@ -151,10 +255,41 @@ impl Context<'_> {
     }
 
     pub(crate) fn embedding(&self, id: NodeId) -> Result<Option<Vec<f32>>, QueryError> {
+        if !self.visible(id)? {
+            return Ok(None);
+        }
         Ok(match self.write {
             Some(tx) => tx.embedding(self.ns, id)?,
             None => self.read.embedding(self.ns, id)?,
         })
+    }
+
+    /// Search hits the caller may see, up to `limit`: `fetch(n)` asks for
+    /// the best `n`, and asks again for more while hidden ones crowd the
+    /// visible out.
+    pub(crate) fn visible_hits(
+        &self,
+        limit: usize,
+        fetch: impl Fn(usize) -> Result<Vec<grafeno::Hit>, QueryError>,
+    ) -> Result<Vec<(Node, f32)>, QueryError> {
+        let mut ask = limit.max(1);
+        loop {
+            let hits = fetch(ask)?;
+            let exhausted = hits.len() < ask;
+            let mut out = Vec::new();
+            for hit in hits {
+                if let Some(node) = self.node(hit.node)? {
+                    out.push((node, hit.score));
+                    if out.len() == limit {
+                        return Ok(out);
+                    }
+                }
+            }
+            if exhausted || self.per_record().is_none() || ask >= 1 << 20 {
+                return Ok(out);
+            }
+            ask *= 4;
+        }
     }
 }
 
@@ -1534,6 +1669,14 @@ fn function(ctx: &Context, name: &str, args: Vec<Value>) -> Result<Value, QueryE
                 return Err(error("history(node, property) needs a node"));
             };
             let key = string_arg(name, &args[1])?;
+            // A property the caller may not read has no history for it.
+            if ctx
+                .per_record()
+                .is_some_and(|view| view.property_hidden(ctx.ns, &node.labels, key))
+                || !ctx.visible(node.id)?
+            {
+                return Ok(Value::List(Vec::new()));
+            }
             let entries = match ctx.write {
                 Some(tx) => tx.property_history(ctx.ns, node.id, key)?,
                 None => ctx.read.property_history(ctx.ns, node.id, key)?,

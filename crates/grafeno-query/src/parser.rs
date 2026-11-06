@@ -259,6 +259,17 @@ impl Parser<'_> {
                 Access::DropUser { name, if_exists }
             }));
         }
+        let unrestrict = self.at_keyword("UNRESTRICT");
+        if self.at_keyword("RESTRICT") || unrestrict {
+            self.advance();
+            let role = self.access_name("a role")?;
+            let policy = self.policy()?;
+            return Ok(Some(Access::Restrict {
+                role,
+                policy,
+                remove: unrestrict,
+            }));
+        }
         let grant = self.at_keyword("GRANT");
         let deny = self.at_keyword("DENY");
         let revoke = self.at_keyword("REVOKE");
@@ -310,6 +321,77 @@ impl Parser<'_> {
                 roles,
             }
         }))
+    }
+
+    /// `ON NAMESPACE p [NODES Label] [FOR READS | FOR WRITES] WHERE key =
+    /// value`: the value is `current_user()`, `$account.attribute` or a
+    /// literal; `@recorded_by = current_user()` is the caller's own records.
+    fn policy(&mut self) -> Result<grafeno::Policy, QueryError> {
+        self.expect_keyword("ON")?;
+        self.expect_keyword("NAMESPACE")?;
+        let namespace = self.access_pattern()?;
+        let label = if self.eat_keyword("NODES") {
+            Some(self.ident("a label")?)
+        } else {
+            None
+        };
+        let applies = if self.eat_keyword("FOR") {
+            if self.eat_keyword("READS") || self.eat_keyword("READ") {
+                grafeno::Applies::Read
+            } else if self.eat_keyword("WRITES") || self.eat_keyword("WRITE") {
+                grafeno::Applies::Write
+            } else {
+                return Err(self.unexpected("READS or WRITES"));
+            }
+        } else {
+            grafeno::Applies::All
+        };
+        self.expect_keyword("WHERE")?;
+        let key = match self.peek().clone() {
+            Token::Meta(name) if name == "recorded_by" => {
+                self.advance();
+                "@recorded_by".to_owned()
+            }
+            _ => self.ident("a property, or @recorded_by")?,
+        };
+        self.expect(Token::Eq, "`=`")?;
+        let equals = if self.at_keyword("CURRENT_USER") {
+            self.advance();
+            self.expect(Token::LParen, "`(`")?;
+            self.expect(Token::RParen, "`)`")?;
+            grafeno::PolicyValue::Caller
+        } else if matches!(self.peek(), Token::Param(name) if name == "account") {
+            self.advance();
+            self.expect(Token::Dot, "`.` and an attribute of the account")?;
+            grafeno::PolicyValue::Attribute {
+                name: self.ident("an attribute")?,
+            }
+        } else {
+            let value = match self.peek().clone() {
+                Token::Str(text) => serde_json::Value::String(text),
+                Token::Int(n) => serde_json::Value::from(n),
+                Token::Float(f) => serde_json::Value::from(f),
+                Token::Ident(word) if word.eq_ignore_ascii_case("true") => {
+                    serde_json::Value::Bool(true)
+                }
+                Token::Ident(word) if word.eq_ignore_ascii_case("false") => {
+                    serde_json::Value::Bool(false)
+                }
+                _ => return Err(self.unexpected("current_user(), $account.name or a literal")),
+            };
+            self.advance();
+            grafeno::PolicyValue::Value { value }
+        };
+        let condition = match (&*key, &equals) {
+            ("@recorded_by", grafeno::PolicyValue::Caller) => grafeno::Condition::RecordedByCaller,
+            _ => grafeno::Condition::Property { key, equals },
+        };
+        Ok(grafeno::Policy {
+            namespace,
+            label,
+            applies,
+            condition,
+        })
     }
 
     /// `SERVER`, `NAMESPACE name`, `NODES Label IN name`, `EDGES label IN
@@ -414,6 +496,10 @@ impl Parser<'_> {
                 }
             } else if self.eat_keyword("DESCRIPTION") {
                 UserSet::Description(self.expr()?)
+            } else if self.eat_keyword("ATTRIBUTE") {
+                let key = self.ident("the attribute's name")?;
+                self.expect(Token::Eq, "`=`")?;
+                UserSet::Attribute(key, self.expr()?)
             } else {
                 return Err(self.unexpected("PASSWORD, STATUS, EXPIRES, SUPERUSER or DESCRIPTION"));
             };

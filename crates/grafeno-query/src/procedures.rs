@@ -1,6 +1,6 @@
 //! Built-in procedures for `CALL name(args) YIELD …`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::QueryError;
@@ -147,6 +147,13 @@ pub(crate) fn call(
     }
     let read = ctx.read;
     let ns = ctx.ns;
+    // Under a view decided record by record (14.4), what the catalog
+    // procedures count comes from the visible records.
+    if ctx.per_record().is_some()
+        && let Some(rows) = visible_catalog(ctx, procedure.name)?
+    {
+        return Ok(rows);
+    }
     let counted = |counts: std::collections::BTreeMap<String, u64>| -> Vec<Vec<Value>> {
         counts
             .into_iter()
@@ -232,11 +239,11 @@ pub(crate) fn call(
         }
         "db.search" | "db.searchVector" => {
             let limit = limit_arg(args, 1)?;
-            let hits = if procedure.name == "db.search" {
+            let found = if procedure.name == "db.search" {
                 let Some(Value::Str(text)) = args.first() else {
                     return Err(QueryError::runtime("db.search() needs the text to search"));
                 };
-                read.search_text(ns, text, limit)?
+                ctx.visible_hits(limit, |ask| Ok(read.search_text(ns, text, ask)?))?
             } else {
                 let Some(Value::List(items)) = args.first() else {
                     return Err(QueryError::runtime(
@@ -256,18 +263,14 @@ pub(crate) fn call(
                         }
                     });
                 }
-                read.search_vector(ns, &embedding, limit)?
+                ctx.visible_hits(limit, |ask| Ok(read.search_vector(ns, &embedding, ask)?))?
             };
-            let mut rows = Vec::new();
-            for hit in hits {
-                if let Some(node) = ctx.node(hit.node)? {
-                    rows.push(vec![
-                        Value::Node(Arc::new(node)),
-                        Value::Float(f64::from(hit.score)),
-                    ]);
-                }
-            }
-            rows
+            found
+                .into_iter()
+                .map(|(node, score)| {
+                    vec![Value::Node(Arc::new(node)), Value::Float(f64::from(score))]
+                })
+                .collect()
         }
         "db.match" => {
             let (Some(Value::Str(label)), Some(Value::Map(props))) = (args.first(), args.get(1))
@@ -285,6 +288,7 @@ pub(crate) fn call(
                 neighbors: Vec::new(),
             };
             let limit = limit_arg(args, 2)?;
+            refuse_resolution(ctx)?;
             let mut rows = Vec::new();
             for found in read.find_matches(ns, &probe, None, limit, None)? {
                 let Some(node) = ctx.node(found.node)? else {
@@ -332,11 +336,32 @@ pub(crate) fn call(
                     )));
                 }
             };
+            // A property the caller may not read finds nothing.
+            if ctx
+                .per_record()
+                .is_some_and(|view| view.property_hidden(ns, std::slice::from_ref(&label), &key))
+            {
+                return Ok(Vec::new());
+            }
             let mut rows = Vec::new();
-            for hit in read.fuzzy_search(ns, &label, &key, &text, measure, limit)? {
-                if let Some(node) = ctx.node(hit.node)? {
-                    rows.push(vec![Value::Node(Arc::new(node)), Value::Float(hit.score)]);
+            let mut ask = limit;
+            loop {
+                let hits = read.fuzzy_search(ns, &label, &key, &text, measure, ask)?;
+                let exhausted = hits.len() < ask;
+                rows.clear();
+                for hit in hits {
+                    if let Some(node) = ctx.node(hit.node)? {
+                        rows.push(vec![Value::Node(Arc::new(node)), Value::Float(hit.score)]);
+                        if rows.len() == limit {
+                            break;
+                        }
+                    }
                 }
+                if rows.len() == limit || exhausted || ctx.per_record().is_none() || ask >= 1 << 20
+                {
+                    break;
+                }
+                ask *= 4;
             }
             rows
         }
@@ -399,4 +424,76 @@ pub(crate) fn call(
             .collect(),
         other => unreachable!("procedure {other} without a body"),
     })
+}
+
+/// Entity resolution compares every property its rules name, hidden or not:
+/// under a view decided record by record it would tell what the caller may
+/// not read, so it is refused there (14.4).
+fn refuse_resolution(ctx: &Context) -> Result<(), QueryError> {
+    if ctx.per_record().is_some() {
+        return Err(QueryError {
+            forbidden: true,
+            ..QueryError::runtime(
+                "entity resolution compares properties the caller may not read here: it needs read on every record and property of the namespace",
+            )
+        });
+    }
+    Ok(())
+}
+
+/// `db.labels`, `db.edgeLabels`, `db.propertyKeys` and `db.stats` from the
+/// records the caller sees.
+fn visible_catalog(ctx: &Context, name: &str) -> Result<Option<Vec<Vec<Value>>>, QueryError> {
+    if !matches!(
+        name,
+        "db.labels" | "db.edgeLabels" | "db.propertyKeys" | "db.stats"
+    ) {
+        return Ok(None);
+    }
+    let mut labels: BTreeMap<String, u64> = BTreeMap::new();
+    let mut edge_labels: BTreeMap<String, u64> = BTreeMap::new();
+    let mut keys = BTreeSet::new();
+    let (mut nodes, mut edges) = (0u64, 0u64);
+    let filter = grafeno::EdgeFilter::default();
+    let mut after = None;
+    loop {
+        let page = ctx.nodes_page(None, after, 1024)?;
+        let done = page.len() < 1024;
+        after = page.last().map(|node| node.id);
+        for node in page {
+            nodes += 1;
+            for label in &node.labels {
+                *labels.entry(label.clone()).or_default() += 1;
+            }
+            keys.extend(node.props.keys().cloned());
+            for (edge, _) in ctx.neighbor_ids(node.id, grafeno::Direction::Out, &filter)? {
+                if let Some(edge) = ctx.edge(edge)? {
+                    edges += 1;
+                    *edge_labels.entry(edge.label.clone()).or_default() += 1;
+                    keys.extend(edge.props.keys().cloned());
+                }
+            }
+        }
+        if done {
+            break;
+        }
+    }
+    let counted = |counts: BTreeMap<String, u64>| -> Vec<Vec<Value>> {
+        counts
+            .into_iter()
+            .map(|(label, count)| vec![Value::Str(label), Value::Int(count as i64)])
+            .collect()
+    };
+    Ok(Some(match name {
+        "db.labels" => counted(labels),
+        "db.edgeLabels" => counted(edge_labels),
+        "db.propertyKeys" => keys.into_iter().map(|key| vec![Value::Str(key)]).collect(),
+        _ => vec![vec![
+            Value::Int(nodes as i64),
+            Value::Int(edges as i64),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+        ]],
+    }))
 }

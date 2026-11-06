@@ -159,6 +159,7 @@ fn write_everything(db: &Grafeno) -> (NodeId, NodeId) {
             own_only: false,
             disabled: false,
             expires_at: None,
+            attributes: Default::default(),
             description: None,
             created_at: Timestamp::from_micros(6),
         })?;
@@ -171,6 +172,7 @@ fn write_everything(db: &Grafeno) -> (NodeId, NodeId) {
             )],
             grants: Vec::new(),
             roles: Vec::new(),
+            policies: Vec::new(),
             description: None,
             created_at: Timestamp::from_micros(8),
         })?;

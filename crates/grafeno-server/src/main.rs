@@ -699,7 +699,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let access = mcp::McpAccess {
                 allow: allow.into_iter().filter(|a| !a.trim().is_empty()).collect(),
                 read_only,
-                actor: actor.map(|name| grafeno::Actor { name, own_only }),
+                actor: actor.map(|name| grafeno::Actor {
+                    name,
+                    own_only,
+                    view: None,
+                }),
             };
             mcp::run(db.open()?, namespace, access)?
         }

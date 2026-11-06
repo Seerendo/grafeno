@@ -282,6 +282,7 @@ impl Settings {
                 let name = self.procedure.to_lowercase();
                 name.contains("path") || name.contains("astar")
             },
+            view: None,
         })
     }
 
@@ -446,6 +447,10 @@ pub(crate) fn call(
         }
     };
     let project = |spec: &ProjectionSpec| -> Result<Arc<Projection>, QueryError> {
+        // Algorithms run on the subgraph the caller sees (14.4).
+        let mut spec = spec.clone();
+        spec.view = ctx.view.map(|view| grafeno::algo::ViewRef(view.clone()));
+        let spec = &spec;
         let p = match ctx.write {
             Some(tx) => tx.projection(ctx.ns, spec)?,
             None => ctx.read.projection(ctx.ns, spec)?,

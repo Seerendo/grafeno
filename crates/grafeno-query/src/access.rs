@@ -123,6 +123,13 @@ pub(crate) enum Access {
         holder: Option<String>,
     },
     ShowCurrentUser,
+    /// `RESTRICT role …` (adds a record policy) or `UNRESTRICT role …`
+    /// (removes it), 14.4.
+    Restrict {
+        role: String,
+        policy: grafeno::Policy,
+        remove: bool,
+    },
 }
 
 /// One `SET` of `CREATE USER` or `ALTER USER`.
@@ -135,6 +142,8 @@ pub(crate) enum UserSet {
     Expires(Expr),
     Superuser(bool),
     Description(Expr),
+    /// `SET ATTRIBUTE key = value` (null removes it), for record policies.
+    Attribute(String, Expr),
 }
 
 /// What privileges are granted on.
@@ -251,6 +260,15 @@ impl Access {
                 "list the privileges of {name} (manage_roles or manage_accounts, unless it is the caller)"
             ),
             Access::ShowCurrentUser => "describe the caller".into(),
+            Access::Restrict {
+                role,
+                policy,
+                remove,
+            } => format!(
+                "{} the policy on {policy} {} {role} (manage_roles)",
+                if *remove { "remove" } else { "add" },
+                if *remove { "from" } else { "to" }
+            ),
         }
     }
 
@@ -270,6 +288,7 @@ impl Access {
             | Access::DropRole { .. }
             | Access::Grant { .. }
             | Access::Revoke { .. }
+            | Access::Restrict { .. }
             | Access::ShowRoles => roles(),
             Access::ShowPrivileges { holder: Some(name) }
                 if context.account.as_deref() != Some(name.as_str())
@@ -373,6 +392,7 @@ pub(crate) fn run(
                 own_only: false,
                 disabled: false,
                 expires_at: None,
+                attributes: Default::default(),
                 description: None,
                 created_at: Timestamp::now(),
             };
@@ -453,6 +473,7 @@ pub(crate) fn run(
                 privileges: Vec::new(),
                 grants: Vec::new(),
                 roles: Vec::new(),
+                policies: Vec::new(),
                 description,
                 created_at: Timestamp::now(),
             })?;
@@ -535,6 +556,37 @@ pub(crate) fn run(
                 "revoked {} from {} ({changed} held)",
                 roles.join(", "),
                 from.join(", ")
+            )))
+        }
+        Access::Restrict {
+            role,
+            policy,
+            remove,
+        } => {
+            require(context.manage_roles, "manage_roles", context)?;
+            let mut def = tx.role(role)?.ok_or_else(|| {
+                QueryError::runtime(format!(
+                    "there is no role {role:?} (CREATE ROLE {role} first)"
+                ))
+            })?;
+            let had = def.policies.contains(policy);
+            if *remove {
+                def.policies.retain(|p| p != policy);
+            } else if !had {
+                def.policies.push(policy.clone());
+            }
+            if had == *remove {
+                tx.put_role(&def)?;
+            }
+            Ok(done(format!(
+                "{} the policy on {policy} {} {role}",
+                match (remove, had) {
+                    (true, true) => "removed",
+                    (true, false) => "did not find",
+                    (false, true) => "kept",
+                    (false, false) => "added",
+                },
+                if *remove { "from" } else { "to" }
             )))
         }
         Access::ShowUsers
@@ -655,6 +707,14 @@ fn apply_sets(
                     return Err(forbidden("only superusers make or unmake a superuser"));
                 }
                 account.superuser = *superuser;
+            }
+            UserSet::Attribute(key, expr) => {
+                let value = value(expr)?;
+                if value == Value::Null {
+                    account.attributes.remove(key);
+                } else {
+                    account.attributes.insert(key.clone(), value.to_json());
+                }
             }
             UserSet::Description(expr) => {
                 account.description = match value(expr)? {
@@ -890,6 +950,21 @@ fn privileges_of(read: &ReadTx, name: &str) -> Result<QueryResult, QueryError> {
                 Value::Str(if privilege.deny { "deny" } else { "grant" }.into()),
                 Value::Str(privilege.action.name()),
                 Value::Str(privilege.object.to_string()),
+            ]);
+        }
+        for policy in &def.policies {
+            rows.push(vec![
+                Value::Str(role.clone()),
+                Value::Str("policy".into()),
+                Value::Str(
+                    match policy.applies {
+                        grafeno::Applies::Read => "read",
+                        grafeno::Applies::Write => "write",
+                        grafeno::Applies::All => "all",
+                    }
+                    .into(),
+                ),
+                Value::Str(policy.to_string()),
             ]);
         }
         pending.extend(def.roles);

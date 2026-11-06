@@ -452,7 +452,29 @@ impl ReadTx {
         range: &IndexRange,
         limit: usize,
     ) -> Result<Vec<NodeId>> {
-        lookup(&self.index_entries, ns, name, range, limit)
+        let Some(view) = self.view() else {
+            return lookup(&self.index_entries, ns, name, range, limit);
+        };
+        // An index on a property the view may not read finds nothing.
+        if view.per_record(ns)
+            && let Some(def) = self
+                .index_defs(ns)?
+                .into_iter()
+                .find(|def| def.name == name)
+            && view.property_hidden(ns, std::slice::from_ref(&def.label), &def.key)
+        {
+            return Ok(Vec::new());
+        }
+        let mut visible = Vec::new();
+        for id in lookup(&self.index_entries, ns, name, range, usize::MAX)? {
+            if self.sees(ns, id)? {
+                visible.push(id);
+                if visible.len() == limit {
+                    break;
+                }
+            }
+        }
+        Ok(visible)
     }
 }
 

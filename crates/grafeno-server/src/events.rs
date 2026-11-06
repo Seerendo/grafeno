@@ -49,6 +49,9 @@ pub struct Feed {
     pub commits: watch::Receiver<u64>,
     pub queue: VecDeque<axum::response::sse::Event>,
     pub gap_told: bool,
+    /// What the subscriber may see (14.4): changes of hidden records are
+    /// left out.
+    pub view: Option<Arc<grafeno::View>>,
 }
 
 impl Feed {
@@ -63,8 +66,9 @@ impl Feed {
             // Marks what this read sees, so a commit after it wakes us.
             self.commits.borrow_and_update();
             let (db, ns, since) = (self.db.clone(), self.ns.clone(), self.cursor);
+            let view = self.view.clone();
             let page = tokio::task::spawn_blocking(move || -> grafeno::Result<ChangePage> {
-                db.begin_read()?.changes(&ns, since, 500)
+                db.begin_read()?.with_view(view).changes(&ns, since, 500)
             })
             .await
             .ok()?
@@ -75,8 +79,9 @@ impl Feed {
                 self.queue
                     .push_back(Event::default().event("gap").data(data.to_string()));
             }
+            // Past hidden changes too, so they are not read again.
+            self.cursor = page.next(self.cursor);
             for change in page.changes {
-                self.cursor = change.seq;
                 let data = serde_json::to_string(&change).unwrap_or_default();
                 self.queue.push_back(
                     Event::default()

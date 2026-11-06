@@ -107,6 +107,8 @@ export interface Account {
   disabled: boolean;
   /** When it stops working (14.3), microseconds since the epoch. */
   expires_at?: number;
+  /** What record policies compare with (14.4): `{ team: "red" }`. */
+  attributes?: Record<string, unknown>;
   description?: string;
   created_at: number;
 }
@@ -125,6 +127,25 @@ export interface Privilege {
   deny?: boolean;
 }
 
+/**
+ * A limit to the records that match a condition (14.4): who holds the role
+ * sees (and changes) only those. Policies narrow, like denials.
+ */
+export interface Policy {
+  /** A namespace pattern. */
+  namespace: string;
+  /** Nodes with this label only; every node and edge when absent. */
+  label?: string;
+  applies?: "read" | "write" | "all";
+  condition:
+    | { kind: "recorded_by_caller" }
+    | {
+        kind: "property";
+        key: string;
+        equals: { from: "caller" } | { from: "attribute"; name: string } | { from: "value"; value: unknown };
+      };
+}
+
 /** A role an administrator defined (14.2). */
 export interface RoleDefinition {
   name: string;
@@ -133,6 +154,8 @@ export interface RoleDefinition {
   grants: Grant[];
   /** Roles it has. */
   roles: string[];
+  /** Record policies (14.4). */
+  policies?: Policy[];
   description?: string;
   created_at: number;
 }
@@ -861,6 +884,8 @@ export class Grafeno {
       disabled?: boolean;
       /** Microseconds or an ISO 8601 date; `null` for never. */
       expires_at?: number | string | null;
+      /** Replaces the attributes record policies compare with. */
+      attributes?: Record<string, unknown>;
       description?: string | null;
     },
   ): Promise<Account> {
@@ -890,7 +915,7 @@ export class Grafeno {
   /** Defines or replaces a role; cycles are refused (`manage_roles`). */
   putRole(
     name: string,
-    role: { privileges?: Privilege[]; grants?: Grant[]; roles?: string[]; description?: string },
+    role: { privileges?: Privilege[]; grants?: Grant[]; roles?: string[]; policies?: Policy[]; description?: string },
   ): Promise<RoleDefinition> {
     return this.request("PUT", `/v1/admin/roles/${encodeURIComponent(name)}`, role);
   }

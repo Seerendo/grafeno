@@ -60,6 +60,7 @@ fn main() {
                 ],
                 grants: Vec::new(),
                 roles: below,
+                policies: Vec::new(),
                 description: None,
                 created_at: Timestamp::now(),
             })?;
@@ -76,6 +77,7 @@ fn main() {
             own_only: false,
             disabled: false,
             expires_at: None,
+            attributes: Default::default(),
             description: None,
             created_at: Timestamp::now(),
         })

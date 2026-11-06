@@ -113,6 +113,10 @@ pub struct Account {
     /// A disabled account can neither sign in nor use its keys.
     #[serde(default)]
     pub disabled: bool,
+    /// What record policies compare properties with (14.4): `tenant`,
+    /// `team`.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub attributes: serde_json::Map<String, serde_json::Value>,
     /// After this time the account can neither sign in nor use its keys
     /// (14.3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -244,6 +248,7 @@ impl Principal {
                 own_only: self.own_only,
                 disabled: false,
                 expires_at: None,
+                attributes: Default::default(),
                 description: self.description.clone(),
                 created_at: self.created_at,
             },
@@ -538,6 +543,7 @@ mod tests {
             own_only: false,
             disabled: false,
             expires_at: None,
+            attributes: Default::default(),
             description: None,
             created_at: Timestamp::from_micros(0),
         }

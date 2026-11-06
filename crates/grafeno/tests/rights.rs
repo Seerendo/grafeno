@@ -121,6 +121,7 @@ fn world() -> impl Strategy<Value = (HashMap<String, RoleDef>, Account)> {
                         privileges: privileges.clone(),
                         grants: grants.clone(),
                         roles: below,
+                        policies: Vec::new(),
                         description: None,
                         created_at: Timestamp::from_micros(0),
                     },
@@ -146,6 +147,7 @@ fn world() -> impl Strategy<Value = (HashMap<String, RoleDef>, Account)> {
                 own_only: false,
                 disabled: false,
                 expires_at: None,
+                attributes: Default::default(),
                 description: None,
                 created_at: Timestamp::from_micros(0),
             };
@@ -375,6 +377,7 @@ fn role(name: &str, privileges: Vec<Privilege>, roles: &[&str]) -> RoleDef {
         privileges,
         grants: Vec::new(),
         roles: roles.iter().map(|r| (*r).to_owned()).collect(),
+        policies: Vec::new(),
         description: None,
         created_at: Timestamp::now(),
     }
@@ -422,6 +425,7 @@ fn roles_in_the_database() {
             own_only: false,
             disabled: false,
             expires_at: None,
+            attributes: Default::default(),
             description: None,
             created_at: Timestamp::now(),
         })

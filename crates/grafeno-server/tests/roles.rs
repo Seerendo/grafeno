@@ -1,7 +1,8 @@
 //! Phase 14.2: roles over HTTP. Defining roles (and refusing cycles,
 //! unknown roles and privileges that do not fit their object); granting
 //! them to accounts; a role reached through another; patterns with a
-//! denial that wins; a custom editor without `delete`; server privileges
+//! denial that wins; a custom editor without `delete` (in GQ too, change
+//! by change, 14.4); server privileges
 //! (metrics, managing roles, managing accounts but not superusers); the
 //! `public` role; and keys whose scope still narrows what roles give.
 
@@ -253,7 +254,8 @@ async fn roles_grant_deny_and_nest() {
             .contains("`delete`"),
         "{body}"
     );
-    let (code, _) = call(
+    // In GQ each change is checked (14.4): creating passes, deleting not.
+    let (code, body) = call(
         &app,
         &careful,
         "POST",
@@ -261,7 +263,23 @@ async fn roles_grant_deny_and_nest() {
         Some(json!({ "query": "CREATE (:Note {title: 'x'})" })),
     )
     .await;
-    assert_eq!(code, StatusCode::FORBIDDEN);
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let (code, body) = call(
+        &app,
+        &careful,
+        "POST",
+        "/v1/other/query",
+        Some(json!({ "query": "MATCH (n:Note) DELETE n" })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("`delete`"),
+        "{body}"
+    );
     let (code, _) = call(&app, &careful, "POST", "/v1/other/rebuild", None).await;
     assert_eq!(code, StatusCode::FORBIDDEN, "schema is not part of write");
 

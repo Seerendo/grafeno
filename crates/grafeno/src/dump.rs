@@ -190,6 +190,10 @@ impl ReadTx {
                     break;
                 }
                 let node: Node = decode(value.value())?;
+                // What the reader may not see is not exported (14.4).
+                let Some(node) = self.seen_node(ns, node) else {
+                    continue;
+                };
                 let id: NodeId = node.id;
                 let memory = self.memory(ns, &node)?;
                 let record = Record::Node {
@@ -208,6 +212,9 @@ impl ReadTx {
                     break;
                 }
                 let edge: Edge = decode(value.value())?;
+                let Some(edge) = self.seen_edge(ns, edge)? else {
+                    continue;
+                };
                 write_record(
                     out,
                     &Record::Edge {

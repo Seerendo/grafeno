@@ -392,8 +392,8 @@ impl WriteTx {
         }
         let keep = self.node(ns, kept)?.ok_or(Error::NodeNotFound(kept))?;
         let gone = self.node(ns, merged)?.ok_or(Error::NodeNotFound(merged))?;
-        self.guard_node(&keep)?;
-        self.guard_node(&gone)?;
+        self.guard_node_for(crate::Act::Merge, ns, &keep)?;
+        self.guard_node_for(crate::Act::Merge, ns, &gone)?;
         let conflicts = self.conflicts(ns, &keep, &gone, options)?;
         if !conflicts.is_empty() && !options.force {
             let listed: Vec<String> = conflicts.iter().map(Conflict::describe).collect();
@@ -599,7 +599,7 @@ impl WriteTx {
         let keep = self
             .node(ns, record.kept)?
             .ok_or(Error::NodeNotFound(record.kept))?;
-        self.guard_node(&keep)?;
+        self.guard_node_for(crate::Act::Merge, ns, &keep)?;
         if self.node(ns, record.merged)?.is_some() {
             return Err(Error::Conflict(format!(
                 "node {} exists again, so the merge cannot be undone",

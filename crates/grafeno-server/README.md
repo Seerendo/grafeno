@@ -198,6 +198,33 @@ grafeno grants deny read --on property:Person.email@crm --to team_reader --confi
 grafeno grants add-role team_reader --to ana --config grafeno.toml
 ```
 
+**Enforcement** (14.4): what a caller may not read is absent from every
+answer, as if it did not exist: nodes with a label it may not read (or
+that a policy keeps from it), edges it may not read or that lead to such
+nodes, and hidden properties. Listings, reads by id (404), traversals,
+searches, recall and context, GQ, algorithms, exports, the change log
+(and its stream), statistics and the namespace list all leave them out.
+Entity resolution, duplicates, merges, community summaries, extraction,
+the review queue, decay, consolidation, `check` and vector recall answer
+403 to a caller who sees a namespace record by record. Every change is
+checked against labels, properties and the operation; a write that would
+touch something forbidden fails whole. **Record policies** limit a role to
+records that match a condition:
+
+```bash
+curl -X PUT localhost:7810/v1/roles/analyst -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"grants": [{"namespace": "crm", "role": "read"}],
+       "policies": [{"namespace": "crm", "label": "Customer", "applies": "read",
+                     "condition": {"kind": "property", "key": "tenant",
+                                   "equals": {"from": "attribute", "name": "tenant"}}}]}'
+```
+
+```bash
+curl -X PATCH localhost:7810/v1/accounts/ana -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{"attributes": {"tenant": "acme"}}'
+```
+
 Without a token, accounts close the server: the first account must be a
 superuser, and a change that would leave no active superuser (or no
 accounts) is refused. Accounts can expire (`ALTER USER … SET EXPIRES`,

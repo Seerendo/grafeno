@@ -747,13 +747,38 @@ async fn write_bulk<T: Send + 'static>(
     .map_err(ApiError::from)
 }
 
-/// Runs engine work on the blocking pool: redb calls are synchronous.
+/// The database as the caller of a request sees it (14.4): its snapshots
+/// leave out what the caller may not read. Everything else is the
+/// database's.
+pub(crate) struct Db<'a> {
+    db: &'a Grafeno,
+    view: Option<Arc<grafeno::View>>,
+}
+
+impl std::ops::Deref for Db<'_> {
+    type Target = Grafeno;
+
+    fn deref(&self) -> &Grafeno {
+        self.db
+    }
+}
+
+impl Db<'_> {
+    /// A snapshot that reads as the caller may.
+    pub(crate) fn begin_read(&self) -> grafeno::Result<grafeno::ReadTx> {
+        Ok(self.db.begin_read()?.with_view(self.view.clone()))
+    }
+}
+
+/// Runs engine work on the blocking pool: redb calls are synchronous. Its
+/// snapshots read as the request's caller may (taken here, in the request).
 pub(crate) async fn blocking<T: Send + 'static>(
     state: &AppState,
-    work: impl FnOnce(&Grafeno) -> grafeno::Result<T> + Send + 'static,
+    work: impl FnOnce(&Db) -> grafeno::Result<T> + Send + 'static,
 ) -> ApiResult<T> {
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || work(&db))
+    let view = auth::current().view();
+    tokio::task::spawn_blocking(move || work(&Db { db: &db, view }))
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?
         .map_err(ApiError::from)
@@ -865,6 +890,19 @@ async fn refuse(
         details: None,
     }
     .into_response()
+}
+
+/// 403 when the caller sees `ns` record by record (14.4): `what` reads every
+/// record of the namespace, and its result would tell what the caller may
+/// not read (entity resolution, community summaries, maintenance).
+fn whole_namespace(ns: &str, what: &str) -> ApiResult<()> {
+    match auth::current().view() {
+        Some(view) if view.per_record(ns) => Err(ApiError::forbidden(format!(
+            "{what} reads every record of {ns:?}, and some are hidden from {:?}: it needs read on all of them",
+            auth::current().name()
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// Why the caller may not do what `role` stands for in `ns`, if it may not.
@@ -1739,10 +1777,29 @@ const IMPORT_LIMIT: usize = 1024 * 1024 * 1024;
 async fn namespaces(State(state): State<AppState>) -> ApiResult<Json<Vec<grafeno::NamespaceInfo>>> {
     let caller = auth::current();
     let registry = state.groups.get().cloned();
-    let namespaces = blocking(&state, move |db| match registry {
-        // Every group's namespaces, each from where it lives (13.5).
-        Some(registry) => crate::groups::namespaces(&registry),
-        None => db.begin_read()?.namespaces(),
+    let namespaces = blocking(&state, move |db| {
+        let mut list = match &registry {
+            // Every group's namespaces, each from where it lives (13.5).
+            Some(registry) => crate::groups::namespaces(registry)?,
+            None => db.begin_read()?.namespaces()?,
+        };
+        // A namespace seen record by record counts what the caller sees
+        // (14.4); on several groups, its counts are left out.
+        let read = db.begin_read()?;
+        for info in &mut list {
+            if read.view().is_some_and(|view| view.per_record(&info.name)) {
+                let (nodes, edges) = match registry {
+                    None => {
+                        let stats = read.stats(&info.name)?;
+                        (stats.nodes, stats.edges)
+                    }
+                    Some(_) => (0, 0),
+                };
+                info.nodes = nodes;
+                info.edges = edges;
+            }
+        }
+        Ok(list)
     })
     .await?;
     Ok(Json(
@@ -1830,6 +1887,7 @@ async fn check(
     State(state): State<AppState>,
     Path(ns): Path<String>,
 ) -> ApiResult<Json<grafeno::CheckReport>> {
+    whole_namespace(&ns, "checking integrity")?;
     let report = blocking(&state, move |db| db.begin_read()?.check(&ns)).await?;
     Ok(Json(report))
 }
@@ -1874,6 +1932,7 @@ async fn vector_recall(
     Path(ns): Path<String>,
     Params(params): Params<RecallParams>,
 ) -> ApiResult<Json<Value>> {
+    whole_namespace(&ns, "measuring vector recall")?;
     let sample = params.sample.clamp(1, 1_000);
     let ef = params.ef.clamp(1, 1_000);
     let recall = blocking(&state, move |db| {
@@ -2088,10 +2147,12 @@ async fn query_part(
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let _guard = CancelOnDrop(cancel.clone());
     let caller = auth::current();
+    let view = caller.view();
     let limits = grafeno_query::Limits {
         cancel: Some(cancel),
         visible: (!caller.is_owner())
             .then(|| grafeno_query::NamespaceFilter::new(move |ns| caller.may(ns, Role::Read))),
+        view,
         ..state.limits.clone()
     };
     tokio::task::spawn_blocking(move || crate::cluster::read_part(&node, &ns, &input, &limits))
@@ -2145,13 +2206,26 @@ async fn run_query_counted(
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let _guard = CancelOnDrop(cancel.clone());
     let caller = auth::current();
+    let view = caller.view();
     let context = auth::access_context(&caller);
     let needs = grafeno_query::requirements(&query, Some(&context))?;
     // What the statement would lack if it ran: refused, or, under EXPLAIN,
     // said in the plan (14.3).
     let missing = match needs.kind {
         grafeno_query::StatementKind::Read => missing(&caller, &ns, Role::Read),
-        grafeno_query::StatementKind::Write => missing(&caller, &ns, Role::Write),
+        // Each change is checked as it is made (14.4): a statement needs some
+        // way to write here, and the write transaction checks the rest.
+        grafeno_query::StatementKind::Write => {
+            let writes = [
+                grafeno::Act::Create,
+                grafeno::Act::Update,
+                grafeno::Act::Delete,
+                grafeno::Act::Merge,
+                grafeno::Act::Retract,
+            ];
+            (!writes.iter().any(|act| caller.can(*act, &ns)))
+                .then(|| caller.refusal(&ns, &writes[..3]))
+        }
         grafeno_query::StatementKind::Schema => missing(&caller, &ns, Role::Admin),
         grafeno_query::StatementKind::Access => needs.lacking.map(|privilege| {
             format!(
@@ -2174,6 +2248,7 @@ async fn run_query_counted(
         visible: (!caller.is_owner())
             .then(|| grafeno_query::NamespaceFilter::new(move |ns| caller.may(ns, Role::Read))),
         access: Some(context),
+        view: view.clone(),
         ..state.limits.clone()
     };
     if !grafeno_query::is_write(&query)? {
@@ -2387,6 +2462,7 @@ async fn resolve(
     Path(ns): Path<String>,
     Params(params): Params<ResolveParams>,
 ) -> ApiResult<Json<Vec<grafeno::Node>>> {
+    whole_namespace(&ns, "resolving names")?;
     let nodes = blocking(&state, move |db| {
         let read = db.begin_read()?;
         let mut nodes = Vec::new();
@@ -2430,6 +2506,7 @@ async fn fuzzy(
     Path(ns): Path<String>,
     Params(params): Params<FuzzyParams>,
 ) -> ApiResult<Json<Vec<grafeno::FuzzyHit>>> {
+    whole_namespace(&ns, "fuzzy matching")?;
     let measure = measure(params.measure.as_deref())?;
     let limit = params.limit.unwrap_or(10).min(MAX_PAGE);
     let hits = blocking(&state, move |db| {
@@ -2462,6 +2539,7 @@ async fn find_matches(
     Path(ns): Path<String>,
     Body(input): Body<MatchInput>,
 ) -> ApiResult<Json<Vec<grafeno::Match>>> {
+    whole_namespace(&ns, "entity resolution")?;
     let limit = input.limit.unwrap_or(10).min(MAX_PAGE);
     let found = blocking(&state, move |db| {
         let probe = grafeno::Probe {
@@ -2498,6 +2576,7 @@ async fn contradictions(
     Path(ns): Path<String>,
     Params(params): Params<ContradictionsParams>,
 ) -> ApiResult<Json<Vec<grafeno::ConstraintEvent>>> {
+    whole_namespace(&ns, "listing contradictions")?;
     let limit = params.limit.unwrap_or(50).min(MAX_PAGE);
     let events = blocking(&state, move |db| {
         db.begin_read()?.constraint_events(&ns, limit)
@@ -2649,6 +2728,7 @@ async fn changes(
         commits: state.events.subscribe(),
         queue: Default::default(),
         gap_told: false,
+        view: auth::current().view(),
     };
     let stream = futures_util::stream::unfold(feed, |feed| async move {
         feed.next()
@@ -2888,6 +2968,7 @@ async fn refresh_communities(
     Path(ns): Path<String>,
     body: axum::body::Bytes,
 ) -> ApiResult<Json<grafeno_memory::CommunityReport>> {
+    whole_namespace(&ns, "summarizing communities")?;
     let options: grafeno_memory::CommunityOptions = if body.iter().all(u8::is_ascii_whitespace) {
         grafeno_memory::CommunityOptions::default()
     } else {
@@ -2922,6 +3003,7 @@ async fn communities(
     Path(ns): Path<String>,
     Params(params): Params<CommunitiesParams>,
 ) -> ApiResult<Json<Vec<grafeno_memory::CommunityHit>>> {
+    whole_namespace(&ns, "community summaries")?;
     let options = grafeno_memory::OverviewOptions {
         limit: params.limit.unwrap_or(10).min(MAX_PAGE),
         level: params.level,
@@ -2945,6 +3027,7 @@ async fn community(
     Path((ns, id)): Path<(String, NodeId)>,
     Params(params): Params<CommunityParams>,
 ) -> ApiResult<Json<grafeno_memory::CommunityMembers>> {
+    whole_namespace(&ns, "community summaries")?;
     let limit = params.limit.unwrap_or(50).min(MAX_PAGE);
     let opened = blocking(&state, move |db| {
         grafeno_memory::community_members(&db.begin_read()?, &ns, id, limit)
@@ -2967,6 +3050,7 @@ async fn community_text(
     Path((ns, id)): Path<(String, NodeId)>,
     Body(input): Body<CommunityText>,
 ) -> ApiResult<Json<Value>> {
+    whole_namespace(&ns, "community summaries")?;
     write(&state, move |tx| {
         grafeno_memory::set_community_text(tx, &ns, id, input.text.as_deref())
     })
@@ -2981,6 +3065,7 @@ async fn extract(
     Path(ns): Path<String>,
     body: axum::body::Bytes,
 ) -> ApiResult<Json<grafeno_memory::ExtractReport>> {
+    whole_namespace(&ns, "extraction")?;
     let options: grafeno_memory::ExtractOptions = if body.iter().all(u8::is_ascii_whitespace) {
         grafeno_memory::ExtractOptions::default()
     } else {
@@ -3039,6 +3124,7 @@ async fn review_queue(
     Path(ns): Path<String>,
     Params(params): Params<ReviewParams>,
 ) -> ApiResult<Json<Vec<grafeno_memory::ReviewItem>>> {
+    whole_namespace(&ns, "the review queue")?;
     let limit = params.limit.unwrap_or(50).min(MAX_PAGE);
     let items = blocking(&state, move |db| {
         grafeno_memory::review_queue(&db.begin_read()?, &ns, limit)
@@ -3054,6 +3140,7 @@ async fn resolve_review(
     Path((ns, key)): Path<(String, String)>,
     Body(resolution): Body<grafeno_memory::Resolution>,
 ) -> ApiResult<Json<Value>> {
+    whole_namespace(&ns, "the review queue")?;
     let (node, report) = write(&state, move |tx| {
         grafeno_memory::resolve(tx, &ns, &key, resolution.clone())
     })
@@ -3076,6 +3163,7 @@ async fn add_mentions(
     Path((ns, id)): Path<(String, NodeId)>,
     Body(input): Body<MentionsInput>,
 ) -> ApiResult<Json<grafeno_memory::ExtractReport>> {
+    whole_namespace(&ns, "extraction")?;
     let db = state.db.clone();
     let label = input.default_label.unwrap_or_else(|| "Entity".into());
     let report = write(&state, move |tx| {
@@ -3098,6 +3186,7 @@ async fn match_pairs(
     Path(ns): Path<String>,
     Params(params): Params<PairsParams>,
 ) -> ApiResult<Json<Value>> {
+    whole_namespace(&ns, "entity resolution")?;
     let limit = params.limit.unwrap_or(50).min(MAX_PAGE);
     let pairs = blocking(&state, move |db| {
         db.begin_read()?.match_pairs(&ns, &params.label, limit)
@@ -3161,6 +3250,7 @@ async fn duplicates(
     Path(ns): Path<String>,
     Params(params): Params<DuplicateParams>,
 ) -> ApiResult<Json<Vec<grafeno_memory::Duplicate>>> {
+    whole_namespace(&ns, "finding duplicates")?;
     let base = grafeno_memory::DuplicateOptions::default();
     let options = grafeno_memory::DuplicateOptions {
         label: params.label,
@@ -3209,6 +3299,7 @@ async fn merge(
     Path(ns): Path<String>,
     Body(input): Body<MergeInput>,
 ) -> ApiResult<Json<Value>> {
+    whole_namespace(&ns, "merging")?;
     let base = grafeno::MergeOptions::default();
     let options = grafeno::MergeOptions {
         force: input.force,
@@ -3259,6 +3350,7 @@ async fn merges(
     Path(ns): Path<String>,
     Params(params): Params<MergesParams>,
 ) -> ApiResult<Json<Vec<grafeno::MergeRecord>>> {
+    whole_namespace(&ns, "the merge log")?;
     let limit = params.limit.unwrap_or(50).min(MAX_PAGE);
     let mut records = blocking(&state, move |db| db.begin_read()?.merges(&ns, params.node)).await?;
     records.truncate(limit);
@@ -3279,6 +3371,7 @@ async fn undo_merge(
     Path((ns, id)): Path<(String, grafeno::MergeId)>,
     body: axum::body::Bytes,
 ) -> ApiResult<Json<grafeno::MergeRecord>> {
+    whole_namespace(&ns, "the merge log")?;
     // The body is optional: none is `{}`.
     let input: UndoInput = if body.iter().all(u8::is_ascii_whitespace) {
         UndoInput::default()
@@ -3322,6 +3415,7 @@ async fn weak(
     Path(ns): Path<String>,
     Params(params): Params<WeakParams>,
 ) -> ApiResult<Json<Vec<grafeno_memory::WeakMemory>>> {
+    whole_namespace(&ns, "memory decay")?;
     let base = grafeno_memory::DecayOptions::default();
     let options = grafeno_memory::DecayOptions {
         half_life_secs: params
@@ -3366,6 +3460,7 @@ async fn consolidation(
     Path(ns): Path<String>,
     Params(params): Params<ConsolidationParams>,
 ) -> ApiResult<Json<Vec<grafeno_memory::ConsolidationGroup>>> {
+    whole_namespace(&ns, "consolidation")?;
     let base = grafeno_memory::ConsolidationOptions::default();
     let options = grafeno_memory::ConsolidationOptions {
         memory_labels: params
@@ -3417,6 +3512,7 @@ async fn summaries(
     Path(ns): Path<String>,
     Body(input): Body<SummaryInput>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
+    whole_namespace(&ns, "summaries")?;
     let summary = grafeno_memory::Summary {
         text: input.text,
         name: input.name,

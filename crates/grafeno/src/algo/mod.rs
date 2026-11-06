@@ -61,6 +61,28 @@ pub struct ProjectionSpec {
     /// Keep the id of every edge (16 bytes each), for algorithms that
     /// return edges (paths). Without it, [`Projection::edge_id`] is `None`.
     pub edge_ids: bool,
+    /// Only what this caller may see (14.4): algorithms run on the visible
+    /// subgraph.
+    pub view: Option<ViewRef>,
+}
+
+/// A caller's view in a [`ProjectionSpec`]: the same view (the same
+/// allocation) is the same projection.
+#[derive(Clone, Debug)]
+pub struct ViewRef(pub Arc<crate::View>);
+
+impl PartialEq for ViewRef {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ViewRef {}
+
+impl std::hash::Hash for ViewRef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.0) as usize).hash(state);
+    }
 }
 
 impl ProjectionSpec {
@@ -414,6 +436,23 @@ fn project(
     let mut ids = ids;
     ids.sort_unstable();
     ids.dedup();
+    let view = spec.view.as_ref().map(|v| v.0.as_ref());
+    if let Some(view) = view {
+        if !view.reads(ns) {
+            ids.clear();
+        } else if view.per_record(ns) {
+            let mut visible = Vec::with_capacity(ids.len());
+            for id in ids {
+                if let Some(guard) = nodes.get((ns, id.as_u128())).map_err(storage)?
+                    && view.node_visible(ns, &decode::<grafeno_core::Node>(guard.value())?)
+                {
+                    visible.push(id);
+                }
+            }
+            ids = visible;
+        }
+    }
+    let per_record = view.filter(|view| view.per_record(ns));
     let mut builder = Builder::new(ids, spec.weight.is_some(), spec.edge_ids);
     // Without a label filter nearly every edge goes in: room for all of them
     // up front, instead of arrays that double as they grow (and briefly
@@ -459,16 +498,32 @@ fn project(
         if !filter.accepts_entry(&entry) {
             continue;
         }
-        let weight = match &spec.weight {
-            None => 1.0,
-            Some(key) => match edges.get((ns, edge)).map_err(storage)? {
-                Some(guard) => decode::<Edge>(guard.value())?
+        // Both ends are visible (they have positions); the edge itself too?
+        let record = match (per_record, &spec.weight) {
+            (None, None) => None,
+            _ => match edges.get((ns, edge)).map_err(storage)? {
+                Some(guard) => Some(decode::<Edge>(guard.value())?),
+                None => None,
+            },
+        };
+        if let (Some(view), Some(record)) = (per_record, &record)
+            && !view.edge_visible(ns, record, |_| Ok(true))?
+        {
+            continue;
+        }
+        let weight = match (&spec.weight, &record) {
+            (Some(key), Some(record))
+                if !per_record.is_some_and(|view| {
+                    view.property_hidden(ns, std::slice::from_ref(&record.label), key)
+                }) =>
+            {
+                record
                     .props
                     .get(key)
                     .and_then(serde_json::Value::as_f64)
-                    .unwrap_or(1.0),
-                None => 1.0,
-            },
+                    .unwrap_or(1.0)
+            }
+            _ => 1.0,
         };
         builder.push(from_position, to_position, entry.edge, weight)?;
     }

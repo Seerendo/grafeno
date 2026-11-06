@@ -375,6 +375,7 @@ impl Grafeno {
             constraints: tx.open_table(CONSTRAINTS).map_err(storage)?,
             changes: tx.open_table(CHANGES).map_err(storage)?,
             tx,
+            view: None,
         })
     }
 
@@ -752,15 +753,138 @@ pub struct ReadTx {
     /// The commit this snapshot sees, when known (for the projection cache).
     pub(crate) generation: Option<u64>,
     pub(crate) tx: ReadTransaction,
+    /// What its reader may see (14.4), set on a snapshot of its own with
+    /// [`ReadTx::with_view`]: hidden records are absent from what it reads.
+    pub(crate) view: Option<Arc<crate::View>>,
 }
 
 impl ReadTx {
+    /// This snapshot as `view` sees it (14.4): every read leaves out the
+    /// nodes, edges and properties hidden from it. It takes the snapshot
+    /// itself, so a shared one cannot be given a reader's view.
+    pub fn with_view(mut self, view: Option<Arc<crate::View>>) -> Self {
+        self.view = view;
+        self
+    }
+
+    /// The view this snapshot reads with, if any.
+    pub fn view(&self) -> Option<&crate::View> {
+        self.view.as_deref()
+    }
+
+    /// The view, when records of `ns` are checked one by one.
+    fn per_record(&self, ns: &str) -> Option<&crate::View> {
+        self.view.as_deref().filter(|view| view.per_record(ns))
+    }
+
+    /// Whether nothing of `ns` may be read through this snapshot.
+    fn blind(&self, ns: &str) -> bool {
+        self.view.as_deref().is_some_and(|view| !view.reads(ns))
+    }
+
+    /// Whether the node `id` exists and may be seen.
+    pub fn sees(&self, ns: &str, id: NodeId) -> Result<bool> {
+        if self.blind(ns) {
+            return Ok(false);
+        }
+        let node: Option<Node> = read_record(&self.nodes, ns, id.as_u128())?;
+        Ok(match (node, self.per_record(ns)) {
+            (None, _) => false,
+            (Some(_), None) => true,
+            (Some(node), Some(view)) => view.node_visible(ns, &node),
+        })
+    }
+
+    /// Whether the node exists, seen or not.
+    pub(crate) fn raw_node_exists(&self, ns: &str, id: NodeId) -> Result<bool> {
+        Ok(self
+            .nodes
+            .get((ns, id.as_u128()))
+            .map_err(storage)?
+            .is_some())
+    }
+
+    /// Whether the edge exists, seen or not.
+    pub(crate) fn raw_edge_exists(&self, ns: &str, id: EdgeId) -> Result<bool> {
+        Ok(self
+            .edges
+            .get((ns, id.as_u128()))
+            .map_err(storage)?
+            .is_some())
+    }
+
+    pub(crate) fn seen_node(&self, ns: &str, node: Node) -> Option<Node> {
+        if self.blind(ns) {
+            return None;
+        }
+        match self.per_record(ns) {
+            Some(view) => view.node(ns, node),
+            None => Some(node),
+        }
+    }
+
+    pub(crate) fn seen_edge(&self, ns: &str, edge: Edge) -> Result<Option<Edge>> {
+        if self.blind(ns) {
+            return Ok(None);
+        }
+        match self.per_record(ns) {
+            Some(view) => view.edge(ns, edge, |id| self.sees(ns, id)),
+            None => Ok(Some(edge)),
+        }
+    }
+
     pub fn node(&self, ns: &str, id: NodeId) -> Result<Option<Node>> {
-        read_record(&self.nodes, ns, id.as_u128())
+        if self.blind(ns) {
+            return Ok(None);
+        }
+        let node: Option<Node> = read_record(&self.nodes, ns, id.as_u128())?;
+        Ok(node.and_then(|node| self.seen_node(ns, node)))
     }
 
     pub fn edge(&self, ns: &str, id: EdgeId) -> Result<Option<Edge>> {
-        read_record(&self.edges, ns, id.as_u128())
+        if self.blind(ns) {
+            return Ok(None);
+        }
+        match read_record(&self.edges, ns, id.as_u128())? {
+            Some(edge) => self.seen_edge(ns, edge),
+            None => Ok(None),
+        }
+    }
+
+    /// Search hits the view may see, up to `limit`: `fetch(n)` gives the
+    /// best `n`, asked again with more while hidden ones crowd out the
+    /// visible (the decision 14.4 took about filtering vector search:
+    /// after the graph walk, widening it, with recall measured).
+    fn visible_hits(
+        &self,
+        ns: &str,
+        limit: usize,
+        fetch: impl Fn(usize) -> Result<Vec<Hit>>,
+    ) -> Result<Vec<Hit>> {
+        if self.blind(ns) {
+            return Ok(Vec::new());
+        }
+        if self.per_record(ns).is_none() {
+            return fetch(limit);
+        }
+        let mut ask = limit.max(1);
+        loop {
+            let hits = fetch(ask)?;
+            let exhausted = hits.len() < ask;
+            let mut out = Vec::with_capacity(limit);
+            for hit in hits {
+                if self.sees(ns, hit.node)? {
+                    out.push(hit);
+                    if out.len() == limit {
+                        return Ok(out);
+                    }
+                }
+            }
+            if exhausted || ask >= 1 << 20 {
+                return Ok(out);
+            }
+            ask *= 4;
+        }
     }
 
     /// Reads several IDs in this snapshot, keeping order, duplicates and missing ones.
@@ -775,19 +899,64 @@ impl ReadTx {
 
     /// Every node of the namespace. Prefer [`ReadTx::nodes_page`] for large ones.
     pub fn nodes(&self, ns: &str) -> Result<Vec<Node>> {
-        scan_records(&self.nodes, ns)
+        if self.blind(ns) {
+            return Ok(Vec::new());
+        }
+        let nodes: Vec<Node> = scan_records(&self.nodes, ns)?;
+        Ok(nodes
+            .into_iter()
+            .filter_map(|node| self.seen_node(ns, node))
+            .collect())
     }
 
     /// Every edge of the namespace, including retracted ones. Prefer
     /// [`ReadTx::edges_page`] for large ones.
     pub fn edges(&self, ns: &str) -> Result<Vec<Edge>> {
-        scan_records(&self.edges, ns)
+        if self.blind(ns) {
+            return Ok(Vec::new());
+        }
+        let edges: Vec<Edge> = scan_records(&self.edges, ns)?;
+        let mut out = Vec::with_capacity(edges.len());
+        for edge in edges {
+            if let Some(edge) = self.seen_edge(ns, edge)? {
+                out.push(edge);
+            }
+        }
+        Ok(out)
     }
 
     /// Up to `limit` nodes after the id `after`, in id (creation) order, only
     /// those with `label` if given. Pass the last id back as `after` to get
     /// the next page.
     pub fn nodes_page(
+        &self,
+        ns: &str,
+        label: Option<&str>,
+        after: Option<NodeId>,
+        limit: usize,
+    ) -> Result<Vec<Node>> {
+        if self.blind(ns) {
+            return Ok(Vec::new());
+        }
+        if self.per_record(ns).is_none() {
+            return self.raw_nodes_page(ns, label, after, limit);
+        }
+        // Fewer than `limit` only at the end, as without a view.
+        let mut out = Vec::new();
+        let mut after = after;
+        loop {
+            let page = self.raw_nodes_page(ns, label, after, limit)?;
+            let full = page.len() == limit;
+            after = page.last().map(|node| node.id).or(after);
+            out.extend(page.into_iter().filter_map(|node| self.seen_node(ns, node)));
+            if out.len() >= limit || !full {
+                out.truncate(limit);
+                return Ok(out);
+            }
+        }
+    }
+
+    fn raw_nodes_page(
         &self,
         ns: &str,
         label: Option<&str>,
@@ -813,17 +982,54 @@ impl ReadTx {
         after: Option<EdgeId>,
         limit: usize,
     ) -> Result<Vec<Edge>> {
-        scan_page(
-            &self.edges,
-            ns,
-            after.map(EdgeId::as_u128),
-            limit,
-            |edge: &Edge| label.is_none_or(|label| edge.label == label),
-        )
+        if self.blind(ns) {
+            return Ok(Vec::new());
+        }
+        let raw = |after: Option<EdgeId>| -> Result<Vec<Edge>> {
+            scan_page(
+                &self.edges,
+                ns,
+                after.map(EdgeId::as_u128),
+                limit,
+                |edge: &Edge| label.is_none_or(|label| edge.label == label),
+            )
+        };
+        if self.per_record(ns).is_none() {
+            return raw(after);
+        }
+        let mut out = Vec::new();
+        let mut after = after;
+        loop {
+            let page = raw(after)?;
+            let full = page.len() == limit;
+            after = page.last().map(|edge| edge.id).or(after);
+            for edge in page {
+                if let Some(edge) = self.seen_edge(ns, edge)? {
+                    out.push(edge);
+                }
+            }
+            if out.len() >= limit || !full {
+                out.truncate(limit);
+                return Ok(out);
+            }
+        }
     }
 
     pub fn nodes_with_label(&self, ns: &str, label: &str) -> Result<Vec<NodeId>> {
-        nodes_with_label(&self.labels, ns, label)
+        if self.blind(ns) {
+            return Ok(Vec::new());
+        }
+        let ids = nodes_with_label(&self.labels, ns, label)?;
+        if self.per_record(ns).is_none() {
+            return Ok(ids);
+        }
+        let mut visible = Vec::with_capacity(ids.len());
+        for id in ids {
+            if self.sees(ns, id)? {
+                visible.push(id);
+            }
+        }
+        Ok(visible)
     }
 
     /// Every namespace, empty ones included, in name order.
@@ -832,6 +1038,55 @@ impl ReadTx {
     }
 
     pub fn stats(&self, ns: &str) -> Result<NamespaceStats> {
+        if self.blind(ns) {
+            return Ok(NamespaceStats {
+                name: ns.to_owned(),
+                ..NamespaceStats::default()
+            });
+        }
+        // Counted from what the view sees: the stored counts would tell how
+        // much is hidden.
+        if self.per_record(ns).is_some() {
+            let mut stats = NamespaceStats {
+                name: ns.to_owned(),
+                ..NamespaceStats::default()
+            };
+            let mut after = None;
+            loop {
+                let page = self.nodes_page(ns, None, after, 1024)?;
+                let done = page.len() < 1024;
+                after = page.last().map(|node| node.id);
+                for node in page {
+                    stats.nodes += 1;
+                    for label in &node.labels {
+                        *stats.node_labels.entry(label.clone()).or_default() += 1;
+                    }
+                    stats.texts += u64::from(text::text(&self.texts, ns, node.id)?.is_some());
+                    stats.vectors +=
+                        u64::from(vector::embedding(&self.vectors, ns, node.id)?.is_some());
+                }
+                if done {
+                    break;
+                }
+            }
+            let mut after = None;
+            loop {
+                let page = self.edges_page(ns, None, after, 1024)?;
+                let done = page.len() < 1024;
+                after = page.last().map(|edge| edge.id);
+                for edge in page {
+                    if edge.is_retracted() {
+                        continue;
+                    }
+                    stats.edges += 1;
+                    *stats.edge_labels.entry(edge.label.clone()).or_default() += 1;
+                }
+                if done {
+                    break;
+                }
+            }
+            return Ok(stats);
+        }
         let (nodes, edges) = self
             .ns_counts
             .get(ns)
@@ -861,17 +1116,25 @@ impl ReadTx {
 
     /// The indexed text of a node.
     pub fn text(&self, ns: &str, id: NodeId) -> Result<Option<String>> {
+        if self.view.is_some() && !self.sees(ns, id)? {
+            return Ok(None);
+        }
         text::text(&self.texts, ns, id)
     }
 
     /// The stored (normalized) embedding of a node.
     pub fn embedding(&self, ns: &str, id: NodeId) -> Result<Option<Vec<f32>>> {
+        if self.view.is_some() && !self.sees(ns, id)? {
+            return Ok(None);
+        }
         vector::embedding(&self.vectors, ns, id)
     }
 
     /// Full-text search ranked by BM25, best first.
     pub fn search_text(&self, ns: &str, query: &str, limit: usize) -> Result<Vec<Hit>> {
-        text::search(&self.postings, &self.text_stats, ns, query, limit)
+        self.visible_hits(ns, limit, |ask| {
+            text::search(&self.postings, &self.text_stats, ns, query, ask)
+        })
     }
 
     /// Approximate nearest neighbors by cosine similarity, best first.
@@ -882,6 +1145,20 @@ impl ReadTx {
     /// Like [`ReadTx::search_vector`], with the size `ef` of the candidate
     /// list: higher is slower and finds more of the true nearest neighbors.
     pub fn search_vector_with(
+        &self,
+        ns: &str,
+        query: &[f32],
+        limit: usize,
+        ef: usize,
+    ) -> Result<Vec<Hit>> {
+        // Each round widens the walk with what it asks for.
+        self.visible_hits(ns, limit, |ask| {
+            let widened = if ask > limit { ef.max(ask * 4) } else { ef };
+            self.raw_search_vector(ns, query, ask, widened)
+        })
+    }
+
+    fn raw_search_vector(
         &self,
         ns: &str,
         query: &[f32],
@@ -901,21 +1178,44 @@ impl ReadTx {
     }
 }
 
-/// Who is writing: the principal recorded on what it creates, and whether
-/// it may change only what it recorded itself.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Who is writing: the principal recorded on what it creates, whether it
+/// may change only what it recorded itself, and what it may see and change
+/// (14.4).
+#[derive(Clone, Debug)]
 pub struct Actor {
     pub name: String,
     /// Refuse changes to nodes and edges recorded by anyone else.
     pub own_only: bool,
+    /// Its rights record by record: each change is checked against them.
+    pub view: Option<Arc<crate::View>>,
 }
+
+impl PartialEq for Actor {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.own_only == other.own_only
+            && match (&self.view, &other.view) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
+}
+
+impl Eq for Actor {}
 
 impl Actor {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             own_only: false,
+            view: None,
         }
+    }
+
+    pub fn with_view(mut self, view: Arc<crate::View>) -> Self {
+        self.view = Some(view);
+        self
     }
 
     pub fn own_only(mut self) -> Self {
@@ -978,10 +1278,53 @@ impl WriteTx {
         }
     }
 
-    pub(crate) fn guard_node(&self, node: &Node) -> Result<()> {
+    /// The actor's view, when its writes are checked record by record (not
+    /// while applying a replicated entry).
+    fn view(&self) -> Option<Arc<crate::View>> {
+        if self.applying {
+            return None;
+        }
+        self.actor.as_ref().and_then(|actor| actor.view.clone())
+    }
+
+    /// Whether the actor sees the node `id` (true without a view).
+    pub(crate) fn sees_node(&self, ns: &str, id: NodeId) -> Result<bool> {
+        let Some(view) = self.view() else {
+            return Ok(true);
+        };
+        if !view.per_record(ns) {
+            return Ok(view.reads(ns));
+        }
+        Ok(self
+            .node(ns, id)?
+            .is_some_and(|node| view.node_visible(ns, &node)))
+    }
+
+    /// May the actor do `action` to `node` as it is now (to change or delete
+    /// it)?
+    pub(crate) fn guard_node_for(&self, action: crate::Act, ns: &str, node: &Node) -> Result<()> {
         self.guard(node.recorded_by.as_deref(), || {
             format!("node {:?}", node.display_name())
-        })
+        })?;
+        match self.view() {
+            Some(view) => view.may_change_node(action, ns, Some(node), None, &[]),
+            None => Ok(()),
+        }
+    }
+
+    /// May the actor make `node` what it is (created or changed, with the
+    /// properties `keys` written)?
+    pub(crate) fn allow_node(
+        &self,
+        action: crate::Act,
+        ns: &str,
+        node: &Node,
+        keys: &[&str],
+    ) -> Result<()> {
+        match self.view() {
+            Some(view) => view.may_change_node(action, ns, None, Some(node), keys),
+            None => Ok(()),
+        }
     }
 
     pub(crate) fn guard_edge(&self, edge: &Edge) -> Result<()> {
@@ -990,16 +1333,49 @@ impl WriteTx {
         })
     }
 
-    /// The node, if this actor may change it.
+    pub(crate) fn guard_edge_for(&self, action: crate::Act, ns: &str, edge: &Edge) -> Result<()> {
+        self.guard_edge(edge)?;
+        match self.view() {
+            Some(view) => view.may_change_edge(action, ns, Some(edge), None, &[], |id| {
+                self.sees_node(ns, id)
+            }),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn allow_edge(
+        &self,
+        action: crate::Act,
+        ns: &str,
+        edge: &Edge,
+        keys: &[&str],
+    ) -> Result<()> {
+        match self.view() {
+            Some(view) => view.may_change_edge(action, ns, None, Some(edge), keys, |id| {
+                self.sees_node(ns, id)
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// The node, if this actor may change it (update it, by default).
     fn node_to_change(&self, ns: &str, id: NodeId) -> Result<Node> {
+        self.node_to_act(crate::Act::Update, ns, id)
+    }
+
+    fn node_to_act(&self, action: crate::Act, ns: &str, id: NodeId) -> Result<Node> {
         let node = self.node(ns, id)?.ok_or(Error::NodeNotFound(id))?;
-        self.guard_node(&node)?;
+        self.guard_node_for(action, ns, &node)?;
         Ok(node)
     }
 
     fn edge_to_change(&self, ns: &str, id: EdgeId) -> Result<Edge> {
+        self.edge_to_act(crate::Act::Update, ns, id)
+    }
+
+    fn edge_to_act(&self, action: crate::Act, ns: &str, id: EdgeId) -> Result<Edge> {
         let edge = self.edge(ns, id)?.ok_or(Error::EdgeNotFound(id))?;
-        self.guard_edge(&edge)?;
+        self.guard_edge_for(action, ns, &edge)?;
         Ok(edge)
     }
 
@@ -1083,7 +1459,7 @@ impl WriteTx {
         let now = Timestamp::now();
         let existing = self.node(ns, id)?;
         if let Some(old) = &existing {
-            self.guard_node(old)?;
+            self.guard_node_for(crate::Act::Update, ns, old)?;
         }
         let node = Node {
             id,
@@ -1097,6 +1473,18 @@ impl WriteTx {
                 None => self.actor.as_ref().map(|actor| actor.name.clone()),
             },
         };
+        let written = changed_keys(existing.as_ref().map(|old| &old.props), &node.props);
+        let written: Vec<&str> = written.iter().map(String::as_str).collect();
+        self.allow_node(
+            if existing.is_some() {
+                crate::Act::Update
+            } else {
+                crate::Act::Create
+            },
+            ns,
+            &node,
+            &written,
+        )?;
         self.put_node(ns, &node, existing.as_ref())?;
         self.replace_indexes(ns, id, new.text.as_deref(), new.embedding.as_deref())?;
         Ok(existing.is_none())
@@ -1154,8 +1542,11 @@ impl WriteTx {
     pub fn set_node_props(&mut self, ns: &str, id: NodeId, props: Props) -> Result<()> {
         let mut node = self.node_to_change(ns, id)?;
         let previous = node.clone();
+        let keys: Vec<String> = props.keys().cloned().collect();
         merge_props(&mut node.props, props);
         node.updated_at = Timestamp::now();
+        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+        self.allow_node(crate::Act::Update, ns, &node, &keys)?;
         self.put_node(ns, &node, Some(&previous))
     }
 
@@ -1169,6 +1560,7 @@ impl WriteTx {
             let previous = node.clone();
             node.labels.insert(at, label.to_owned());
             node.updated_at = Timestamp::now();
+            self.allow_node(crate::Act::Update, ns, &node, &[])?;
             self.put_node(ns, &node, Some(&previous))?;
         }
         Ok(())
@@ -1186,6 +1578,7 @@ impl WriteTx {
             let previous = node.clone();
             node.labels.remove(at);
             node.updated_at = Timestamp::now();
+            self.allow_node(crate::Act::Update, ns, &node, &[])?;
             self.put_node(ns, &node, Some(&previous))?;
         }
         Ok(())
@@ -1216,7 +1609,7 @@ impl WriteTx {
     /// Removes the node's text from the index. Returns whether it had any.
     pub fn remove_text(&mut self, ns: &str, id: NodeId) -> Result<bool> {
         if let Some(node) = self.node(ns, id)? {
-            self.guard_node(&node)?;
+            self.guard_node_for(crate::Act::Update, ns, &node)?;
         }
         self.note(Touch::Text(ns.to_owned(), id.as_u128()));
         let removed = text::remove(&self.tx, ns, id)?;
@@ -1238,7 +1631,7 @@ impl WriteTx {
     /// Removes the node's embedding from the index. Returns whether it had one.
     pub fn remove_embedding(&mut self, ns: &str, id: NodeId) -> Result<bool> {
         if let Some(node) = self.node(ns, id)? {
-            self.guard_node(&node)?;
+            self.guard_node_for(crate::Act::Update, ns, &node)?;
         }
         self.note(Touch::Vector(ns.to_owned(), id.as_u128()));
         let removed = vector::remove(&self.tx, &mut self.vectors, ns, id)?;
@@ -1251,8 +1644,9 @@ impl WriteTx {
     /// Deletes the node, its edges and its indexed text and embedding, without
     /// keeping history.
     pub fn delete_node(&mut self, ns: &str, id: NodeId) -> Result<()> {
-        // Its edges go too: with `own_only`, each must be the actor's.
-        let node = self.node_to_change(ns, id)?;
+        // Its edges go too: with `own_only`, each must be the actor's, and
+        // each must be one the actor may delete.
+        let node = self.node_to_act(crate::Act::Delete, ns, id)?;
         let mut edges: Vec<EdgeId> = Vec::new();
         for definition in [ADJ_OUT, ADJ_IN] {
             let table = self.tx.open_table(definition).map_err(storage)?;
@@ -1264,6 +1658,23 @@ impl WriteTx {
         }
         edges.sort();
         edges.dedup();
+        // An edge the actor may not see would go with the node: refused,
+        // without naming it (14.4).
+        if let Some(view) = self.view() {
+            for &id in &edges {
+                let visible = match self.edge(ns, id)? {
+                    Some(edge) => view.edge_visible(ns, &edge, |end| self.sees_node(ns, end))?,
+                    None => true,
+                };
+                if !visible {
+                    return Err(Error::Forbidden(format!(
+                        "node {} has edges hidden from {}: it cannot be deleted by it",
+                        node.id,
+                        view.account.as_deref().unwrap_or("the caller")
+                    )));
+                }
+            }
+        }
         for edge in edges {
             self.delete_edge(ns, edge)?;
         }
@@ -1326,6 +1737,8 @@ impl WriteTx {
             recorded_by: self.actor.as_ref().map(|actor| actor.name.clone()),
         };
         let mut edge = edge;
+        let written: Vec<&str> = edge.props.keys().map(String::as_str).collect();
+        self.allow_edge(crate::Act::Create, ns, &edge, &written)?;
         let pending = self.check_edge(ns, &mut edge)?;
         let id = edge.id;
         self.restore_edge(ns, edge.clone())?;
@@ -1355,13 +1768,16 @@ impl WriteTx {
     /// Merges `props` into the edge; a `null` value removes the property.
     pub fn set_edge_props(&mut self, ns: &str, id: EdgeId, props: Props) -> Result<()> {
         let mut edge = self.edge_to_change(ns, id)?;
+        let keys: Vec<String> = props.keys().cloned().collect();
         merge_props(&mut edge.props, props);
+        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+        self.allow_edge(crate::Act::Update, ns, &edge, &keys)?;
         self.put_edge(ns, &edge)
     }
 
     /// The fact stopped being true at `at`: the world changed, not what we know.
     pub fn invalidate_edge(&mut self, ns: &str, id: EdgeId, at: Timestamp) -> Result<()> {
-        let mut edge = self.edge_to_change(ns, id)?;
+        let mut edge = self.edge_to_act(crate::Act::Retract, ns, id)?;
         check_interval(edge.valid_from, Some(at))?;
         edge.valid_to = Some(at);
         self.put_edge(ns, &edge)
@@ -1370,7 +1786,7 @@ impl WriteTx {
     /// The fact was a mistake. It stays in history, visible with
     /// `EdgeFilter::known_at` at an earlier instant.
     pub fn retract_edge(&mut self, ns: &str, id: EdgeId) -> Result<()> {
-        let mut edge = self.edge_to_change(ns, id)?;
+        let mut edge = self.edge_to_act(crate::Act::Retract, ns, id)?;
         if edge.expired_at.is_none() {
             edge.expired_at = Some(Timestamp::now());
             self.put_edge(ns, &edge)?;
@@ -1400,7 +1816,7 @@ impl WriteTx {
 
     /// Deletes the edge without keeping history.
     pub fn delete_edge(&mut self, ns: &str, id: EdgeId) -> Result<()> {
-        let edge = self.edge_to_change(ns, id)?;
+        let edge = self.edge_to_act(crate::Act::Delete, ns, id)?;
         self.note(Touch::Edge(ns.to_owned(), id.as_u128()));
         let (from, to, edge_id) = (edge.from.as_u128(), edge.to.as_u128(), id.as_u128());
         let label = edge.label.as_str();
@@ -1553,6 +1969,25 @@ pub(crate) fn check_interval(from: Option<Timestamp>, to: Option<Timestamp>) -> 
         return Err(Error::Invalid("valid_to must be after valid_from".into()));
     }
     Ok(())
+}
+
+/// The properties that differ between `before` (none: a new record) and
+/// `after`: written, changed or removed.
+fn changed_keys(before: Option<&Props>, after: &Props) -> Vec<String> {
+    let mut keys: Vec<String> = after
+        .iter()
+        .filter(|(key, value)| before.and_then(|b| b.get(*key)) != Some(*value))
+        .map(|(key, _)| key.clone())
+        .collect();
+    if let Some(before) = before {
+        keys.extend(
+            before
+                .keys()
+                .filter(|key| !after.contains_key(*key))
+                .cloned(),
+        );
+    }
+    keys
 }
 
 #[cfg(test)]

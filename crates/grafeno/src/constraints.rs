@@ -194,6 +194,13 @@ impl ReadTx {
 
     /// The earlier values of a functional property of a node, oldest first.
     pub fn property_history(&self, ns: &str, node: NodeId, key: &str) -> Result<Vec<HistoryEntry>> {
+        if let Some(view) = self.view() {
+            // Nothing of a node or a property the view may not see.
+            match self.node(ns, node)? {
+                Some(found) if !view.property_hidden(ns, &found.labels, key) => {}
+                _ => return Ok(Vec::new()),
+            }
+        }
         history_from(self.state_entries(ns, HISTORY, &format!("{node}/{key}/"), usize::MAX)?)
     }
 }

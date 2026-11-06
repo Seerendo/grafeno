@@ -116,6 +116,7 @@ pub fn create(target: &Target, new: NewAccount) -> Result<(), String> {
                 own_only: new.own_only,
                 disabled: false,
                 expires_at: None,
+                attributes: Default::default(),
                 description: None,
                 created_at: Timestamp::now(),
             };

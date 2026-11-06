@@ -70,7 +70,7 @@ fn unauthorized(code: &'static str, message: impl Into<String>) -> ApiError {
 /// leader may still be on its way: it is looked for again for a second.
 pub fn authenticate(state: &AppState, token: &str) -> Result<Caller, ApiError> {
     let db = &state.db;
-    let read_account = |name: &str| -> Result<(Arc<Account>, Arc<grafeno::Rights>), ApiError> {
+    let read_account = |name: &str| -> Result<(Arc<Account>, Arc<grafeno::View>), ApiError> {
         let read = db.begin_read()?;
         let account = read
             .account(name)?
@@ -81,8 +81,8 @@ pub fn authenticate(state: &AppState, token: &str) -> Result<Caller, ApiError> {
         if account.expired(Timestamp::now()) {
             return Err(unauthorized("account_expired", "the account expired"));
         }
-        let rights = state.keys.rights(&read, &account)?;
-        Ok((Arc::new(account), rights))
+        let view = state.keys.view(&read, &account)?;
+        Ok((Arc::new(account), view))
     };
     if let Some((id, secret)) = auth::split_token(token, auth::ACCESS_PREFIX) {
         let mut session = db.begin_read()?.session(id)?;
@@ -111,10 +111,10 @@ pub fn authenticate(state: &AppState, token: &str) -> Result<Caller, ApiError> {
                 "the access token expired: refresh the session",
             ));
         }
-        let (account, rights) = read_account(&session.account)?;
+        let (account, view) = read_account(&session.account)?;
         return Ok(Caller::Account {
             account,
-            rights,
+            view,
             scope: None,
             via: Via::Session(session.id),
         });
@@ -144,10 +144,10 @@ pub fn authenticate(state: &AppState, token: &str) -> Result<Caller, ApiError> {
             format!("the key {name:?} expired"),
         ));
     }
-    let (account, rights) = read_account(&key.account)?;
+    let (account, view) = read_account(&key.account)?;
     Ok(Caller::Account {
         account,
-        rights,
+        view,
         scope: key.scope.clone(),
         via: Via::Key(key.name),
     })
@@ -171,6 +171,8 @@ pub struct AccountOutput {
     disabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     expires_at: Option<Timestamp>,
+    #[serde(skip_serializing_if = "serde_json::Map::is_empty")]
+    attributes: serde_json::Map<String, Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     created_at: Timestamp,
@@ -189,6 +191,7 @@ impl From<&Account> for AccountOutput {
             own_only: account.own_only,
             disabled: account.disabled,
             expires_at: account.expires_at,
+            attributes: account.attributes.clone(),
             description: account.description.clone(),
             created_at: account.created_at,
         }
@@ -355,6 +358,7 @@ pub async fn setup(
         own_only: false,
         disabled: false,
         expires_at: None,
+        attributes: Default::default(),
         description: Some("the first account".into()),
         created_at: Timestamp::now(),
     };
@@ -637,14 +641,14 @@ pub async fn whoami() -> Json<Value> {
         Caller::Anonymous => json!({ "name": "anonymous" }),
         Caller::Account {
             account,
-            rights,
+            view,
             scope,
             via,
         } => {
             let mut value =
                 serde_json::to_value(AccountOutput::from(account.as_ref())).unwrap_or(Value::Null);
             // Every role it has, its own and those they have (14.2).
-            let mut reached = rights.roles.clone();
+            let mut reached = view.rights.roles.clone();
             reached.sort();
             value["effective_roles"] = json!(reached);
             let (kind, name) = match via {
@@ -719,6 +723,7 @@ pub async fn create_account(
         own_only: input.own_only,
         disabled: false,
         expires_at: None,
+        attributes: Default::default(),
         description: input.description.filter(|d| !d.trim().is_empty()),
         created_at: Timestamp::now(),
     };
@@ -755,6 +760,8 @@ pub struct AccountChange {
     superuser: Option<bool>,
     own_only: Option<bool>,
     disabled: Option<bool>,
+    /// What record policies compare with (14.4); replaces them all.
+    attributes: Option<serde_json::Map<String, Value>>,
     /// When it stops working (`null`: never).
     #[serde(default, deserialize_with = "crate::http::double_option")]
     expires_at: Option<Option<crate::api::TimeInput>>,
@@ -816,6 +823,9 @@ pub async fn change_account(
         }
         if let Some(expires_at) = expires_at {
             account.expires_at = expires_at;
+        }
+        if let Some(attributes) = &input.attributes {
+            account.attributes = attributes.clone();
         }
         if let Some(disabled) = input.disabled {
             end |= disabled && !account.disabled;
@@ -1020,6 +1030,7 @@ pub async fn create_key(
         own_only: input.own_only,
         disabled: false,
         expires_at: None,
+        attributes: Default::default(),
         description: key.description.clone(),
         created_at: key.created_at,
     });

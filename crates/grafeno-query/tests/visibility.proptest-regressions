@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 9b5ff3ffe2374a1ac62e1fa328bfb60b1119aa92f6db3aae4563677134c2c4c5 # shrinks to spec = Spec { nodes: [(1, 0, 0, false, false), (1, 0, 0, false, false), (1, 0, 0, false, true)], edges: [(0, 0, false, 0), (0, 0, false, 0), (2, 2, false, 0)], rights: RightsSpec { namespace_read: true, label_grants: 0, label_denials: 2, edge_grants: 0, edge_denials: 0, secret_hidden: 1, policy: 1, red: true, writes: 100 } }
+cc 16ec5623b07cfa95fa10f911d5938832d82252d016c265d05d98fb246bab7c33 # shrinks to spec = Spec { nodes: [(1, 0, 0, false, false), (6, 0, 0, false, false), (1, 0, 0, false, false)], edges: [(1, 2, false, 0)], rights: RightsSpec { namespace_read: true, label_grants: 0, label_denials: 2, edge_grants: 0, edge_denials: 0, secret_hidden: 1, policy: 0, red: true, writes: 102 } }, which = 2
+cc 7c4547433c574a05fac07bdea33fae0c386bfde11a2cf97519d209e104273f81 # shrinks to spec = Spec { nodes: [(6, 0, 0, false, false), (6, 1, 0, false, false), (3, 0, 2, true, true)], edges: [(1, 2, false, 0), (2, 0, false, 0)], rights: RightsSpec { namespace_read: true, label_grants: 5, label_denials: 1, edge_grants: 2, edge_denials: 0, secret_hidden: 3, policy: 0, red: true, writes: 141 } }

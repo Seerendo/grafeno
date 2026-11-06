@@ -140,7 +140,17 @@ impl ReadTx {
     /// Nodes whose name, title, label or alias is `name`, compared
     /// normalized ([`normalize_name`]).
     pub fn find_by_name(&self, ns: &str, name: &str) -> Result<Vec<NodeId>> {
-        find_by_name(&self.names, ns, name)
+        let found = find_by_name(&self.names, ns, name)?;
+        if self.view().is_none() {
+            return Ok(found);
+        }
+        let mut visible = Vec::with_capacity(found.len());
+        for id in found {
+            if self.sees(ns, id)? {
+                visible.push(id);
+            }
+        }
+        Ok(visible)
     }
 }
 
@@ -181,7 +191,7 @@ impl WriteTx {
             return Err(Error::Invalid("importance must be between 0 and 1".into()));
         }
         let node = self.node(ns, id)?.ok_or(Error::NodeNotFound(id))?;
-        self.guard_node(&node)?;
+        self.guard_node_for(crate::Act::Update, ns, &node)?;
         let state = MemoryState {
             importance,
             ..self.memory(ns, &node)?

@@ -82,12 +82,19 @@ pub struct ChangePage {
     /// Changes after `since` were pruned before they could be read: the
     /// follower missed some and should read the graph again.
     pub gap: bool,
+    /// The last sequence number this page read, changes hidden from its
+    /// reader included (14.4): where to continue.
+    #[serde(default)]
+    pub through: u64,
 }
 
 impl ChangePage {
     /// Where to continue: the last change returned, or `since` if none.
     pub fn next(&self, since: u64) -> u64 {
-        self.changes.last().map_or(since, |change| change.seq)
+        self.changes
+            .last()
+            .map_or(since, |change| change.seq)
+            .max(self.through)
     }
 }
 
@@ -378,6 +385,7 @@ fn page(
         }
     }
     Ok(ChangePage {
+        through: changes.last().map_or(since, |change: &Change| change.seq),
         changes,
         last,
         oldest,
@@ -389,7 +397,57 @@ impl ReadTx {
     /// Up to `limit` changes of the namespace after `since` (0 for the
     /// start of what is kept), oldest first.
     pub fn changes(&self, ns: &str, since: u64, limit: usize) -> Result<ChangePage> {
-        page(&self.changes, ns, since, limit)
+        let mut found = page(&self.changes, ns, since, limit)?;
+        let Some(view) = self.view() else {
+            return Ok(found);
+        };
+        if !view.reads(ns) {
+            found.changes.clear();
+            return Ok(found);
+        }
+        if !view.per_record(ns) {
+            return Ok(found);
+        }
+        // A change is seen when its record is, as it is now; a deleted
+        // one by its labels, unless policies (which need the record) apply.
+        let policies = view.has_policies(ns);
+        let mut kept = Vec::with_capacity(found.changes.len());
+        for change in found.changes {
+            let seen = match (change.node, change.edge) {
+                (_, Some(edge)) => match self.edge(ns, edge)? {
+                    Some(_) => true,
+                    None => {
+                        !policies
+                            && view
+                                .rights
+                                .on_labels(crate::Act::Read, ns, &change.labels, true)
+                            && change
+                                .from
+                                .is_none_or(|id| self.sees(ns, id).unwrap_or(false))
+                            && change
+                                .to
+                                .is_none_or(|id| self.sees(ns, id).unwrap_or(false))
+                            && !self.raw_edge_exists(ns, edge)?
+                    }
+                },
+                (Some(node), None) => match self.node(ns, node)? {
+                    Some(_) => true,
+                    None => {
+                        !policies
+                            && !self.raw_node_exists(ns, node)?
+                            && view
+                                .rights
+                                .on_labels(crate::Act::Read, ns, &change.labels, false)
+                    }
+                },
+                (None, None) => true,
+            };
+            if seen {
+                kept.push(change);
+            }
+        }
+        found.changes = kept;
+        Ok(found)
     }
 }
 

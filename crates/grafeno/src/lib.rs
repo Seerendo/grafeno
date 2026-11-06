@@ -38,6 +38,8 @@ mod planstats;
 mod replication;
 mod resolve;
 mod rights;
+mod view;
+pub use view::View;
 mod state;
 mod stats;
 mod store;
@@ -72,8 +74,8 @@ pub use planstats::{BUCKETS, COMMON_VALUES, EdgeLabelStats, IndexStats, PlannerS
 pub use replication::{Bulk, ENTRY_FORMAT, Entry, FENCE, LogPosition, Op};
 pub use resolve::{Decision, FieldRule, FieldScore, Match, MatchRule, Probe, SCAN_LIMIT, score};
 pub use rights::{
-    Act, BUILT_IN_ROLES, Holder, Object, PUBLIC, Privilege, Revoke, Rights, RoleDef,
-    check_role_name, level_actions, level_name, level_of,
+    Act, Applies, BUILT_IN_ROLES, Condition, Holder, Object, PUBLIC, Policy, PolicyValue,
+    Privilege, Revoke, Rights, RoleDef, check_role_name, level_actions, level_name, level_of,
 };
 pub use stats::{NamespaceInfo, NamespaceStats};
 pub use text::tokenize;
