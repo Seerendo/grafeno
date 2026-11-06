@@ -89,7 +89,7 @@ comunidades y similitud. Consulta la [referencia de GQ](docs/query-language.md).
 | Forma de acceso | Punto de entrada |
 | --- | --- |
 | Escritorio local o conexión a un servidor | [Aplicación Tauri](apps/desktop/README.md) |
-| Servicio HTTP, servidor MCP y consola | [Servidor Grafeno](crates/grafeno-server/README.md) |
+| Servicio HTTP, servidor MCP y consola | [Servidor Grafeno](crates/grafeno-server/README.es.md) |
 | Aplicaciones JavaScript y TypeScript | [Cliente TypeScript](clients/typescript/README.md) |
 | Biblioteca Rust embebida | [`grafeno`](crates/grafeno/src/lib.rs) y [`grafeno-memory`](crates/grafeno-memory/src/lib.rs) |
 
