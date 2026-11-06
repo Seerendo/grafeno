@@ -190,6 +190,7 @@ pub fn need(method: &str, path: &str) -> Need {
                     | ["read-many"]
                     | ["path"]
                     | ["subgraph"]
+                    | ["neighborhoods"]
                     | ["search", ..]
                     | ["recall"]
                     | ["context"]

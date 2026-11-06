@@ -266,3 +266,17 @@ test("lectura por lotes conserva orden, texto, aristas y ausentes", async () => 
   assert.deepEqual(foreign, { nodes: [null], edges: [null] });
   await assert.rejects(lab.readMany({ nodes: Array(513).fill(a.id) }), (error: unknown) => error instanceof GrafenoError && error.status === 400);
 });
+
+test("vecindarios por lotes equivalen a las expansiones individuales", async () => {
+  const lab = new Grafeno({ url, token }).namespace("vecindarios");
+  const a = await lab.createNode({ labels: ["Person"] });
+  const b = await lab.createNode({ labels: ["Person"] });
+  await lab.createEdge({ from: a.id, to: b.id, label: "knows", valid_from: "2020-01-01", valid_to: "2027-01-01" });
+  const seeds = [a.id, b.id, a.id];
+  for (const valid_at of ["2026-06-01", "2030-01-01"]) {
+    const filter = { valid_at };
+    const expected = await Promise.all(seeds.map(id => lab.subgraph([id], { depth: 1, filter })));
+    assert.deepEqual(await lab.neighborhoods(seeds, { filter }), expected);
+  }
+  await assert.rejects(lab.neighborhoods(Array(9).fill(a.id)), (error: unknown) => error instanceof GrafenoError && error.status === 400);
+});

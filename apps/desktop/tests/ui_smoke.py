@@ -281,6 +281,90 @@ def scenario(window, files, artifacts):
     assert records["nodes"][1] is None and records["nodes"][0] == records["nodes"][2], records
     assert records["edges"][0]["id"] == edge and records["edges"][1] is None, records
     checks.append("Leer varios nodos y aristas por Tauri conservando orden, duplicados y ausentes.")
+    deleted = window.invoke("request", {"method": "DELETE", "url": session["url"] + "/v1/default/edges/" + edge, "headers": {}})
+    assert deleted["status"] == 204, deleted
+    ops = [{"op": "create_node", "ref": f"$n{i}", "node": {"labels": ["Note"], "props": {"name": f"Nodo {i + 1:02d}"}}} for i in range(17)]
+    ring = [node] + [f"$n{i}" for i in range(17)]
+    ops += [{"op": "create_edge", "edge": {"from": source, "to": ring[(i + 1) % len(ring)], "label": "next", "valid_from": "2026-01-01", "valid_to": "2027-01-01"}} for i, source in enumerate(ring)]
+    fixture = window.invoke("request", {"method": "POST", "url": session["url"] + "/v1/default/batch", "headers": {"content-type": "application/json"}, "body": json.dumps({"ops": ops})})
+    assert fixture["status"] == 200, fixture
+    traced = window.promise("""
+        const original = window.fetch;
+        const trace = { batches: [], individual: 0, pending: [], hold: null, original };
+        const wrapped = function(input, init) {
+            const address = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+            const transport = new URL(address, window.location.href);
+            const ipc = transport.protocol === 'ipc:' || transport.hostname === 'ipc.localhost';
+            const args = ipc && transport.pathname === '/request' ? JSON.parse(init.body) : null;
+            const url = args ? new URL(args.url) : null;
+            const grouped = url?.pathname.endsWith('/neighborhoods');
+            const listed = url?.pathname.endsWith('/nodes') && url.searchParams.get('limit') === '60';
+            if (grouped) {
+                const body = args.bodyBase64 == null ? args.body : atob(args.bodyBase64);
+                trace.batches.push(JSON.parse(body).seeds.length);
+            }
+            if (url?.pathname.endsWith('/subgraph')) trace.individual++;
+            const reply = original.call(window, input, init);
+            if ((grouped && trace.hold === 'neighborhoods') || (listed && trace.hold === 'list')) {
+                return Promise.resolve(reply).then(value => new Promise(resolve => trace.pending.push(() => resolve(value))));
+            }
+            return reply;
+        };
+        window.fetch = wrapped;
+        if (window.fetch !== wrapped) throw new Error('No se pudo aislar el transporte de la prueba de grafo');
+        window.__grafenoGraphSmoke = trace;
+    """)
+    assert traced["ok"], traced
+    window.click('a.nav-item[href="#/graph"]')
+    window.wait(lambda: window.exists('.graph[aria-busy="false"]'), "abrir la vista de grafo")
+    show_all = '.graph-toolbar button[title="Draw the first 60 nodes and their facts"]'
+    clear_graph = '.graph-controls button[title="Clear the canvas"]'
+    window.click(show_all)
+    window.wait(lambda: window.exists('.graph[aria-busy="false"]') and "18 nodes" in window.text('.canvas-status') and "18 facts" in window.text('.canvas-status'), "mostrar 18 raíces y sus aristas")
+    assert window.read_dom('return window.__grafenoGraphSmoke.batches;') == [8, 8, 2]
+    assert window.read_dom('return window.__grafenoGraphSmoke.individual;') == 0
+    window.capture(artifacts, "08-grafo-por-lotes")
+    checks.append("Expandir 18 raíces en tres llamadas de 8, 8 y 2 sin peticiones individuales.")
+
+    def set_graph_date(value):
+        changed = window.promise("""
+            const input = document.querySelector('.graph-toolbar input[type="date"]');
+            Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, arguments[0]);
+            input.dispatchEvent(new Event('input', {bubbles: true}));
+            input.dispatchEvent(new Event('change', {bubbles: true}));
+        """, value)
+        assert changed["ok"], changed
+
+    set_graph_date("2030-01-01")
+    window.wait(lambda: window.exists('.graph[aria-busy="false"]') and "18 nodes" in window.text('.canvas-status') and "0 facts" in window.text('.canvas-status'), "aplicar el filtro temporal a todos los vecindarios")
+    assert window.read_dom('return window.__grafenoGraphSmoke.batches;') == [8, 8, 2, 8, 8, 2]
+    window.capture(artifacts, "09-grafo-filtrado")
+    checks.append("Conservar las raíces y filtrar las aristas según la fecha elegida.")
+
+    window.promise("window.__grafenoGraphSmoke.hold = 'neighborhoods';")
+    set_graph_date("2026-06-01")
+    window.wait(lambda: window.read_dom('return window.__grafenoGraphSmoke.pending.length;') > 0, "retener una respuesta antigua de expansión")
+    sent = len(window.read_dom('return window.__grafenoGraphSmoke.batches;'))
+    window.click(clear_graph)
+    window.wait(lambda: window.exists('.graph[aria-busy="false"]') and "0 nodes" in window.text('.canvas-status'), "limpiar mientras hay una expansión pendiente")
+    window.promise("const trace = window.__grafenoGraphSmoke; trace.hold = null; trace.pending.splice(0).forEach(finish => finish());")
+    window.capture(artifacts, "10-grafo-limpio")
+    assert "0 nodes" in window.text('.canvas-status') and "0 facts" in window.text('.canvas-status')
+    assert len(window.read_dom('return window.__grafenoGraphSmoke.batches;')) == sent
+    assert not window.exists('.canvas-error')
+    checks.append("Descartar una expansión antigua tras limpiar y evitar que envíe más lotes.")
+
+    window.promise("window.__grafenoGraphSmoke.hold = 'list';")
+    window.click(show_all)
+    window.wait(lambda: window.read_dom('return window.__grafenoGraphSmoke.pending.length;') > 0, "retener la lista inicial de Show all")
+    window.click(clear_graph)
+    window.promise("const trace = window.__grafenoGraphSmoke; trace.hold = null; trace.pending.splice(0).forEach(finish => finish());")
+    settled = window.promise("await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));")
+    assert settled["ok"], settled
+    assert "0 nodes" in window.text('.canvas-status')
+    assert len(window.read_dom('return window.__grafenoGraphSmoke.batches;')) == sent
+    window.promise("window.fetch = window.__grafenoGraphSmoke.original; delete window.__grafenoGraphSmoke;")
+    checks.append("No repoblar el lienzo con una lista de Show all recibida después de limpiar.")
     for check in checks:
         print(f"OK: {check}", flush=True)
     return checks

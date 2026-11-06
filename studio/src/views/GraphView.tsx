@@ -4,12 +4,11 @@ import { type Edge, type Node, describeError, displayName, formatTime, labelColo
 import { NodeDetail } from "../components/NodeDetail.tsx";
 import { useStudio } from "../context.ts";
 import { type EdgeInput, GraphEngine, type NodeInput, type Target } from "../graph/engine.ts";
+import { loadExpandedGraph } from "../graph/expansion.ts";
 import { cssVar, enginePalette, useThemeVersion } from "../graph/theme.ts";
 import { Icon, type IconName } from "../icons.tsx";
 import { useTask } from "../ui.tsx";
 
-/** Nodes added at most per expansion, so a hub does not flood the view. */
-const MAX_NEW = 150;
 /** Radius of a node, and of one whose neighbors are shown. */
 const SIZE = 11;
 const SIZE_EXPANDED = 13;
@@ -59,6 +58,7 @@ export function GraphView({ seed }: { seed?: string }) {
   const minimap = useRef<HTMLCanvasElement>(null);
   const toolbar = useRef<HTMLDivElement>(null);
   const engine = useRef<GraphEngine | null>(null);
+  const rootRequest = useRef(0);
   const [expanded, setExpanded] = useState<string[]>(seed ? [seed] : []);
   const [nodes, setNodes] = useState(new Map<string, Node>());
   const [edges, setEdges] = useState(new Map<string, Edge>());
@@ -69,6 +69,7 @@ export function GraphView({ seed }: { seed?: string }) {
   const [menu, setMenu] = useState<Menu | null>(null);
   const [search, setSearch] = useState("");
   const [validAt, setValidAt] = useState("");
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [colorBy, setColorBy] = useState<ColorBy>("label");
   const [sizeBy, setSizeBy] = useState<SizeBy>("none");
@@ -78,7 +79,12 @@ export function GraphView({ seed }: { seed?: string }) {
   const { busy, run } = useTask();
   const theme = useThemeVersion();
 
-  const expand = useCallback((id: string) => setExpanded((current) => (current.includes(id) ? current : [...current, id])), []);
+  const expand = useCallback((id: string) => {
+    rootRequest.current++;
+    setExpanded((current) => (current.includes(id) ? current : [...current, id]));
+  }, []);
+
+  useEffect(() => () => { rootRequest.current++; }, [client, namespace]);
   const names = useMemo(() => new Map([...nodes.values()].map((node) => [node.id, displayName(node)])), [nodes]);
   const nameOf = (id: string) => names.get(id) ?? id;
 
@@ -149,34 +155,27 @@ export function GraphView({ seed }: { seed?: string }) {
     return () => observer.disconnect();
   }, [inspectorOpen]);
 
-  // Fetch the neighborhood of every expanded node, as of `validAt`.
-  const fetchGraph = useCallback(async () => {
-    try {
-      const filter = validAt ? { valid_at: validAt } : undefined;
-      const found = new Map<string, Node>();
-      const facts = new Map<string, Edge>();
-      for (const id of expanded) {
-        const around = await client.namespace(namespace).subgraph([id], { depth: 1, filter });
-        let added = 0;
-        for (const node of around.nodes) {
-          if (!found.has(node.id) && (added < MAX_NEW || node.id === id)) {
-            found.set(node.id, node);
-            added += 1;
-          }
-        }
-        for (const edge of around.edges) facts.set(edge.id, edge);
-      }
-      setNodes(found);
-      setEdges(facts);
-      setError(null);
-    } catch (problem) {
-      setError(describeError(problem));
-    }
-  }, [client, namespace, expanded, validAt]);
-
+  // Una expansión nueva invalida la anterior, también al limpiar o cambiar filtros.
   useEffect(() => {
-    void fetchGraph();
-  }, [fetchGraph, revision]);
+    const controller = new AbortController();
+    const { signal } = controller;
+    setLoading(true);
+    const filter = validAt ? { valid_at: validAt } : undefined;
+    void loadExpandedGraph(client.namespace(namespace), expanded, filter, signal)
+      .then((result) => {
+        if (signal.aborted) return;
+        setNodes(result.nodes);
+        setEdges(result.edges);
+        setError(null);
+      })
+      .catch((problem) => {
+        if (!signal.aborted) setError(describeError(problem));
+      })
+      .finally(() => {
+        if (!signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [client, namespace, expanded, validAt, revision]);
 
   // Run the chosen algorithms on the whole namespace (again after changes).
   useEffect(() => {
@@ -284,6 +283,7 @@ export function GraphView({ seed }: { seed?: string }) {
   const addFromSearch = async () => {
     const query = search.trim();
     if (!query) return;
+    const request = ++rootRequest.current;
     try {
       if (/^[0-9a-f-]{36}$/i.test(query)) {
         expand(query);
@@ -302,7 +302,9 @@ export function GraphView({ seed }: { seed?: string }) {
         "MATCH (n) WHERE toLower(coalesce(n.name, n.title, n.label, '')) CONTAINS toLower($q) RETURN n.@id LIMIT 5",
         { q: query },
       );
+      if (request !== rootRequest.current) return;
       const hits = await graph.searchText(query, 5);
+      if (request !== rootRequest.current) return;
       const ids = [...new Set([...(byName.rows as string[][]).map((row) => row[0]), ...hits.map((hit) => hit.node)])];
       if (ids.length === 0) {
         setError(`Nothing is named or says “${query}”.`);
@@ -311,18 +313,26 @@ export function GraphView({ seed }: { seed?: string }) {
       setExpanded((current) => [...new Set([...current, ...ids])]);
       setSearch("");
     } catch (problem) {
-      setError(describeError(problem));
+      if (request === rootRequest.current) setError(describeError(problem));
     }
   };
 
-  const showAll = () =>
-    run(async () => {
-      const page = await client.namespace(namespace).listNodes({ limit: 60 });
-      setHidden(new Set());
-      setExpanded(page.items.map((node) => node.id));
+  const showAll = () => {
+    const request = ++rootRequest.current;
+    return run(async () => {
+      try {
+        const page = await client.namespace(namespace).listNodes({ limit: 60 });
+        if (request !== rootRequest.current) return;
+        setHidden(new Set());
+        setExpanded(page.items.map((node) => node.id));
+      } catch (problem) {
+        if (request === rootRequest.current) throw problem;
+      }
     });
+  };
 
   const clear = () => {
+    rootRequest.current++;
     setExpanded([]);
     setHidden(new Set());
     setCollapsed(new Set());
@@ -332,6 +342,7 @@ export function GraphView({ seed }: { seed?: string }) {
   };
 
   const hide = (ids: string[]) => {
+    rootRequest.current++;
     setHidden((current) => new Set([...current, ...ids.filter((id) => !id.startsWith(CLUSTER))]));
     setSelected([]);
     engine.current?.select([]);
@@ -355,6 +366,7 @@ export function GraphView({ seed }: { seed?: string }) {
       danger: true,
     });
     if (!ok) return;
+    rootRequest.current++;
     await run(async () => {
       const graph = client.namespace(namespace);
       for (const id of real) await graph.deleteNode(id);
@@ -430,7 +442,7 @@ export function GraphView({ seed }: { seed?: string }) {
       if (ids.length > 1) {
         return [
           { icon: "fit", label: `Frame these ${ids.length} nodes`, hint: "F", run: () => e?.fit(true, ids) },
-          { icon: "expand", label: "Expand all of them", run: () => setExpanded((c) => [...new Set([...c, ...ids])]) },
+          { icon: "expand", label: "Expand all of them", run: () => { rootRequest.current++; setExpanded((c) => [...new Set([...c, ...ids])]); } },
           { icon: "pin", label: pinned ? "Unpin them" : "Pin them", hint: "P", run: () => e?.pin(ids, !pinned) },
           { icon: "eyeOff", label: "Hide them", hint: "H", run: () => hide(ids) },
           "sep",
@@ -486,7 +498,7 @@ export function GraphView({ seed }: { seed?: string }) {
   const visible = drawn.nodes.length;
 
   return (
-    <div className="graph" ref={host} tabIndex={-1} onKeyDown={onKey}>
+    <div className="graph" aria-busy={loading} ref={host} tabIndex={-1} onKeyDown={onKey}>
       <div className="canvas">
         <canvas className="graph-canvas" ref={canvas} aria-label="Graph canvas" />
       </div>

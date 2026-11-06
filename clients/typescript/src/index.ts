@@ -825,6 +825,14 @@ export class Namespace {
     return this.#call("POST", "/subgraph", { seeds, ...options });
   }
 
+  /** Vecindarios de profundidad uno para hasta ocho raíces, en una instantánea. */
+  neighborhoods(
+    seeds: Id[],
+    options: { direction?: Direction; filter?: EdgeFilter } = {},
+  ): Promise<Subgraph[]> {
+    return this.#call("POST", "/neighborhoods", { seeds, ...options });
+  }
+
   // Retrieval
 
   searchText(query: string, limit = 10): Promise<Hit[]> {

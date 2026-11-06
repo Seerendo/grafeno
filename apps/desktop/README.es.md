@@ -188,3 +188,8 @@ Tauri, lo recupera y comprueba los datos en la base resultante.
 La API de [lecturas por lotes](../../docs/lecturas-por-lotes.md) también funciona
 por el puente local. La prueba de ventana comprueba nodos, aristas, duplicados
 y ausentes en una llamada `read-many`.
+
+La [expansión visual](../../docs/expansion-grafo.md) agrupa ocho vecindarios por
+solicitud y descarta cargas antiguas. La prueba nativa cuenta las llamadas al
+abrir 18 raíces, aplica una fecha y verifica que limpiar no repueble el lienzo
+con respuestas pendientes, incluida la lista inicial de “Show all”.

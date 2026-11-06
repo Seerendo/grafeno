@@ -144,6 +144,7 @@ La revisión visual manual y los instaladores requieren comprobaciones adicional
 - [Diseño y decisiones](DESIGN.md): arquitectura, almacenamiento y semántica temporal.
 - [Rendimiento](docs/performance.md) y [benchmarks](docs/benchmarks.md): métodos, datos y límites de las mediciones del proyecto.
 - [Lecturas por lotes: contrato, pruebas y medición reproducible](docs/lecturas-por-lotes.md).
+- [Expansión del grafo](docs/expansion-grafo.md): vecindarios por lotes y protección ante respuestas tardías.
 - [Historial de desarrollo](docs/development-history.md): detalle de las fases documentadas originalmente.
 
 Los embeddings los proporciona el cliente. El presupuesto de contexto utiliza

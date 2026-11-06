@@ -196,3 +196,8 @@ and checks the resulting database contents.
 The [batched read API](../../docs/read-many.md) also works through the local
 bridge. The window test checks nodes, edges, duplicates and missing records
 in one `read-many` request.
+
+[Visual expansion](../../docs/graph-expansion.md) groups eight neighborhoods per
+request and discards obsolete loads. The native test counts calls for 18 roots,
+applies a date and verifies that clearing is not undone by pending replies,
+including the initial “Show all” list.

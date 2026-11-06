@@ -71,7 +71,47 @@ try {
       results.push({ nodes: count, edges: count, method: method.name, requests: method.requests, median_ms: (sorted[Math.floor((sorted.length - 1) / 2)] + sorted[Math.floor(sorted.length / 2)]) / 2, p95_ms: sorted[Math.ceil(sorted.length * 0.95) - 1] });
     }
   }
-  console.log(JSON.stringify({ date: new Date().toISOString(), node: process.version, platform: `${process.platform}/${process.arch}`, cpu: cpus()[0]?.model, logical_cpus: cpus().length, rounds, warmup: 3, environment: 'HTTP loopback; servidor en memoria; binario seleccionado por GRAFENO_BIN; sin Tauri ni disco', results }, null, 2));
+  const neighborhoodResults = [];
+  for (const count of [8, 18, 60]) {
+    const seeds = nodes.slice(0, count);
+    const individual = async concurrency => {
+      let cursor = 0;
+      const values = Array(seeds.length);
+      await Promise.all(Array.from({ length: Math.min(concurrency, seeds.length) }, async () => {
+        while (cursor < seeds.length) {
+          const position = cursor++;
+          values[position] = await lab.subgraph([seeds[position]], { depth: 1 });
+        }
+      }));
+      return values;
+    };
+    const methods = [
+      { name: 'secuencial', requests: count, run: () => individual(1) },
+      { name: 'paralelo_4', requests: count, run: () => individual(4) },
+      { name: 'lotes_8', requests: Math.ceil(count / 8), run: async () => {
+        const graphs = [];
+        for (let start = 0; start < count; start += 8) graphs.push(...await lab.neighborhoods(seeds.slice(start, start + 8)));
+        return graphs;
+      } },
+    ];
+    const expected = await individual(1);
+    const timings = methods.map(() => []);
+    for (let round = -3; round < rounds; round++) {
+      for (let offset = 0; offset < methods.length; offset++) {
+        const index = (round + 3 + offset) % methods.length;
+        const start = performance.now();
+        const actual = await methods[index].run();
+        const elapsed = performance.now() - start;
+        assert.deepEqual(actual, expected, `${methods[index].name}: vecindarios distintos`);
+        if (round >= 0) timings[index].push(elapsed);
+      }
+    }
+    for (const [index, method] of methods.entries()) {
+      const sorted = timings[index].sort((a, b) => a - b);
+      neighborhoodResults.push({ roots: count, method: method.name, requests: method.requests, median_ms: (sorted[Math.floor((sorted.length - 1) / 2)] + sorted[Math.floor(sorted.length / 2)]) / 2, p95_ms: sorted[Math.ceil(sorted.length * 0.95) - 1] });
+    }
+  }
+  console.log(JSON.stringify({ date: new Date().toISOString(), node: process.version, platform: `${process.platform}/${process.arch}`, cpu: cpus()[0]?.model, logical_cpus: cpus().length, rounds, warmup: 3, environment: 'HTTP loopback; servidor en memoria; binario seleccionado por GRAFENO_BIN; sin Tauri ni disco', results, neighborhoods: neighborhoodResults }, null, 2));
 } finally {
   if (server.pid && server.exitCode === null && server.signalCode === null) {
     server.kill();

@@ -76,10 +76,9 @@ comparación del benchmark. Primero conviene reducir cruces entre UI y motor;
 el paralelismo interno necesita mediciones propias con carga, datos en disco y
 límites de memoria antes de incorporarse.
 
-Studio sigue utilizando sus recorridos actuales. Su expansión de grafo solicita
-vecindarios uno a uno; integrar lotes de vecindarios requiere conservar filtros,
-límites por raíz y descartar respuestas antiguas. No se cambia ese comportamiento
-en esta entrega de API y medición.
+Studio agrupa ahora los vecindarios de su expansión mediante otra operación,
+`neighborhoods`. Esa carga de trabajo difiere de `read-many`; consulta la
+[guía de expansión del grafo](expansion-grafo.md) para su contrato y medición.
 
 ## Pruebas
 

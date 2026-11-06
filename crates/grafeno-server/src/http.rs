@@ -196,6 +196,7 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/{ns}/k-hop", post(k_hop))
         .route("/{ns}/path", post(path))
         .route("/{ns}/subgraph", post(subgraph))
+        .route("/{ns}/neighborhoods", post(neighborhoods))
         .route("/{ns}/search/text", post(search_text))
         .route("/{ns}/search/vector", post(search_vector))
         .route("/{ns}/recall", post(recall_handler))
@@ -1074,6 +1075,40 @@ async fn subgraph(
     })
     .await?;
     Ok(Json(subgraph))
+}
+
+/// Vecindarios separados de profundidad uno, en el orden de las raíces.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NeighborhoodsInput {
+    seeds: Vec<NodeId>,
+    #[serde(default)]
+    direction: Direction,
+    #[serde(default)]
+    filter: FilterInput,
+}
+
+async fn neighborhoods(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Body(input): Body<NeighborhoodsInput>,
+) -> ApiResult<Json<Vec<grafeno::Subgraph>>> {
+    if input.seeds.len() > 8 {
+        return Err(ApiError::bad_request(
+            "neighborhoods accepts at most 8 roots",
+        ));
+    }
+    let filter = input.filter.resolve()?;
+    let result = blocking(&state, move |db| {
+        let read = db.begin_read()?;
+        input
+            .seeds
+            .iter()
+            .map(|&seed| read.subgraph(&ns, &[seed], 1, input.direction, &filter))
+            .collect::<grafeno::Result<Vec<_>>>()
+    })
+    .await?;
+    Ok(Json(result))
 }
 
 #[derive(Deserialize)]

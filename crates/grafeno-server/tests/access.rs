@@ -105,6 +105,12 @@ fn routes(
         ("GET", p("stats"), None, false),
         (
             "POST",
+            p("neighborhoods"),
+            Some(json!({"seeds":[node,other]})),
+            false,
+        ),
+        (
+            "POST",
             p("read-many"),
             Some(json!({"nodes":[node,other],"edges":[edge]})),
             false,

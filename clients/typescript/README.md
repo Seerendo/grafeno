@@ -56,3 +56,16 @@ records are `null`; nodes include the same text and memory fields as `getNode`.
 The server accepts at most 512 IDs across both lists and requires read access to
 that namespace. This is a read operation, separate from the writing `batch` API.
 See the [method and measurements](../../docs/read-many.md) or [Español](../../docs/lecturas-por-lotes.md).
+
+## Expand neighborhoods together
+
+```ts
+const around = await vault.neighborhoods([noteId, otherId], {
+  filter: { valid_at: "2026-06-01" },
+});
+```
+
+Up to eight roots return separate depth-one subgraphs in their original order,
+using one snapshot. A missing root fails the batch, matching `subgraph`.
+Studio uses this operation for graph expansion. See [English](../../docs/graph-expansion.md)
+or [Español](../../docs/expansion-grafo.md) for compatibility and measurements.

@@ -73,10 +73,9 @@ pool for each batch. Concurrency eight is a benchmark comparison strategy.
 Reducing UI-to-engine crossings comes first; internal parallelism needs separate
 measurements under load, on disk and with memory bounds before adoption.
 
-Studio keeps its existing traversal behavior. Graph expansion currently requests
-neighborhoods one by one; integrating neighborhood batches must preserve filters,
-per-root limits and protection from stale replies. This API and measurement
-change does not alter that view.
+Studio now batches expansion neighborhoods through a separate operation,
+`neighborhoods`. That workload differs from `read-many`; see the
+[graph expansion guide](graph-expansion.md) for its contract and measurement.
 
 ## Tests
 

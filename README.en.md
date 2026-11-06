@@ -143,6 +143,7 @@ visual review and installers need additional checks.
 - [Design and decisions](DESIGN.md): architecture, storage and temporal semantics.
 - [Performance](docs/performance.md) and [benchmarks](docs/benchmarks.md): methods, data and limits of project measurements.
 - [Batched reads: contract, tests and reproducible measurements](docs/read-many.md).
+- [Graph expansion](docs/graph-expansion.md): batched neighborhoods and protection from stale replies.
 - [Development history](docs/development-history.md): the originally documented phases in detail.
 
 Embeddings are provided by the client. Context uses an estimated token count by
