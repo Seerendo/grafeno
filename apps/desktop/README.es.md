@@ -114,3 +114,42 @@ pruebas de transporte pueden ejecutarse sin Tauri:
 ```bash
 python3 -m unittest discover -s apps/desktop/tests -p 'test_*.py'
 ```
+
+## Copias de seguridad y recuperación
+
+Para crear una copia local, entra en **Administration → Back up the database**
+y elige un nombre nuevo. La copia incluye todos los namespaces y las claves de
+acceso, y usa una instantánea consistente mientras continúan las escrituras.
+Si cambias de base durante el diálogo, la operación se rechaza en lugar de
+copiar otra base.
+
+Para recuperar, cierra la base y pulsa **Recuperar una copia…** en el inicio.
+Selecciona un respaldo terminado y un destino nuevo. La aplicación copia el
+respaldo a un temporal propio, verifica checksums y comprueba la integridad de
+cada namespace antes de publicar el archivo. Después abre la base recuperada.
+La copia original se lee sin modificarla; una validación fallida no cambia la
+sesión. Si la apertura posterior falla, el archivo recuperado permanece disponible.
+
+Ni copiar ni recuperar sobrescribe archivos existentes, directorios o enlaces,
+incluso si el diálogo del sistema ofrece reemplazarlos: elige otro nombre.
+Los temporales tienen nombres únicos junto al destino y se limpian ante errores
+normales. No se eliminan antiguos archivos `.partial`. Una interrupción del
+proceso o del sistema puede dejar un temporal que debe revisarse por separado.
+Utiliza respaldos terminados, no archivos de bases que otro proceso esté escribiendo.
+Si la verificación informa que necesitó reparar la copia, se rechaza su publicación.
+
+En Rust, `Grafeno::restore_backup(source, destination)` realiza la misma
+recuperación sin abrir ni reemplazar una sesión. La API de respaldo del motor
+conserva su política de no sobrescribir; ahora también evita colisiones entre
+temporales y protege destinos creados durante la copia.
+
+```bash
+cargo test --locked -p grafeno --test backup
+cargo test --locked -p grafeno --lib backup::tests
+cargo test --locked -p grafeno-desktop local_database::tests
+```
+
+La prueba de ventana también crea una copia, rechaza destinos existentes y una
+sesión caducada, intenta recuperar un archivo inválido y abre una recuperación
+válida conservando los datos. Los selectores nativos siguen pendientes de prueba
+manual.

@@ -214,6 +214,37 @@ def scenario(window, files, artifacts):
     assert not window.exists("main .error"), "la vista reabierta muestra un error anterior"
     window.capture(artifacts, "05-base-reabierta")
     checks.append("Cerrar y reabrir desde recientes conservando los datos confirmados.")
+    backup = files / "respaldo completo.redb"
+    restored = files / "memoria recuperada.redb"
+    current = window.invoke("session")
+    assert window.invoke("backup_database", {"path": str(backup), "sessionUrl": current["url"]}) > 0
+    original = backup.read_bytes()
+    for destination in [first, backup]:
+        refused = window.promise("return await window.__TAURI__.core.invoke('backup_database', arguments[0]);", {
+            "path": str(destination), "sessionUrl": current["url"],
+        })
+        assert not refused["ok"] and "exists already" in refused["error"], refused
+    stale_backup = files / "no debe crearse.redb"
+    refused = window.promise("return await window.__TAURI__.core.invoke('backup_database', arguments[0]);", {
+        "path": str(stale_backup), "sessionUrl": first_session["url"],
+    })
+    assert not refused["ok"] and "session changed" in refused["error"], refused
+    assert not stale_backup.exists()
+    failed_restore = window.promise("return await window.__TAURI__.core.invoke('restore_database', arguments[0]);", {
+        "source": str(invalid), "path": str(restored),
+    })
+    assert not failed_restore["ok"], failed_restore
+    assert not restored.exists()
+    assert window.invoke("session")["url"] == current["url"]
+    assert window.read_query("MATCH (p:Person) RETURN p.name") == [["Ana de prueba"]]
+    assert window.invoke("restore_database", {"source": str(backup), "path": str(restored)}) > 0
+    assert window.invoke("session")["url"] == current["url"]
+    assert backup.read_bytes() == original
+    window.open_file(restored)
+    assert window.read_query("MATCH (p:Person) RETURN p.name") == [["Ana de prueba"]]
+    window.wait(lambda: window.text("main .cards .card:first-child .value") == "1", "mostrar la base recuperada")
+    window.capture(artifacts, "06-copia-recuperada")
+    checks.append("Copiar y recuperar sin sobrescribir la base activa ni el respaldo, conservando los datos.")
     for check in checks:
         print(f"OK: {check}", flush=True)
     return checks

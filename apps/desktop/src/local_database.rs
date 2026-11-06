@@ -99,6 +99,15 @@ pub(super) fn open_session(
     Ok(reply)
 }
 
+/// Captura la base que el usuario eligió antes de abrir el diálogo de copia.
+pub(super) fn backup_target(current: Option<&Session>, url: &str) -> Result<Arc<Grafeno>, String> {
+    let session = current.ok_or("no database is open")?;
+    if info(session).url != url {
+        return Err("database session changed; reopen the database before retrying".into());
+    }
+    Ok(session.db.clone())
+}
+
 /// Solo el origen interno exacto se resuelve dentro del proceso.
 pub(super) fn local_path(url: &str) -> Option<&str> {
     url.strip_prefix(LOCAL_URL)
@@ -158,6 +167,31 @@ mod tests {
             .db
             .write(|tx| tx.create_node("lab", NewNode::new("Person").prop("name", name)))
             .unwrap()
+    }
+
+    #[test]
+    fn backup_captures_the_selected_session_and_rejects_stale_dialogs() {
+        let files = Files::new();
+        let mut current = None;
+        let first = open_session(&mut current, files.path("primera.redb")).unwrap();
+        let ana = insert(current.as_ref().unwrap(), "Ana");
+        let captured = backup_target(current.as_ref(), &first.url).unwrap();
+        open_session(&mut current, files.path("segunda.redb")).unwrap();
+        insert(current.as_ref().unwrap(), "Bob");
+        assert!(backup_target(current.as_ref(), &first.url).is_err());
+        assert!(backup_target(None, &first.url).is_err());
+        let path = files.path("copia.redb");
+        captured.begin_read().unwrap().backup(&path).unwrap();
+        let copy = Grafeno::open(path).unwrap();
+        assert_eq!(
+            copy.begin_read()
+                .unwrap()
+                .node("lab", ana)
+                .unwrap()
+                .unwrap()
+                .props["name"],
+            "Ana"
+        );
     }
 
     #[test]

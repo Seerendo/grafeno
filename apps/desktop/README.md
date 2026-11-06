@@ -126,3 +126,40 @@ without Tauri:
 ```bash
 python3 -m unittest discover -s apps/desktop/tests -p 'test_*.py'
 ```
+
+## Backups and recovery
+
+To create a local backup, open **Administration → Back up the database** and
+choose a new filename. It includes every namespace and access key, using a
+consistent snapshot while writes continue. If you switch databases while the
+save dialog is open, the operation fails instead of backing up another database.
+
+To recover, close the database and choose **Recuperar una copia…** on the start
+screen. Select a completed backup and a new destination. The app copies it to
+its own temporary file, verifies checksums and checks every namespace before
+publishing the recovered database. It then opens that database. The original
+backup is read without modification; failed validation leaves the session alone.
+If the subsequent open fails, the recovered file remains available.
+
+Backup and recovery never replace existing files, directories or links, even
+if the system dialog offers to replace them: choose another name. Each operation
+owns a unique temporary file beside its destination and cleans it up on ordinary
+errors. Existing `.partial` files are left alone. A process or system interruption
+may leave a temporary file requiring separate inspection. Use completed backups,
+not live database files being written by another process. If verification reports
+that it repaired the copy, publication is rejected.
+
+In Rust, `Grafeno::restore_backup(source, destination)` provides the same recovery
+without opening or replacing a session. The engine backup API retains its
+no-overwrite policy and now protects against temporary-name collisions and
+destinations created while the backup is being written.
+
+```bash
+cargo test --locked -p grafeno --test backup
+cargo test --locked -p grafeno --lib backup::tests
+cargo test --locked -p grafeno-desktop local_database::tests
+```
+
+The window test also creates a backup, refuses existing destinations and an
+expired session, rejects an invalid recovery and opens a valid recovered database
+with its data intact. Native file dialogs still need manual testing.

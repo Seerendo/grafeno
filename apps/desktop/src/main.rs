@@ -31,7 +31,7 @@ mod local_database;
 #[cfg(test)]
 use local_database::router_for;
 use local_database::{
-    Session, SessionInfo, file_name, info, local_path, open_session, request_target,
+    Session, SessionInfo, backup_target, file_name, info, local_path, open_session, request_target,
 };
 
 /// Recent databases kept in the menu and on the start screen.
@@ -203,25 +203,32 @@ async fn pick_open(app: AppHandle, extensions: Vec<String>) -> Option<String> {
         .map(|path| path.display().to_string())
 }
 
-/// Writes a backup of the open database to `path` (a new file).
+/// La copia corresponde a la sesión elegida antes del diálogo. Nunca sobrescribe.
 #[tauri::command]
-async fn backup_database(desktop: State<'_, Desktop>, path: String) -> Result<u64, String> {
-    let db = desktop
-        .session
-        .lock()
-        .expect("not poisoned")
-        .as_ref()
-        .map(|session| session.db.clone())
-        .ok_or("no database is open")?;
+async fn backup_database(
+    desktop: State<'_, Desktop>,
+    path: String,
+    session_url: String,
+) -> Result<u64, String> {
+    let db = backup_target(
+        desktop.session.lock().expect("not poisoned").as_ref(),
+        &session_url,
+    )?;
     tokio::task::spawn_blocking(move || {
-        let path = PathBuf::from(path);
-        // The save dialog has already asked about replacing a file.
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(|error| error.to_string())?;
-        }
         db.begin_read()
-            .and_then(|read| read.backup(&path))
+            .and_then(|read| read.backup(Path::new(&path)))
             .map(|stats| stats.bytes)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Recupera en un archivo nuevo sin cambiar la sesión ni modificar el respaldo.
+#[tauri::command]
+async fn restore_database(source: String, path: String) -> Result<u64, String> {
+    tokio::task::spawn_blocking(move || {
+        grafeno::Grafeno::restore_backup(Path::new(&source), Path::new(&path))
             .map_err(|error| error.to_string())
     })
     .await
@@ -554,6 +561,7 @@ fn main() {
             read_text,
             open_external,
             backup_database,
+            restore_database,
             request,
         ])
         .run(tauri::generate_context!())

@@ -1728,6 +1728,7 @@ dependencies = [
  "redb",
  "serde",
  "serde_json",
+ "tempfile",
  "unicode-normalization",
 ]
 

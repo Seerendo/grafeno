@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import type { Connection } from "../api.ts";
+import { describeError, type Connection } from "../api.ts";
 import { type RecentDatabase, desktop } from "../desktop.ts";
 import { Icon, Logo } from "../icons.tsx";
 
@@ -21,6 +21,9 @@ export function StartView({
   onOpen: (path: string) => void;
   onConnect: (connection: Connection, remember: boolean) => void;
 }) {
+  const [recovering, setRecovering] = useState(false);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const unavailable = busy || recovering;
   const [recent, setRecent] = useState<RecentDatabase[]>([]);
   const [url, setUrl] = useState(saved?.url ?? "http://127.0.0.1:7810");
   const [token, setToken] = useState(saved?.token ?? "");
@@ -34,6 +37,23 @@ export function StartView({
     if (path) onOpen(path);
   };
 
+  const recover = async () => {
+    setRecovering(true);
+    setRecoveryError(null);
+    try {
+      const source = await desktop.pickOpen(["redb", "grafeno"]);
+      if (!source) return;
+      const path = await desktop.pickSave("memoria-recuperada.redb", "redb");
+      if (!path) return;
+      await desktop.restoreTo(source, path);
+      onOpen(path);
+    } catch (problem) {
+      setRecoveryError(describeError(problem));
+    } finally {
+      setRecovering(false);
+    }
+  };
+
   return (
     <div className="connect start">
       <div className="connect-art" aria-hidden="true" />
@@ -45,24 +65,28 @@ export function StartView({
             <p className="muted">The graph engine for agent memory and knowledge.</p>
           </div>
         </div>
-        {error && <div className="error">{error}</div>}
+        {(recoveryError || error) && <div className="error">{recoveryError || error}</div>}
         <div className="start-grid">
           <section className="stack tight">
             <h3>On this computer</h3>
             <p className="muted small">A database file. The engine runs inside the app: no service, no port.</p>
             <div className="row">
-              <button className="primary" disabled={busy} onClick={() => void pick(true)}>
+              <button className="primary" disabled={unavailable} onClick={() => void pick(true)}>
                 <Icon name="plus" /> New database…
               </button>
-              <button disabled={busy} onClick={() => void pick(false)}>
+              <button disabled={unavailable} onClick={() => void pick(false)}>
                 <Icon name="folder" /> Open…
               </button>
             </div>
+            <button disabled={unavailable} onClick={() => void recover()}>
+              {recovering ? "Verificando copia…" : "Recuperar una copia…"}
+            </button>
+            <p className="muted small">Recupera en un archivo nuevo. Conserva la copia original y rechaza destinos existentes.</p>
             <div className="recent-list">
               {recent.length === 0 && <div className="muted small">No recent databases yet.</div>}
               {recent.map((item) => (
                 <div key={item.path} className={item.exists ? "recent-item" : "recent-item missing"}>
-                  <button className="recent-open" disabled={busy || !item.exists} onClick={() => onOpen(item.path)} title={item.path}>
+                  <button className="recent-open" disabled={unavailable || !item.exists} onClick={() => onOpen(item.path)} title={item.path}>
                     <span className="ns-dot" />
                     <span className="recent-text">
                       <strong>{item.name}</strong>
@@ -101,7 +125,7 @@ export function StartView({
               <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
               Remember this server
             </label>
-            <button type="submit" disabled={busy}>
+            <button type="submit" disabled={unavailable}>
               <Icon name="link" /> Connect
             </button>
           </form>
