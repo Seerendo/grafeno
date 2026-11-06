@@ -396,7 +396,11 @@ without a current user. They remain possible for embedded use.
     Raft; a leader elected among them coordinates writes, the others take
     over when it fails, and reads and large queries spread over all of
     them.
-14. **Integrations**: Grafito first, Python bindings.
+14. **Users, roles and permissions** (planned, in six steps; see below):
+    a complete role-based access control, as most databases have: users who
+    sign in, roles and privileges granted with `GRANT` and `REVOKE`, rights
+    down to labels, properties and records, and an audit log.
+15. **Integrations**: Grafito first, Python bindings.
 
 ### Phase 8 plan
 
@@ -1864,6 +1868,146 @@ members on one machine and over a real network; failover time; reads per
 second with one to five members; speed-up of split queries; time to add a
 member from a snapshot of 1 M nodes and 10 M edges; memory per member.
 
+### Phase 14 plan: users, roles and permissions
+
+**Where it starts from (10.1).** Access is by principals: named API keys
+(stored as SHA-256), each with grants per namespace or namespace prefix of
+one of three fixed roles (`read`, `write`, `admin`), a global `owner` flag,
+and an `own_only` rule (change only what you recorded). The token in
+`grafeno.toml` is the owner; a server without one is open until its first
+key. Every surface (HTTP, MCP, shell, GQ, export, the desktop bridge)
+checks the same grants, and writes record who made them (`recorded_by`).
+What is missing next to a database such as PostgreSQL or Neo4j: people who
+sign in with a password and get a session, roles you define and nest,
+privileges finer than three levels (per operation, per label, per
+property, per record), `GRANT` and `REVOKE` in the query language, expiry
+and rotation of credentials, and a record of who did what to security.
+
+The guidelines hold: local and CPU only (no identity service required),
+agent-agnostic (agents and services are accounts like people), and a
+single-user setup stays as simple as now: one owner, no ceremony. In a
+cluster (phase 13) users, roles, grants and sessions are replicated state,
+written through the log and enforced the same on every member. Each step
+ends with tests (the 10.1 leak matrix grows with each privilege), a
+measurement where it costs something, documentation and its own commit.
+
+**14.1 Accounts and sign-in.**
+
+- Accounts of two kinds: *users* (people: a name, a password, sessions)
+  and *service accounts* (agents and applications: API keys only). Both can
+  hold API keys; a key belongs to an account, can expire, be rotated and be
+  scoped down (a subset of the account's rights, a namespace, read only).
+- Passwords hashed with Argon2id (parameters measured on the target
+  hardware), a password policy (length, a list of common passwords), and
+  throttling and lockout after failed attempts, per account and per address.
+- Sign-in over HTTP returns a session (a short-lived token and a refresh
+  token, revocable, listed per user); the Studio and the desktop app get a
+  sign-in screen instead of pasting a token; the shell signs in with a
+  prompt; MCP keeps using keys.
+- Bootstrapping: `grafeno users create --superuser` (or the first sign-in
+  on an open server) creates the first administrator. The static token
+  becomes an optional break-glass credential, off unless configured.
+- Migration: every existing principal becomes a service account with the
+  same rights (its grants become roles, below); `recorded_by` keeps the
+  names it had. A new layout version, with its upgrade and fixture.
+- Done when: sign-in, refresh, expiry, revocation, lockout and key scopes
+  are tested over HTTP, the shell and the Studio, and the 10.1 matrix passes
+  with users, service accounts and scoped keys.
+
+**14.2 Roles and privileges.**
+
+- A catalog of privileges, each on a kind of object:
+  - the server: create namespaces, manage accounts, manage roles and
+    grants, back up and restore, see metrics and the audit log, operate the
+    cluster;
+  - a namespace: read (match, search, recall), and separately create,
+    update, delete, merge, retract, import, export, manage indexes and
+    constraints, run procedures and algorithms, drop;
+  - labels inside a namespace: read or write nodes with a label, edges with
+    a label (`Person` readable, `Salary` facts not);
+  - properties: read or write one property of a label (`Person.email`
+    hidden from a role that can read people).
+- Roles: built-in ones that map today's levels (`reader`, `editor`,
+  `admin` per namespace; `superuser` for the server; `public`, which every
+  account has) and roles defined by administrators. Roles are granted to
+  accounts and to other roles (a hierarchy, cycles refused); an account's
+  rights are the union of its roles'. Privileges can be granted and, where
+  a broad grant needs an exception, denied; a denial wins over any grant
+  (as in Neo4j), so "read everything in `crm` except `Salary`" is one grant
+  and one denial.
+- Effective rights are computed once per account and cached, recomputed
+  when a grant changes, so checking a request stays a lookup.
+- Done when: a property test draws random role graphs, grants and denials
+  and checks the computed rights against a direct model; the cost of a
+  check is measured with thousands of roles.
+
+**14.3 Managing access in GQ, the API and the tools.**
+
+- GQ statements, run by accounts that may manage access: `CREATE USER`,
+  `ALTER USER` (password, status, expiry), `DROP USER`, `CREATE ROLE`,
+  `DROP ROLE`, `GRANT` / `DENY` / `REVOKE` privileges `ON` a namespace,
+  labels or properties `TO` a role, `GRANT ROLE … TO` an account,
+  `SHOW USERS`, `SHOW ROLES`, `SHOW PRIVILEGES [FOR …]`, `SHOW CURRENT
+  USER`; `EXPLAIN` of a denied statement says which privilege it lacks.
+- The same over HTTP (`/v1/admin/users`, `/roles`, `/grants`), in the CLI
+  (`grafeno users`, `grafeno roles`, `grafeno grants`), in the TypeScript
+  client, and as views in the Studio and the desktop app.
+- Done when: every statement and endpoint is in the conformance and HTTP
+  suites, including those refused for lack of the privilege to manage.
+
+**14.4 Enforcement down to labels, properties and records.**
+
+- Reads: nodes and edges a caller may not read are absent from every
+  result, as if they did not exist (patterns, `count`, paths, `EXISTS`);
+  hidden properties are absent from records, maps and projections, and a
+  filter on one finds nothing. The planner adds these restrictions where it
+  starts a pattern, so they cost no extra pass.
+- Search and memory: full-text, vector (the open decision about filtering
+  inside HNSW instead of after it is settled here, with recall measured),
+  fuzzy search, `recall` and `context` see only what the caller may read;
+  graph algorithms run on the visible subgraph; exports, the change log and
+  server-sent events carry only what the subscriber may read.
+- Writes: each change is checked against the label, property and operation
+  privileges it needs; a statement that would touch something forbidden
+  changes nothing and fails with the privilege it lacks.
+- Record-level policies, generalizing `own_only`: a role can be limited to
+  records that match a condition (`n.@recorded_by = current_user()`,
+  `n.tenant = $account.tenant`), for reads, writes or both, as
+  PostgreSQL's row-level security does.
+- Done when: the leak matrix covers every privilege on every surface, and
+  property tests check that random queries under random rights never return
+  a hidden node, edge or property, and never change one; the overhead of
+  enforcement on reads is measured with and without restrictions.
+
+**14.5 Audit and accountability.**
+
+- An audit log of security events: sign-ins and failures, lockouts, session
+  and key creation and revocation, every change to accounts, roles, grants
+  and policies, and refused requests, with who, when, from where and what.
+  Stored like the change log (numbered, retained by age and size, its own
+  privilege to read), queryable in GQ, streamable over server-sent events,
+  exportable as JSON lines.
+- `recorded_by` names the account (and the key or session) behind every
+  write; administrators can list and end any account's sessions.
+- Done when: every security event appears exactly once, refused requests
+  included, and the log survives restarts, failover and backups.
+
+**14.6 External identities (optional).**
+
+- Sign-in through an external identity provider for organizations that have
+  one: OpenID Connect (with its groups mapped to roles), and client
+  certificates (mutual TLS) for services. Local accounts keep working with
+  none of it, and nothing calls out unless configured.
+- Done when: sign-in and group mapping are tested against a local test
+  provider, and the server works offline with it configured but
+  unreachable (local accounts and existing sessions go on).
+
+**Measures for the phase:** the cost of authorization on reads and writes
+(none, a namespace grant, label and property restrictions, record
+policies) against 13's numbers; sign-ins per second and their CPU with the
+chosen Argon2id parameters; vector search recall and latency with
+visibility filters.
+
 ## Measurements and test environments
 
 What Grafeno has been measured to do, where, and how; the base for the
@@ -2053,11 +2197,17 @@ docker run --rm --memory 512m --memory-swap 512m -e CACHE_MB=128 -e PROJECTION_C
 - Binary record format (postcard, rkyv).
 - Whether Grafito's graph moves entirely to Grafeno or is only mirrored.
 - Filtered vector search (labels, ACL) inside HNSW instead of post-filtering.
-- Authentication beyond one static token (per-namespace tokens, or trusting
-  the application in front, as Grafito does).
+- Whether an application in front (Grafito) signs its users in itself and
+  calls Grafeno as one service account, or maps them to Grafeno accounts
+  (phase 14 allows both).
 - On Windows, building needs the MSVC toolchain (Visual Studio Build Tools):
   tokio's `windows-sys` does not build with the self-contained GNU toolchain.
 - Phase 13: `openraft` or a Raft of our own; the cluster transport (HTTP/2
   with the existing stack, or gRPC); the default read consistency
   (linearizable or bounded); and how floating-point aggregates merge across
   members so that results equal one server's.
+- Phase 14: whether denials exist (they make exceptions to broad grants
+  easy, as in Neo4j, but PostgreSQL does without them); whether hidden
+  properties are absent or masked; session tokens signed (stateless,
+  checked on any member) or stored (revocable at once); and the names of
+  the built-in roles.

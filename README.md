@@ -175,8 +175,10 @@ measured speed, memory and limits, with charts, in
 
 Next, phase 13: distributed operation (servers kept in sync by a
 replicated log with Raft, failover, reads and large queries spread over
-the servers); then integrations (Grafito, Python bindings). The plan is in
-[DESIGN.md](DESIGN.md).
+the servers); phase 14: users, roles and permissions (sign-in, roles you
+define, `GRANT` and `REVOKE`, rights down to labels, properties and
+records, an audit log); then integrations (Grafito, Python bindings). The
+plan is in [DESIGN.md](DESIGN.md).
 
 ## Installing
 
