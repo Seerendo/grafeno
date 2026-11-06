@@ -19,7 +19,7 @@ WORK = os.path.join(tempfile.gettempdir(), 'grafeno-fixtures')
 TARGET = os.path.join(WORK, 'target')
 OUT = os.path.join(REPO, 'crates', 'grafeno', 'tests', 'fixtures')
 
-COMMITS = [(1, 'f99ab08'), (2, '0622a34'), (3, '74a2cf8'), (4, '5fdcdc4'), (5, '07256b3'), (6, '50fda41'), (7, '1d262d4'), (8, '8e473f5'), (9, '25a14fb'), (10, 'c560ceb'), (11, 'ca015c2'), (12, 'fc66729'), (13, '2ddd51d')]
+COMMITS = [(1, 'f99ab08'), (2, '0622a34'), (3, '74a2cf8'), (4, '5fdcdc4'), (5, '07256b3'), (6, '50fda41'), (7, '1d262d4'), (8, '8e473f5'), (9, '25a14fb'), (10, 'c560ceb'), (11, 'ca015c2'), (12, 'fc66729'), (13, '2ddd51d'), (14, '8f920bc')]
 
 BASE = r'''
 // Writes the fixture of this layout version (see crates/grafeno/tests/fixtures).
@@ -105,6 +105,13 @@ EXTRAS = {
         tx.create_index(ns, grafeno::IndexDef::new("Person", "age"))?;
         tx.create_namespace("empty", Some("kept empty"))?;
         tx.create_principal(&grafeno::Principal { name: "reader".into(), secret_hash: "00".repeat(32), grants: vec![grafeno::Grant { namespace: "fixture".into(), role: grafeno::Role::Read }], owner: false, own_only: false, description: None, created_at: Timestamp::from_micros(JAN_2022) })?;
+        tx.create_constraint(ns, grafeno::Constraint::Functional { name: "Person_age_functional".into(), label: "Person".into(), key: "age".into() })?;''',
+    14: '''tx.set_importance(ns, people[0], 0.9)?;
+        tx.create_index(ns, grafeno::IndexDef::new("Person", "age"))?;
+        tx.create_namespace("empty", Some("kept empty"))?;
+        tx.create_principal(&grafeno::Principal { name: "reader".into(), secret_hash: "00".repeat(32), grants: vec![grafeno::Grant { namespace: "fixture".into(), role: grafeno::Role::Read }], owner: false, own_only: false, description: None, created_at: Timestamp::from_micros(JAN_2022) })?;
+        tx.create_principal(&grafeno::Principal { name: "admin-key".into(), secret_hash: "11".repeat(32), grants: Vec::new(), owner: true, own_only: false, description: Some("the owner's key".into()), created_at: Timestamp::from_micros(JAN_2022) })?;
+        tx.create_principal(&grafeno::Principal { name: "agent".into(), secret_hash: "22".repeat(32), grants: vec![grafeno::Grant { namespace: "fixture".into(), role: grafeno::Role::Write }], owner: false, own_only: true, description: None, created_at: Timestamp::from_micros(JAN_2022) })?;
         tx.create_constraint(ns, grafeno::Constraint::Functional { name: "Person_age_functional".into(), label: "Person".into(), key: "age".into() })?;''',
 }
 

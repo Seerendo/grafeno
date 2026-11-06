@@ -96,6 +96,12 @@ enum Command {
         /// Bearer token of the server.
         #[arg(long, env = "GRAFENO_TOKEN", hide_env_values = true)]
         token: Option<String>,
+        /// Sign in as this user (the password is asked at a prompt).
+        #[arg(long, env = "GRAFENO_USER", conflicts_with_all = ["db", "memory"])]
+        user: Option<String>,
+        /// With --user: read the password from standard input.
+        #[arg(long, requires = "user")]
+        password_stdin: bool,
         #[arg(
             long,
             short = 'n',
@@ -116,6 +122,9 @@ enum Command {
     /// API keys: names with grants per namespace (read, write, admin).
     #[command(subcommand)]
     Keys(KeysCommand),
+    /// Accounts: users who sign in with a password, and service accounts.
+    #[command(subcommand)]
+    Users(UsersCommand),
     /// A cluster member's view, its voters, and compacting its log (on a
     /// running member, through its API).
     #[command(subcommand)]
@@ -362,6 +371,62 @@ enum KeysCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum UsersCommand {
+    /// List the accounts and what they may do.
+    List {
+        #[command(flatten)]
+        target: KeysTarget,
+    },
+    /// Create a user (asks for a password) or a service account.
+    Create {
+        #[command(flatten)]
+        target: KeysTarget,
+        name: String,
+        /// Every right on every namespace, and managing accounts.
+        #[arg(long)]
+        superuser: bool,
+        /// `namespace:role`, repeatable: `vault:write`, `team-*:read`.
+        #[arg(long = "grant", short = 'g')]
+        grants: Vec<String>,
+        /// A service account: no password, API keys only.
+        #[arg(long)]
+        service: bool,
+        /// It may change only nodes and facts it recorded itself.
+        #[arg(long)]
+        own_only: bool,
+        /// Read the password from standard input instead of a prompt.
+        #[arg(long)]
+        password_stdin: bool,
+    },
+    /// Set a user's password (its sessions end).
+    Password {
+        #[command(flatten)]
+        target: KeysTarget,
+        name: String,
+        #[arg(long)]
+        password_stdin: bool,
+    },
+    /// Disable an account: it can neither sign in nor use its keys.
+    Disable {
+        #[command(flatten)]
+        target: KeysTarget,
+        name: String,
+    },
+    /// Enable a disabled account.
+    Enable {
+        #[command(flatten)]
+        target: KeysTarget,
+        name: String,
+    },
+    /// Delete an account with its keys and sessions.
+    Delete {
+        #[command(flatten)]
+        target: KeysTarget,
+        name: String,
+    },
+}
+
 impl KeysTarget {
     fn resolve(&self) -> Result<grafeno_server::keys::Target<'_>, String> {
         match &self.config {
@@ -547,6 +612,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             memory,
             url,
             token,
+            user,
+            password_stdin,
             namespace,
             command,
             file,
@@ -566,6 +633,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     db.unwrap_or_else(|| PathBuf::from("grafeno.redb")),
                 )?),
             };
+            if let Some(user) = &user {
+                let password = if password_stdin {
+                    let mut line = String::new();
+                    std::io::stdin().read_line(&mut line)?;
+                    line.trim_end_matches(['\r', '\n']).to_owned()
+                } else {
+                    rpassword::prompt_password(format!("Password for {user}: "))?
+                };
+                let name = backend.sign_in(user, &password)?;
+                eprintln!("Signed in as {name}.");
+            }
             let mut shell = Shell::new(backend, namespace, json);
             if let Some(command) = command {
                 shell.run_script(&command);
@@ -659,6 +737,57 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     )?
                 }
                 KeysCommand::Revoke { target, name } => keys::revoke(&target.resolve()?, &name)?,
+            }
+        }
+        Command::Users(command) => {
+            use grafeno_server::{keys, users};
+            match command {
+                UsersCommand::List { target } => users::list(&target.resolve()?)?,
+                UsersCommand::Create {
+                    target,
+                    name,
+                    superuser,
+                    grants,
+                    service,
+                    own_only,
+                    password_stdin,
+                } => {
+                    let grants = grants
+                        .iter()
+                        .map(|grant| keys::parse_grant(grant))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let password = if service {
+                        None
+                    } else {
+                        Some(users::read_password(&name, password_stdin)?)
+                    };
+                    users::create(
+                        &target.resolve()?,
+                        users::NewAccount {
+                            name,
+                            service,
+                            superuser,
+                            grants,
+                            own_only,
+                            password,
+                        },
+                    )?
+                }
+                UsersCommand::Password {
+                    target,
+                    name,
+                    password_stdin,
+                } => {
+                    let password = users::read_password(&name, password_stdin)?;
+                    users::change(&target.resolve()?, &name, Some(password), None)?
+                }
+                UsersCommand::Disable { target, name } => {
+                    users::change(&target.resolve()?, &name, None, Some(true))?
+                }
+                UsersCommand::Enable { target, name } => {
+                    users::change(&target.resolve()?, &name, None, Some(false))?
+                }
+                UsersCommand::Delete { target, name } => users::delete(&target.resolve()?, &name)?,
             }
         }
         Command::Namespaces { db } => {

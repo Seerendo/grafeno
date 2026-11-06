@@ -2,6 +2,7 @@
 //! stdio ([`mcp`]), and an interactive console ([`shell`]). The `grafeno`
 //! binary runs them.
 
+pub mod accounts;
 pub mod api;
 pub mod auth;
 pub mod cluster;
@@ -15,3 +16,4 @@ pub mod metrics;
 pub mod service;
 pub mod shell;
 pub mod studio;
+pub mod users;

@@ -47,7 +47,9 @@ fn snapshot(db: &Grafeno) -> String {
         }
         lines.push(format!("{:?}", read.changes(ns, 0, usize::MAX).unwrap()));
     }
-    lines.push(format!("{:?}", read.principals().unwrap()));
+    lines.push(format!("{:?}", read.accounts().unwrap()));
+    lines.push(format!("{:?}", read.api_keys().unwrap()));
+    lines.push(format!("{:?}", read.sessions(None).unwrap()));
     lines.join("\n")
 }
 
@@ -127,7 +129,7 @@ fn write_everything(db: &Grafeno) -> (NodeId, NodeId) {
         tx.create_edge(NS, NewEdge::new(ana, "works_at", globex))?;
         tx.set_match_rule(NS, &rule())?;
         tx.put_state(NS, "app", "cursor", b"42")?;
-        tx.create_principal(&Principal {
+        let (account, key) = Principal {
             name: "agent".into(),
             secret_hash: "ab".repeat(32),
             grants: vec![Grant {
@@ -138,6 +140,35 @@ fn write_everything(db: &Grafeno) -> (NodeId, NodeId) {
             own_only: true,
             description: None,
             created_at: Timestamp::from_micros(5),
+        }
+        .split();
+        tx.create_account(&account)?;
+        tx.create_api_key(&key)?;
+        // A user who signed in, with a session.
+        tx.create_account(&grafeno::Account {
+            name: "ana".into(),
+            kind: grafeno::AccountKind::User,
+            password_hash: Some("$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".into()),
+            grants: vec![Grant {
+                namespace: NS.into(),
+                role: Role::Read,
+            }],
+            superuser: false,
+            own_only: false,
+            disabled: false,
+            description: None,
+            created_at: Timestamp::from_micros(6),
+        })?;
+        tx.put_session(&grafeno::Session {
+            id: "s1".into(),
+            account: "ana".into(),
+            token_hash: "cd".repeat(32),
+            expires_at: Timestamp::from_micros(900),
+            refresh_hash: "ef".repeat(32),
+            refresh_expires_at: Timestamp::from_micros(9_000),
+            created_at: Timestamp::from_micros(7),
+            refreshed_at: None,
+            address: Some("127.0.0.1".into()),
         })?;
         Ok(())
     })
@@ -170,7 +201,7 @@ fn write_everything(db: &Grafeno) -> (NodeId, NodeId) {
             "implicit",
             NewNode::new("Thing").text("a namespace made by its first write"),
         )?;
-        tx.delete_principal("agent")?;
+        tx.delete_account("agent")?;
         tx.drop_index(NS, "Person_email")?;
         tx.create_index(NS, IndexDef::new("Company", "name"))?;
         Ok(())

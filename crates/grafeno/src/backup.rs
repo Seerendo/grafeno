@@ -9,7 +9,7 @@ use redb::{
 };
 use serde::Serialize;
 
-use crate::access::PRINCIPALS;
+use crate::access::{ACCOUNTS, API_KEYS, SESSIONS};
 use crate::changes::CHANGES;
 use crate::constraints::CONSTRAINTS;
 use crate::db::ReadTx;
@@ -81,7 +81,9 @@ pub(crate) fn restore_into(from: &ReadTransaction, to: &WriteTransaction) -> Res
         INDEXES,
         INDEX_ENTRIES,
         NAMESPACES,
-        PRINCIPALS,
+        ACCOUNTS,
+        API_KEYS,
+        SESSIONS,
         MERGES,
         MATCH_RULES,
         STATE,
@@ -132,7 +134,9 @@ impl ReadTx {
                 INDEXES.name(),
                 INDEX_ENTRIES.name(),
                 NAMESPACES.name(),
-                PRINCIPALS.name(),
+                ACCOUNTS.name(),
+                API_KEYS.name(),
+                SESSIONS.name(),
                 MERGES.name(),
                 MATCH_RULES.name(),
                 STATE.name(),
@@ -171,7 +175,9 @@ impl ReadTx {
             entries += copy(from, &tx, INDEXES)?;
             entries += copy(from, &tx, INDEX_ENTRIES)?;
             entries += copy(from, &tx, NAMESPACES)?;
-            entries += copy(from, &tx, PRINCIPALS)?;
+            entries += copy(from, &tx, ACCOUNTS)?;
+            entries += copy(from, &tx, API_KEYS)?;
+            entries += copy(from, &tx, SESSIONS)?;
             entries += copy(from, &tx, MERGES)?;
             entries += copy(from, &tx, MATCH_RULES)?;
             entries += copy(from, &tx, STATE)?;

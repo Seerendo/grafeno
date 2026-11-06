@@ -39,6 +39,8 @@ tower-http = { version = "0.6", features = ["cors", "catch-panic"] }
 toml = "0.9"
 getrandom = "0.3"
 sha2 = "0.10"
+argon2 = "0.5"
+rpassword = "7"
 futures-util = { version = "0.3", default-features = false }
 tower = { version = "0.5", features = ["util"] }
 

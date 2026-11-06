@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use grafeno::{Grafeno, Grant, Principal, Role, Timestamp};
+
 use serde_json::{Value, json};
 
 use crate::auth::{hash_secret, new_secret};
@@ -43,7 +44,7 @@ pub fn parse_grant(text: &str) -> Result<Grant, String> {
     })
 }
 
-fn http(
+pub(crate) fn http(
     url: &str,
     token: Option<&str>,
     method: &str,
@@ -113,13 +114,22 @@ pub fn list(target: &Target) -> Result<(), String> {
     let keys = match target {
         Target::File(path) => {
             let db = Grafeno::open(path).map_err(|error| error.to_string())?;
-            let principals = db
-                .begin_read()
-                .and_then(|read| read.principals())
-                .map_err(|e| e.to_string())?;
-            principals
+            let read = db.begin_read().map_err(|e| e.to_string())?;
+            let accounts = read.accounts().map_err(|e| e.to_string())?;
+            read.api_keys()
+                .map_err(|e| e.to_string())?
                 .iter()
-                .map(|p| json!({ "name": p.name, "grants": p.grants, "owner": p.owner, "own_only": p.own_only }))
+                .map(|key| {
+                    let account = accounts.iter().find(|a| a.name == key.account);
+                    json!({
+                        "name": key.name,
+                        "account": key.account,
+                        "grants": account.map(|a| a.grants.clone()).unwrap_or_default(),
+                        "owner": account.is_some_and(|a| a.superuser),
+                        "own_only": account.is_some_and(|a| a.own_only),
+                        "scope": key.scope,
+                    })
+                })
                 .collect()
         }
         Target::Server { url, token } => {
@@ -162,8 +172,13 @@ pub fn create(
                 description,
                 created_at: Timestamp::now(),
             };
-            db.write(|tx| tx.create_principal(&principal))
-                .map_err(|error| error.to_string())?;
+            // A service account of the key's name, holding the key.
+            let (account, key) = principal.split();
+            db.write(|tx| {
+                tx.create_account(&account)?;
+                tx.create_api_key(&key)
+            })
+            .map_err(|error| error.to_string())?;
             secret
         }
         Target::Server { url, token } => {
@@ -181,8 +196,18 @@ pub fn revoke(target: &Target, name: &str) -> Result<(), String> {
     let removed = match target {
         Target::File(path) => {
             let db = Grafeno::open(path).map_err(|error| error.to_string())?;
-            db.write(|tx| tx.delete_principal(name))
-                .map_err(|error| error.to_string())?
+            db.write(|tx| {
+                let Some(key) = tx.api_key(name)? else {
+                    return Ok(false);
+                };
+                tx.delete_api_key(name)?;
+                // Its service account goes with it when it was its only key.
+                if key.account == name && !tx.all_api_keys()?.iter().any(|k| k.account == name) {
+                    tx.delete_account(name)?;
+                }
+                Ok(true)
+            })
+            .map_err(|error| error.to_string())?
         }
         Target::Server { url, token } => {
             let path = format!("/v1/keys/{name}");

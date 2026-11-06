@@ -21,6 +21,8 @@ pub(crate) const NAMESPACES: TableDefinition<&str, &[u8]> = TableDefinition::new
 /// Namespace names that HTTP routes under `/v1` use.
 pub const RESERVED: &[&str] = &[
     "namespaces",
+    "auth",
+    "accounts",
     "export",
     "import",
     "algorithms",

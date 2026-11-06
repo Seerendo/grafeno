@@ -97,9 +97,28 @@ fn verify(db: &Grafeno, version: u64) {
         assert_eq!(indexes[0].entries, 40);
     }
     if version >= 7 {
-        let principals = read.principals().unwrap();
-        assert_eq!(principals.len(), 1, "v{version}");
-        assert_eq!(principals[0].name, "reader");
+        // Principals became service accounts with a key each (layout 15).
+        let accounts = read.accounts().unwrap();
+        let expected = if version >= 14 { 3 } else { 1 };
+        assert_eq!(accounts.len(), expected, "v{version}");
+        let reader = read.account("reader").unwrap().expect("the reader");
+        assert_eq!(reader.kind, grafeno::AccountKind::Service);
+        assert!(
+            reader.may("fixture", grafeno::Role::Read)
+                && !reader.may("fixture", grafeno::Role::Write)
+        );
+        let key = read.api_key("reader").unwrap().expect("its key");
+        assert_eq!(
+            (key.account.as_str(), key.secret_hash.as_str()),
+            ("reader", "00".repeat(32).as_str())
+        );
+        if version >= 14 {
+            assert!(read.account("admin-key").unwrap().unwrap().superuser);
+            let agent = read.account("agent").unwrap().unwrap();
+            assert!(agent.own_only && agent.may("fixture", grafeno::Role::Write));
+            assert_eq!(read.api_keys().unwrap().len(), 3);
+        }
+        assert!(read.sessions(None).unwrap().is_empty());
     }
     assert!(read.merges(NS, None).unwrap().is_empty());
     if version >= 11 {
@@ -117,7 +136,7 @@ fn verify(db: &Grafeno, version: u64) {
 
 #[test]
 fn every_past_layout_upgrades() {
-    for version in 1..=13 {
+    for version in 1..=14 {
         let path = fixture(version);
         {
             let db = Grafeno::open(&path).unwrap_or_else(|e| panic!("v{version}: {e}"));

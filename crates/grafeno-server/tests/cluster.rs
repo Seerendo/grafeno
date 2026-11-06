@@ -233,6 +233,85 @@ fn three_processes_replicate_route_and_fail_over() {
         assert_eq!(count(member.api), 7, "member {}", member.id);
     }
 
+    // Accounts are replicated (14.1): a key made through the leader works
+    // on the followers at once, and a user who signs in on one follower
+    // uses the session on the other and refreshes it on the leader.
+    let (code, body) = call(
+        members[first].api,
+        "POST",
+        "/v1/keys",
+        Some(json!({ "name": "reader", "grants": [{ "namespace": "c", "role": "read" }] })),
+    )
+    .unwrap();
+    assert_eq!(code, 201, "{body}");
+    let secret = body["secret"].as_str().unwrap().to_owned();
+    let with = |port: u16, bearer: &str, method: &str, path: &str, body: Option<Value>| {
+        let url = format!("http://127.0.0.1:{port}{path}");
+        let auth = format!("Bearer {bearer}");
+        let agent = agent();
+        let mut response = if method == "GET" {
+            agent.get(&url).header("Authorization", &auth).call()
+        } else {
+            agent
+                .post(&url)
+                .header("Authorization", &auth)
+                .send_json(body.unwrap_or(json!({})))
+        }
+        .unwrap();
+        let code = response.status().as_u16();
+        let text = response.body_mut().read_to_string().unwrap();
+        (
+            code,
+            serde_json::from_str::<Value>(&text).unwrap_or(Value::Null),
+        )
+    };
+    for member in [follower, other] {
+        let (code, body) = with(members[member].api, &secret, "GET", "/v1/c/stats", None);
+        assert_eq!(
+            code, 200,
+            "a new key on member {}: {body}",
+            members[member].id
+        );
+    }
+    let (code, body) = call(
+        members[follower].api,
+        "POST",
+        "/v1/accounts",
+        Some(
+            json!({ "name": "ana", "kind": "user", "password": "her long passphrase",
+                     "grants": [{ "namespace": "c", "role": "write" }] }),
+        ),
+    )
+    .unwrap();
+    assert_eq!(code, 201, "{body}");
+    let (code, session) = with(
+        members[follower].api,
+        "none",
+        "POST",
+        "/v1/auth/signin",
+        Some(json!({ "name": "ana", "password": "her long passphrase" })),
+    );
+    assert_eq!(code, 200, "{session}");
+    let access = session["access_token"].as_str().unwrap().to_owned();
+    let (code, body) = with(members[other].api, &access, "GET", "/v1/c/stats", None);
+    assert_eq!(code, 200, "the session on another member: {body}");
+    let (code, renewed) = with(
+        members[first].api,
+        "none",
+        "POST",
+        "/v1/auth/refresh",
+        Some(json!({ "refresh_token": session["refresh_token"] })),
+    );
+    assert_eq!(code, 200, "{renewed}");
+    let (code, body) = with(
+        members[follower].api,
+        renewed["access_token"].as_str().unwrap(),
+        "GET",
+        "/v1/c/stats",
+        None,
+    );
+    assert_eq!(code, 200, "{body}");
+
     // The leader's process dies: the others go on.
     let killed = members[first].id;
     if let Some(mut child) = members[first].child.take() {

@@ -51,7 +51,7 @@ fn a_backup_is_the_snapshot_while_writes_go_on() {
             },
         )?;
         tx.create_namespace("empty", Some("still here"))?;
-        tx.create_principal(&Principal {
+        let (account, key) = Principal {
             name: "agent".into(),
             secret_hash: "00".repeat(32),
             grants: Vec::new(),
@@ -59,7 +59,10 @@ fn a_backup_is_the_snapshot_while_writes_go_on() {
             own_only: false,
             description: None,
             created_at: Timestamp::now(),
-        })
+        }
+        .split();
+        tx.create_account(&account)?;
+        tx.create_api_key(&key)
     })
     .unwrap();
 
@@ -104,9 +107,12 @@ fn a_backup_is_the_snapshot_while_writes_go_on() {
         3
     );
     assert_eq!(
-        read.principals().unwrap().len(),
-        1,
-        "keys are backed up too"
+        (
+            read.accounts().unwrap().len(),
+            read.api_keys().unwrap().len()
+        ),
+        (1, 1),
+        "accounts and keys are backed up too"
     );
     assert_eq!(
         read.namespace("empty")

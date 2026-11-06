@@ -80,6 +80,58 @@ export interface AccessKey {
   created_at?: number;
 }
 
+/** An account (14.1): a user who signs in, or a service account with keys. */
+export interface Account {
+  name: string;
+  kind: "user" | "service";
+  has_password: boolean;
+  grants: Grant[];
+  superuser: boolean;
+  /** `superuser`, under its name before 14.1. */
+  owner: boolean;
+  own_only: boolean;
+  disabled: boolean;
+  description?: string;
+  created_at: number;
+}
+
+/** What a key is narrowed to, inside its account's rights. */
+export interface KeyScope {
+  /** Namespace patterns it may reach (all of the account's when empty). */
+  namespaces?: string[];
+  read_only?: boolean;
+}
+
+/** The tokens of a session, from signing in or refreshing. */
+export interface SessionTokens {
+  access_token: string;
+  /** Seconds until the access token expires. */
+  expires_in: number;
+  refresh_token: string;
+  refresh_expires_in: number;
+  session: string;
+  account: Account;
+}
+
+export interface SessionInfo {
+  id: string;
+  account: string;
+  created_at: number;
+  expires_at: number;
+  refresh_expires_at: number;
+  refreshed_at?: number;
+  address?: string;
+  /** The session of the request that listed it. */
+  current: boolean;
+}
+
+/** Whether a server is open, and whether its first account can be made. */
+export interface AuthStatus {
+  open: boolean;
+  setup: boolean;
+  password_sign_in: boolean;
+}
+
 export interface NodeInput {
   /** Only for upserts: your own id. */
   id?: Id;
@@ -542,6 +594,13 @@ export interface GrafenoOptions {
   spread?: boolean;
   /** A custom `fetch`, for tests or other runtimes. */
   fetch?: typeof fetch;
+  /**
+   * The tokens of a session signed in before (kept by the application):
+   * the client uses its access token and renews it when it expires.
+   */
+  session?: Pick<SessionTokens, "access_token" | "refresh_token">;
+  /** Called with new tokens after signing in or renewing, and `null` when the session ends. */
+  onSession?: (tokens: SessionTokens | null) => void;
 }
 
 /** Options of one GQ statement. */
@@ -580,7 +639,9 @@ export class Grafeno {
   readonly #urls: string[];
   #current = 0;
   #position = 0;
-  readonly #token: string | undefined;
+  #token: string | undefined;
+  #refresh: string | undefined;
+  readonly #onSession: ((tokens: SessionTokens | null) => void) | undefined;
   readonly #consistency: Consistency | undefined;
   readonly #readYourWrites: boolean;
   readonly #spread: boolean;
@@ -590,7 +651,9 @@ export class Grafeno {
     const urls = Array.isArray(options.url) ? options.url : [options.url];
     this.#urls = urls.map((url) => url.replace(/\/+$/, "")).filter((url) => url !== "");
     if (this.#urls.length === 0) throw new Error("Grafeno needs at least one URL");
-    this.#token = options.token;
+    this.#token = options.session?.access_token ?? options.token;
+    this.#refresh = options.session?.refresh_token;
+    this.#onSession = options.onSession;
     this.#consistency = options.consistency;
     this.#readYourWrites = options.readYourWrites ?? true;
     this.#spread = options.spread ?? false;
@@ -648,18 +711,127 @@ export class Grafeno {
     return this.request("DELETE", `/v1/namespaces/${encodeURIComponent(name)}`);
   }
 
-  /** Who this client is: the owner token, or an API key with its grants. */
-  whoami(): Promise<AccessKey> {
+  /** Who this client is: the server's token, or an account (by key or session) with its grants. */
+  whoami(): Promise<AccessKey & Partial<Account> & { via?: { kind: "key" | "session"; name: string }; scope?: KeyScope }> {
     return this.request("GET", "/v1/whoami");
   }
 
-  /** The API keys (owners only). */
+  /** Whether the server is open, and whether its first account can be made. */
+  authStatus(): Promise<AuthStatus> {
+    return this.request("GET", "/v1/auth/status");
+  }
+
+  #adopt(tokens: SessionTokens): SessionTokens {
+    this.#token = tokens.access_token;
+    this.#refresh = tokens.refresh_token;
+    this.#onSession?.(tokens);
+    return tokens;
+  }
+
+  /** Signs in with a user's name and password; the client then uses the session. */
+  async signIn(name: string, password: string): Promise<SessionTokens> {
+    this.#token = undefined;
+    return this.#adopt(await this.request<SessionTokens>("POST", "/v1/auth/signin", { name, password }));
+  }
+
+  /** On an open server with no accounts, makes the first one (a superuser) and signs it in. */
+  async setup(name: string, password: string): Promise<SessionTokens> {
+    return this.#adopt(await this.request<SessionTokens>("POST", "/v1/auth/setup", { name, password }));
+  }
+
+  /** New tokens for the session (both replaced); done by itself when the access token expires. */
+  async refreshSession(): Promise<SessionTokens> {
+    if (!this.#refresh) throw new GrafenoError(401, "unauthorized", "not signed in");
+    const refresh_token = this.#refresh;
+    this.#token = undefined;
+    try {
+      return this.#adopt(await this.request<SessionTokens>("POST", "/v1/auth/refresh", { refresh_token }));
+    } catch (error) {
+      this.#refresh = undefined;
+      this.#onSession?.(null);
+      throw error;
+    }
+  }
+
+  /** Ends this client's session. */
+  async signOut(): Promise<void> {
+    try {
+      await this.request("POST", "/v1/auth/signout");
+    } finally {
+      this.#token = undefined;
+      this.#refresh = undefined;
+      this.#onSession?.(null);
+    }
+  }
+
+  /** The signed-in account's sessions (a superuser's: `account`'s, or `*` for all). */
+  sessions(account?: string): Promise<SessionInfo[]> {
+    return this.request("GET", `/v1/auth/sessions${account ? `?account=${encodeURIComponent(account)}` : ""}`);
+  }
+
+  /** Ends one of the account's sessions (a superuser: anyone's). */
+  async endSession(id: string): Promise<void> {
+    await this.request("DELETE", `/v1/auth/sessions/${encodeURIComponent(id)}`);
+  }
+
+  /** Changes the signed-in user's password; its other sessions end. */
+  async changePassword(currentPassword: string, newPassword: string): Promise<void> {
+    await this.request("POST", "/v1/auth/password", { current_password: currentPassword, new_password: newPassword });
+  }
+
+  /** Every account (superusers). */
+  accounts(): Promise<Account[]> {
+    return this.request("GET", "/v1/accounts");
+  }
+
+  /** Makes a user (with a password) or a service account (superusers). */
+  createAccount(account: {
+    name: string;
+    kind: "user" | "service";
+    password?: string;
+    grants?: Grant[];
+    superuser?: boolean;
+    own_only?: boolean;
+    description?: string;
+  }): Promise<Account> {
+    return this.request("POST", "/v1/accounts", account);
+  }
+
+  /** Changes an account: password, grants, status (superusers). */
+  changeAccount(
+    name: string,
+    change: { password?: string; grants?: Grant[]; superuser?: boolean; own_only?: boolean; disabled?: boolean; description?: string | null },
+  ): Promise<Account> {
+    return this.request("PATCH", `/v1/accounts/${encodeURIComponent(name)}`, change);
+  }
+
+  /** Deletes an account with its keys and sessions (superusers). */
+  async deleteAccount(name: string): Promise<void> {
+    await this.request("DELETE", `/v1/accounts/${encodeURIComponent(name)}`);
+  }
+
+  /** Replaces a key's secret; the new one is returned only here, the old one stops working. */
+  rotateKey(name: string): Promise<{ key: AccessKey; secret: string }> {
+    return this.request("POST", `/v1/keys/${encodeURIComponent(name)}/rotate`);
+  }
+
+  /** The API keys: every one for superusers, the account's own for others. */
   keys(): Promise<AccessKey[]> {
     return this.request("GET", "/v1/keys");
   }
 
   /** Creates an API key; its secret is returned only here. */
-  createKey(key: { name: string; grants?: Grant[]; owner?: boolean; own_only?: boolean; description?: string }): Promise<{
+  createKey(key: {
+    name: string;
+    /** The account it belongs to (the caller's when absent). */
+    account?: string;
+    grants?: Grant[];
+    owner?: boolean;
+    own_only?: boolean;
+    scope?: KeyScope;
+    expires_in_days?: number;
+    description?: string;
+  }): Promise<{
     key: AccessKey;
     secret: string;
   }> {
@@ -712,7 +884,26 @@ export class Grafeno {
   }
 
   /** Sends a request; throws `GrafenoError` unless the response is a success. */
+  /** Sends a request; an expired session is renewed once, and the request sent again. */
   async #send(
+    method: string,
+    path: string,
+    body?: string,
+    contentType?: string,
+    extra: Record<string, string> = {},
+  ): Promise<Response> {
+    try {
+      return await this.#sendOnce(method, path, body, contentType, extra);
+    } catch (error) {
+      if (error instanceof GrafenoError && error.code === "session_expired" && this.#refresh && !path.startsWith("/v1/auth/")) {
+        await this.refreshSession();
+        return this.#sendOnce(method, path, body, contentType, extra);
+      }
+      throw error;
+    }
+  }
+
+  async #sendOnce(
     method: string,
     path: string,
     body?: string,

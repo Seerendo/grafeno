@@ -9,7 +9,7 @@ use redb::{
     ReadableTableMetadata, TableDefinition, WriteTransaction,
 };
 
-use crate::access::PRINCIPALS;
+use crate::access::{ACCOUNTS, API_KEYS, SESSIONS};
 use crate::algo::Shared;
 use crate::changes::{CHANGES, ChangeOp, Part};
 use crate::constraints::CONSTRAINTS;
@@ -53,7 +53,11 @@ use crate::{Hit, text, vector};
 /// 11. Adds `constraints` (on facts and properties), empty.
 /// 12. Adds `changes` (the change log), empty: it starts with the first
 ///     commit after the upgrade.
-pub const SCHEMA_VERSION: u64 = 14;
+/// 13. Adds `vectors_q8` (int8 copies of vectors) and compact adjacency.
+/// 14. Adds `replication_log`.
+/// 15. Replaces `principals` with `accounts`, `api_keys` and `sessions`:
+///     each principal becomes a service account and a key (14.1).
+pub const SCHEMA_VERSION: u64 = 15;
 
 /// The tables replaced in version 3, by name (their types no longer matter).
 const OLD_ADJ_OUT: TableDefinition<AdjKey, u128> = TableDefinition::new("adj_out");
@@ -233,7 +237,9 @@ impl Grafeno {
         tx.open_table(INDEXES).map_err(storage)?;
         tx.open_table(INDEX_ENTRIES).map_err(storage)?;
         tx.open_table(NAMESPACES).map_err(storage)?;
-        tx.open_table(PRINCIPALS).map_err(storage)?;
+        tx.open_table(ACCOUNTS).map_err(storage)?;
+        tx.open_table(API_KEYS).map_err(storage)?;
+        tx.open_table(SESSIONS).map_err(storage)?;
         tx.open_table(MERGES).map_err(storage)?;
         tx.open_table(MATCH_RULES).map_err(storage)?;
         tx.open_table(STATE).map_err(storage)?;
@@ -283,6 +289,9 @@ impl Grafeno {
         }
         if version < 13 {
             quantize_vectors(&tx)?;
+        }
+        if version < 15 {
+            crate::access::upgrade_principals(&tx)?;
         }
         tx.open_table(META)
             .map_err(storage)?
@@ -357,7 +366,6 @@ impl Grafeno {
             indexes: tx.open_table(INDEXES).map_err(storage)?,
             index_entries: tx.open_table(INDEX_ENTRIES).map_err(storage)?,
             registry: tx.open_table(NAMESPACES).map_err(storage)?,
-            principals: tx.open_table(PRINCIPALS).map_err(storage)?,
             merges: tx.open_table(MERGES).map_err(storage)?,
             match_rules: tx.open_table(MATCH_RULES).map_err(storage)?,
             state: tx.open_table(STATE).map_err(storage)?,
@@ -732,7 +740,6 @@ pub struct ReadTx {
     pub(crate) indexes: ReadOnlyTable<(&'static str, &'static str), &'static [u8]>,
     pub(crate) index_entries: ReadOnlyTable<IndexKey, ()>,
     pub(crate) registry: ReadOnlyTable<&'static str, &'static [u8]>,
-    pub(crate) principals: ReadOnlyTable<&'static str, &'static [u8]>,
     pub(crate) merges: ReadOnlyTable<RecordKey, &'static [u8]>,
     pub(crate) match_rules: ReadOnlyTable<(&'static str, &'static str), &'static [u8]>,
     pub(crate) state: ReadOnlyTable<crate::state::StateKey, &'static [u8]>,

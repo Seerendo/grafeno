@@ -310,11 +310,21 @@ async fn keys_see_only_their_namespaces() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    // Owner-only routes.
+    // An account lists its own keys only (14.1), and manages no others.
+    let (status, keys) = call(&app, &alice, "GET", "/v1/keys", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<&str> = keys
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|k| k["name"].as_str())
+        .collect();
+    assert_eq!(names, ["alice"], "{keys}");
+    // Owner-only routes, and other accounts' keys.
     for (method, uri) in [
-        ("GET", "/v1/keys"),
         ("POST", "/v1/import"),
         ("DELETE", "/v1/keys/reader"),
+        ("GET", "/v1/accounts"),
     ] {
         let (status, _) = call(&app, &alice, method, uri, None).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}");
@@ -514,10 +524,12 @@ async fn an_open_server_stays_open_until_a_key_exists() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, _) = call(&app, &secret, "GET", "/v1/a/stats", None).await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _) = call(&app, &secret, "GET", "/v1/keys", None).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    let (status, _) = call(&app, &admin, "GET", "/v1/keys", None).await;
+    let (status, keys) = call(&app, &secret, "GET", "/v1/keys", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(keys.as_array().unwrap().len(), 1, "only its own: {keys}");
+    let (status, keys) = call(&app, &admin, "GET", "/v1/keys", None).await;
     assert_eq!(status, StatusCode::OK, "owner keys manage keys");
+    assert_eq!(keys.as_array().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -556,7 +568,7 @@ async fn owners_download_a_backup_others_do_not() {
             assert_eq!(read.stats(ns).unwrap().nodes, 2);
             assert!(read.check(ns).unwrap().is_ok());
         }
-        assert_eq!(read.principals().unwrap().len(), 1, "with its keys");
+        assert_eq!(read.api_keys().unwrap().len(), 1, "with its keys");
     }
     std::fs::remove_file(&path).unwrap();
 }

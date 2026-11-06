@@ -1,6 +1,19 @@
-//! Principals: named API keys with grants per namespace, stored in the
-//! database (only a hash of each secret). Servers check them; the engine
-//! records who wrote what ([`crate::Actor`]).
+//! Accounts, their API keys and their sessions (phase 14.1), stored in the
+//! database (only hashes of secrets and passwords). Servers check them;
+//! the engine records who wrote what ([`crate::Actor`]).
+//!
+//! An account is a *user* (a person: a password, sessions) or a *service
+//! account* (an agent or an application: API keys only). Both hold grants
+//! per namespace (read, write, admin), may be superusers, and may be
+//! limited to changing what they recorded themselves. A key belongs to an
+//! account, may expire, and may be scoped down to some namespaces or to
+//! reading. A session is what signing in with a password gives: a
+//! short-lived access token and a refresh token, both stored as hashes.
+//! In a cluster all of it is replicated state, written through the log.
+//!
+//! Layout 15 replaced the principals of 10.1 (one named key with grants)
+//! with these: each principal became a service account with its grants and
+//! a key of the same name and secret, so `recorded_by` keeps its names.
 
 use grafeno_core::{Error, Result, Timestamp};
 use redb::{ReadableTable, TableDefinition};
@@ -9,8 +22,14 @@ use serde::{Deserialize, Serialize};
 use crate::db::{ReadTx, WriteTx};
 use crate::store::{decode, encode, storage};
 
-/// `name -> Principal` (JSON).
+/// `name -> Principal` (JSON), up to layout 14.
 pub(crate) const PRINCIPALS: TableDefinition<&str, &[u8]> = TableDefinition::new("principals");
+/// `name -> Account` (JSON).
+pub(crate) const ACCOUNTS: TableDefinition<&str, &[u8]> = TableDefinition::new("accounts");
+/// `name -> ApiKey` (JSON).
+pub(crate) const API_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("api_keys");
+/// `id -> Session` (JSON).
+pub(crate) const SESSIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("sessions");
 
 /// What a grant allows, each role including the ones before it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -48,36 +67,58 @@ pub struct Grant {
 
 impl Grant {
     pub fn covers(&self, ns: &str) -> bool {
-        match self.namespace.strip_suffix('*') {
-            Some(prefix) => ns.starts_with(prefix),
-            None => self.namespace == ns,
-        }
+        covers(&self.namespace, ns)
     }
 }
 
-/// A named API key.
+fn covers(pattern: &str, ns: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => ns.starts_with(prefix),
+        None => pattern == ns,
+    }
+}
+
+/// A person or a program.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AccountKind {
+    /// Signs in with a password; may also hold keys.
+    User,
+    /// API keys only.
+    #[default]
+    Service,
+}
+
+/// Who may do what.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Principal {
+pub struct Account {
     pub name: String,
-    /// The hex SHA-256 of the secret; the secret itself is never stored.
-    pub secret_hash: String,
+    #[serde(default)]
+    pub kind: AccountKind,
+    /// An Argon2id hash in PHC format (users only); the password itself is
+    /// never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_hash: Option<String>,
     #[serde(default)]
     pub grants: Vec<Grant>,
-    /// Every right on every namespace, and managing keys.
+    /// Every right on every namespace, and managing accounts.
     #[serde(default)]
-    pub owner: bool,
+    pub superuser: bool,
     /// May change only nodes and facts it recorded itself.
     #[serde(default)]
     pub own_only: bool,
+    /// A disabled account can neither sign in nor use its keys.
+    #[serde(default)]
+    pub disabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub created_at: Timestamp,
 }
 
-impl Principal {
+impl Account {
     /// The highest role it has on `ns`.
     pub fn role_in(&self, ns: &str) -> Option<Role> {
-        if self.owner {
+        if self.superuser {
             return Some(Role::Admin);
         }
         self.grants
@@ -92,7 +133,122 @@ impl Principal {
     }
 }
 
-/// Checks a principal's name: it ends up in provenance and in URLs.
+/// What a key is narrowed to, inside its account's rights.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyScope {
+    /// Namespace patterns it may reach (all of the account's when empty).
+    #[serde(default)]
+    pub namespaces: Vec<String>,
+    /// Read only, whatever the account may do.
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+impl KeyScope {
+    /// The role `role` on `ns` once the scope applies, from what the
+    /// account has.
+    pub fn narrow(&self, ns: &str, role: Option<Role>) -> Option<Role> {
+        if !self.namespaces.is_empty() && !self.namespaces.iter().any(|p| covers(p, ns)) {
+            return None;
+        }
+        match role {
+            Some(_) if self.read_only => Some(Role::Read),
+            other => other,
+        }
+    }
+}
+
+/// An API key of an account.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiKey {
+    pub name: String,
+    pub account: String,
+    /// The hex SHA-256 of the secret; the secret itself is never stored.
+    pub secret_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<KeyScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub created_at: Timestamp,
+    /// When its secret was last replaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotated_at: Option<Timestamp>,
+}
+
+impl ApiKey {
+    pub fn expired(&self, now: Timestamp) -> bool {
+        self.expires_at.is_some_and(|at| at <= now)
+    }
+}
+
+/// A signed-in user's session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Session {
+    pub id: String,
+    pub account: String,
+    /// Hex SHA-256 of the current access token's secret.
+    pub token_hash: String,
+    pub expires_at: Timestamp,
+    /// Hex SHA-256 of the current refresh token's secret.
+    pub refresh_hash: String,
+    pub refresh_expires_at: Timestamp,
+    pub created_at: Timestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refreshed_at: Option<Timestamp>,
+    /// Where it signed in from, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+}
+
+/// A named API key with grants, up to layout 14 (now an account and a key).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Principal {
+    pub name: String,
+    pub secret_hash: String,
+    #[serde(default)]
+    pub grants: Vec<Grant>,
+    #[serde(default)]
+    pub owner: bool,
+    #[serde(default)]
+    pub own_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub created_at: Timestamp,
+}
+
+impl Principal {
+    /// The service account and the key it becomes.
+    pub fn split(&self) -> (Account, ApiKey) {
+        (
+            Account {
+                name: self.name.clone(),
+                kind: AccountKind::Service,
+                password_hash: None,
+                grants: self.grants.clone(),
+                superuser: self.owner,
+                own_only: self.own_only,
+                disabled: false,
+                description: self.description.clone(),
+                created_at: self.created_at,
+            },
+            ApiKey {
+                name: self.name.clone(),
+                account: self.name.clone(),
+                secret_hash: self.secret_hash.clone(),
+                scope: None,
+                expires_at: None,
+                description: None,
+                created_at: self.created_at,
+                rotated_at: None,
+            },
+        )
+    }
+}
+
+/// Checks an account's or a key's name: it ends up in provenance and in
+/// URLs.
 pub fn check_principal_name(name: &str) -> Result<()> {
     let valid = !name.is_empty()
         && name.len() <= 64
@@ -103,12 +259,14 @@ pub fn check_principal_name(name: &str) -> Result<()> {
         Ok(())
     } else {
         Err(Error::Invalid(format!(
-            "a key name has 1 to 64 letters, digits, '-', '_', '.' or '@', not {name:?}"
+            "a name has 1 to 64 letters, digits, '-', '_', '.' or '@', not {name:?}"
         )))
     }
 }
 
-fn all(table: &impl ReadableTable<&'static str, &'static [u8]>) -> Result<Vec<Principal>> {
+fn all<T: serde::de::DeserializeOwned>(
+    table: &impl ReadableTable<&'static str, &'static [u8]>,
+) -> Result<Vec<T>> {
     let mut out = Vec::new();
     for item in table.iter().map_err(storage)? {
         let (_, value) = item.map_err(storage)?;
@@ -117,56 +275,236 @@ fn all(table: &impl ReadableTable<&'static str, &'static [u8]>) -> Result<Vec<Pr
     Ok(out)
 }
 
+fn one<T: serde::de::DeserializeOwned>(
+    table: &impl ReadableTable<&'static str, &'static [u8]>,
+    key: &str,
+) -> Result<Option<T>> {
+    table
+        .get(key)
+        .map_err(storage)?
+        .map(|guard| decode(guard.value()))
+        .transpose()
+}
+
 impl ReadTx {
-    /// Every principal, in name order.
-    pub fn principals(&self) -> Result<Vec<Principal>> {
-        all(&self.principals)
+    /// Every account, in name order.
+    pub fn accounts(&self) -> Result<Vec<Account>> {
+        all(&self.tx.open_table(ACCOUNTS).map_err(storage)?)
+    }
+
+    pub fn account(&self, name: &str) -> Result<Option<Account>> {
+        one(&self.tx.open_table(ACCOUNTS).map_err(storage)?, name)
+    }
+
+    /// Every API key, in name order.
+    pub fn api_keys(&self) -> Result<Vec<ApiKey>> {
+        all(&self.tx.open_table(API_KEYS).map_err(storage)?)
+    }
+
+    pub fn api_key(&self, name: &str) -> Result<Option<ApiKey>> {
+        one(&self.tx.open_table(API_KEYS).map_err(storage)?, name)
+    }
+
+    pub fn session(&self, id: &str) -> Result<Option<Session>> {
+        one(&self.tx.open_table(SESSIONS).map_err(storage)?, id)
+    }
+
+    /// The sessions of `account` (all of them with `None`), in id order.
+    pub fn sessions(&self, account: Option<&str>) -> Result<Vec<Session>> {
+        let sessions: Vec<Session> = all(&self.tx.open_table(SESSIONS).map_err(storage)?)?;
+        Ok(sessions
+            .into_iter()
+            .filter(|s| account.is_none_or(|name| s.account == name))
+            .collect())
     }
 }
 
 impl WriteTx {
-    pub fn principals(&self) -> Result<Vec<Principal>> {
-        all(&self.tx.open_table(PRINCIPALS).map_err(storage)?)
+    pub fn accounts(&self) -> Result<Vec<Account>> {
+        all(&self.tx.open_table(ACCOUNTS).map_err(storage)?)
     }
 
-    /// Adds a principal. Fails with [`Error::Conflict`] if the name is taken.
-    pub fn create_principal(&mut self, principal: &Principal) -> Result<()> {
-        check_principal_name(&principal.name)?;
-        self.note(crate::replication::Touch::Principal(principal.name.clone()));
-        let mut table = self.tx.open_table(PRINCIPALS).map_err(storage)?;
-        if table
-            .get(principal.name.as_str())
-            .map_err(storage)?
-            .is_some()
-        {
+    pub fn account(&self, name: &str) -> Result<Option<Account>> {
+        one(&self.tx.open_table(ACCOUNTS).map_err(storage)?, name)
+    }
+
+    pub fn api_key(&self, name: &str) -> Result<Option<ApiKey>> {
+        one(&self.tx.open_table(API_KEYS).map_err(storage)?, name)
+    }
+
+    pub fn session(&self, id: &str) -> Result<Option<Session>> {
+        one(&self.tx.open_table(SESSIONS).map_err(storage)?, id)
+    }
+
+    /// Every API key, inside this write.
+    pub fn all_api_keys(&self) -> Result<Vec<ApiKey>> {
+        all(&self.tx.open_table(API_KEYS).map_err(storage)?)
+    }
+
+    /// Every session, inside this write.
+    pub fn all_sessions(&self) -> Result<Vec<Session>> {
+        all(&self.tx.open_table(SESSIONS).map_err(storage)?)
+    }
+
+    /// Adds an account. Fails with [`Error::Conflict`] if the name is taken.
+    pub fn create_account(&mut self, account: &Account) -> Result<()> {
+        check_principal_name(&account.name)?;
+        if self.account(&account.name)?.is_some() {
             return Err(Error::Conflict(format!(
-                "a key named {:?} exists",
-                principal.name
+                "an account named {:?} exists",
+                account.name
             )));
         }
-        table
-            .insert(principal.name.as_str(), encode(principal)?.as_slice())
+        self.put_account(account)
+    }
+
+    /// Writes an account as it is (created or changed).
+    pub fn put_account(&mut self, account: &Account) -> Result<()> {
+        check_principal_name(&account.name)?;
+        self.note(crate::replication::Touch::Account(account.name.clone()));
+        self.tx
+            .open_table(ACCOUNTS)
+            .map_err(storage)?
+            .insert(account.name.as_str(), encode(account)?.as_slice())
             .map_err(storage)?;
         Ok(())
     }
 
-    /// Removes a principal; its secret stops working. Returns whether it
+    /// Removes an account with its keys and sessions; returns whether it
     /// existed. What it recorded keeps its name.
-    pub fn delete_principal(&mut self, name: &str) -> Result<bool> {
-        self.note(crate::replication::Touch::Principal(name.to_owned()));
-        let mut table = self.tx.open_table(PRINCIPALS).map_err(storage)?;
-        Ok(table.remove(name).map_err(storage)?.is_some())
+    pub fn delete_account(&mut self, name: &str) -> Result<bool> {
+        let keys: Vec<ApiKey> = all(&self.tx.open_table(API_KEYS).map_err(storage)?)?;
+        for key in keys.iter().filter(|k| k.account == name) {
+            self.delete_api_key(&key.name)?;
+        }
+        let sessions: Vec<Session> = all(&self.tx.open_table(SESSIONS).map_err(storage)?)?;
+        for session in sessions.iter().filter(|s| s.account == name) {
+            self.delete_session(&session.id)?;
+        }
+        self.note(crate::replication::Touch::Account(name.to_owned()));
+        Ok(self
+            .tx
+            .open_table(ACCOUNTS)
+            .map_err(storage)?
+            .remove(name)
+            .map_err(storage)?
+            .is_some())
     }
+
+    /// Adds a key to an existing account. Fails with [`Error::Conflict`] if
+    /// the name is taken.
+    pub fn create_api_key(&mut self, key: &ApiKey) -> Result<()> {
+        check_principal_name(&key.name)?;
+        if self.account(&key.account)?.is_none() {
+            return Err(Error::Invalid(format!(
+                "there is no account {:?} to hold the key",
+                key.account
+            )));
+        }
+        if self.api_key(&key.name)?.is_some() {
+            return Err(Error::Conflict(format!(
+                "a key named {:?} exists",
+                key.name
+            )));
+        }
+        self.put_api_key(key)
+    }
+
+    /// Writes a key as it is (a new secret, a new expiry).
+    pub fn put_api_key(&mut self, key: &ApiKey) -> Result<()> {
+        self.note(crate::replication::Touch::ApiKey(key.name.clone()));
+        self.tx
+            .open_table(API_KEYS)
+            .map_err(storage)?
+            .insert(key.name.as_str(), encode(key)?.as_slice())
+            .map_err(storage)?;
+        Ok(())
+    }
+
+    /// Removes a key; its secret stops working. Returns whether it existed.
+    pub fn delete_api_key(&mut self, name: &str) -> Result<bool> {
+        self.note(crate::replication::Touch::ApiKey(name.to_owned()));
+        Ok(self
+            .tx
+            .open_table(API_KEYS)
+            .map_err(storage)?
+            .remove(name)
+            .map_err(storage)?
+            .is_some())
+    }
+
+    /// Writes a session as it is (signed in, refreshed).
+    pub fn put_session(&mut self, session: &Session) -> Result<()> {
+        self.note(crate::replication::Touch::Session(session.id.clone()));
+        self.tx
+            .open_table(SESSIONS)
+            .map_err(storage)?
+            .insert(session.id.as_str(), encode(session)?.as_slice())
+            .map_err(storage)?;
+        Ok(())
+    }
+
+    /// Ends a session; returns whether it existed.
+    pub fn delete_session(&mut self, id: &str) -> Result<bool> {
+        self.note(crate::replication::Touch::Session(id.to_owned()));
+        Ok(self
+            .tx
+            .open_table(SESSIONS)
+            .map_err(storage)?
+            .remove(id)
+            .map_err(storage)?
+            .is_some())
+    }
+
+    /// Ends the sessions of `account` whose refresh token expired before
+    /// `now`; returns how many.
+    pub fn prune_sessions(&mut self, account: &str, now: Timestamp) -> Result<usize> {
+        let sessions: Vec<Session> = all(&self.tx.open_table(SESSIONS).map_err(storage)?)?;
+        let expired: Vec<String> = sessions
+            .into_iter()
+            .filter(|s| s.account == account && s.refresh_expires_at <= now)
+            .map(|s| s.id)
+            .collect();
+        for id in &expired {
+            self.delete_session(id)?;
+        }
+        Ok(expired.len())
+    }
+}
+
+/// Layout 15: every principal becomes a service account and a key of the
+/// same name and secret.
+pub(crate) fn upgrade_principals(tx: &redb::WriteTransaction) -> Result<()> {
+    let principals: Vec<Principal> = match tx.open_table(PRINCIPALS) {
+        Ok(table) => all(&table)?,
+        Err(_) => Vec::new(),
+    };
+    {
+        let mut accounts = tx.open_table(ACCOUNTS).map_err(storage)?;
+        let mut keys = tx.open_table(API_KEYS).map_err(storage)?;
+        tx.open_table(SESSIONS).map_err(storage)?;
+        for principal in &principals {
+            let (account, key) = principal.split();
+            accounts
+                .insert(account.name.as_str(), encode(&account)?.as_slice())
+                .map_err(storage)?;
+            keys.insert(key.name.as_str(), encode(&key)?.as_slice())
+                .map_err(storage)?;
+        }
+    }
+    let _ = tx.delete_table(PRINCIPALS);
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn principal(grants: &[(&str, Role)]) -> Principal {
-        Principal {
+    fn account(grants: &[(&str, Role)]) -> Account {
+        Account {
             name: "agent".into(),
-            secret_hash: String::new(),
+            kind: AccountKind::Service,
+            password_hash: None,
             grants: grants
                 .iter()
                 .map(|(namespace, role)| Grant {
@@ -174,8 +512,9 @@ mod tests {
                     role: *role,
                 })
                 .collect(),
-            owner: false,
+            superuser: false,
             own_only: false,
+            disabled: false,
             description: None,
             created_at: Timestamp::from_micros(0),
         }
@@ -183,7 +522,7 @@ mod tests {
 
     #[test]
     fn grants_and_roles() {
-        let p = principal(&[
+        let p = account(&[
             ("vault", Role::Write),
             ("team-*", Role::Read),
             ("team-ops", Role::Admin),
@@ -198,10 +537,23 @@ mod tests {
         );
         assert!(!p.may("team", Role::Read));
         assert_eq!(p.role_in("other"), None);
-        let all = principal(&[("*", Role::Read)]);
+        let all = account(&[("*", Role::Read)]);
         assert!(all.may("anything", Role::Read));
         assert!(check_principal_name("ana@agents").is_ok());
         assert!(check_principal_name("a b").is_err());
         assert!(Role::parse("WRITE").is_ok() && Role::parse("root").is_err());
+    }
+
+    #[test]
+    fn scopes_narrow_keys() {
+        let scope = KeyScope {
+            namespaces: vec!["team-*".into()],
+            read_only: true,
+        };
+        assert_eq!(scope.narrow("team-a", Some(Role::Admin)), Some(Role::Read));
+        assert_eq!(scope.narrow("vault", Some(Role::Admin)), None);
+        assert_eq!(scope.narrow("team-a", None), None);
+        let open = KeyScope::default();
+        assert_eq!(open.narrow("vault", Some(Role::Write)), Some(Role::Write));
     }
 }

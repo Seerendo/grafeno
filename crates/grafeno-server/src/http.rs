@@ -14,8 +14,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use grafeno::{
-    Direction, EdgeFilter, EdgeId, Error, Grafeno, Grant, NodeId, Principal, Props, Role,
-    Timestamp, WriteTx,
+    Direction, EdgeFilter, EdgeId, Error, Grafeno, NodeId, Props, Role, Timestamp, WriteTx,
 };
 use grafeno_memory::{context_for, recall};
 use serde::de::DeserializeOwned;
@@ -26,7 +25,7 @@ use crate::api::{
     ContextInput, EdgeInput, ErrorKind, FilterInput, NodeInput, NodeOutput, NodeRef, RecallInput,
     TimeInput, error_kind, parse_id, resolve_ref,
 };
-use crate::auth::{self, Caller, Keyring, Need};
+use crate::auth::{self, Caller, Need};
 
 const BODY_LIMIT: usize = 32 * 1024 * 1024;
 
@@ -37,8 +36,12 @@ pub struct AppState {
     /// through the cluster's leader.
     pub writer: Arc<Writes>,
     pub token: Option<Arc<str>>,
-    /// API keys, loaded from the database.
-    pub keys: Arc<Keyring>,
+    /// Which key each secret is, loaded from the database.
+    pub keys: Arc<crate::auth::Credentials>,
+    /// Failed sign-ins, for lockouts.
+    pub throttle: Arc<crate::auth::Throttle>,
+    /// Sessions' lives and lockouts.
+    pub auth: crate::accounts::AuthConfig,
     /// Limits for each GQ query.
     pub limits: grafeno_query::Limits,
     /// Requests being served under `/v1`; beyond its permits the server
@@ -171,7 +174,9 @@ impl AppState {
                 apis: Default::default(),
                 split_cost: crate::cluster::DEFAULT_SPLIT_COST,
             }),
-            keys: Arc::new(Keyring::load(&db).unwrap_or_default()),
+            keys: Arc::new(crate::auth::Credentials::load(&db).unwrap_or_default()),
+            throttle: Arc::default(),
+            auth: crate::accounts::AuthConfig::default(),
             db,
             token: token.map(Arc::from),
             limits: grafeno_query::Limits::standard(),
@@ -254,6 +259,11 @@ impl AppState {
         self.in_flight = Arc::new(tokio::sync::Semaphore::new(max.max(1)));
         self
     }
+
+    pub fn with_auth(mut self, auth: crate::accounts::AuthConfig) -> Self {
+        self.auth = auth;
+        self
+    }
 }
 
 /// What the HTTP server offers besides the API.
@@ -294,9 +304,12 @@ pub async fn serve_until(
         eprintln!("Grafeno Studio at http://{local}/studio/");
     }
     crate::events::start(&state);
-    axum::serve(listener, router_with(state, &options))
-        .with_graceful_shutdown(shutdown)
-        .await
+    axum::serve(
+        listener,
+        router_with(state, &options).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
 }
 
 /// Ctrl+C, or SIGTERM on Unix (what systemd sends to stop a service).
@@ -362,9 +375,38 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/{ns}/query", post(query))
         .route("/{ns}/query/part", post(query_part))
         .route("/algorithms", get(algorithms))
-        .route("/whoami", get(whoami))
-        .route("/keys", get(list_keys).post(create_key))
-        .route("/keys/{name}", axum::routing::delete(revoke_key))
+        .route("/whoami", get(crate::accounts::whoami))
+        .route(
+            "/keys",
+            get(crate::accounts::list_keys).post(crate::accounts::create_key),
+        )
+        .route(
+            "/keys/{name}",
+            axum::routing::delete(crate::accounts::revoke_key),
+        )
+        .route("/keys/{name}/rotate", post(crate::accounts::rotate_key))
+        // Accounts and sign-in (14.1).
+        .route("/auth/status", get(crate::accounts::status))
+        .route("/auth/setup", post(crate::accounts::setup))
+        .route("/auth/signin", post(crate::accounts::signin))
+        .route("/auth/refresh", post(crate::accounts::refresh))
+        .route("/auth/signout", post(crate::accounts::signout))
+        .route("/auth/password", post(crate::accounts::change_password))
+        .route("/auth/sessions", get(crate::accounts::sessions))
+        .route(
+            "/auth/sessions/{id}",
+            axum::routing::delete(crate::accounts::end_session),
+        )
+        .route(
+            "/accounts",
+            get(crate::accounts::list_accounts).post(crate::accounts::create_account),
+        )
+        .route(
+            "/accounts/{name}",
+            get(crate::accounts::get_account)
+                .patch(crate::accounts::change_account)
+                .delete(crate::accounts::delete_account),
+        )
         .route("/{ns}/algo/{name}", post(algorithm))
         .route("/{ns}/resolve", get(resolve))
         .route("/{ns}/duplicates", get(duplicates))
@@ -512,6 +554,27 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    pub(crate) fn with_status(
+        status: StatusCode,
+        code: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            status,
+            code,
+            message: message.into(),
+            details: None,
+        }
+    }
+
+    pub(crate) fn not_found_message(message: impl Into<String>) -> Self {
+        Self::not_found(message)
+    }
+
+    pub(crate) fn forbidden_message(message: impl Into<String>) -> Self {
+        Self::forbidden(message)
+    }
+
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
@@ -603,7 +666,7 @@ pub(crate) type ApiResult<T> = Result<T, ApiError>;
 /// Runs a write through the group-commit writer. `work` may run more than
 /// once (when another write of its group fails), so it takes its inputs by
 /// reference or clones them.
-async fn write<T: Send + 'static>(
+pub(crate) async fn write<T: Send + 'static>(
     state: &AppState,
     work: impl Fn(&mut WriteTx) -> grafeno::Result<T> + Send + 'static,
 ) -> ApiResult<T> {
@@ -647,7 +710,7 @@ async fn write_bulk<T: Send + 'static>(
 }
 
 /// Runs engine work on the blocking pool: redb calls are synchronous.
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     state: &AppState,
     work: impl FnOnce(&Grafeno) -> grafeno::Result<T> + Send + 'static,
 ) -> ApiResult<T> {
@@ -695,33 +758,47 @@ async fn auth(State(state): State<AppState>, request: Request, next: Next) -> Re
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .map(str::to_owned);
-    let open = state.token.is_none() && state.keys.is_empty();
+    let need = auth::need(request.method().as_str(), request.uri().path());
+    let open = state.token.is_none() && !state.keys.has_accounts();
     let caller = match given {
-        _ if open => Some(Caller::Owner),
+        _ if open => Ok(Caller::Owner),
         Some(given)
             if state
                 .token
                 .as_ref()
                 .is_some_and(|token| constant_time_eq(given.as_bytes(), token.as_bytes())) =>
         {
-            Some(Caller::Owner)
+            Ok(Caller::Owner)
         }
-        Some(given) => state.keys.find(&given).map(Caller::Key),
-        None => None,
-    };
-    let Some(caller) = caller else {
-        return refuse(
-            request,
+        Some(given) => {
+            let state = state.clone();
+            tokio::task::spawn_blocking(move || crate::accounts::authenticate(&state, &given))
+                .await
+                .unwrap_or_else(|e| Err(ApiError::internal(e.to_string())))
+        }
+        None => Err(ApiError::with_status(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
-            "missing or wrong bearer token or API key".into(),
-        )
-        .await;
+            "missing or wrong bearer token or API key",
+        )),
     };
-    let allowed = match auth::need(request.method().as_str(), request.uri().path()) {
-        Need::Caller => Ok(()),
+    // Signing in needs nobody: a bad or missing credential is no reason to
+    // refuse it.
+    let caller = match (caller, &need) {
+        (Ok(caller), _) => caller,
+        (Err(_), Need::Public) => Caller::Anonymous,
+        (Err(error), _) => {
+            let _ = axum::body::to_bytes(request.into_body(), 1024 * 1024).await;
+            return error.into_response();
+        }
+    };
+    let allowed = match need {
+        Need::Public | Need::Caller => Ok(()),
         Need::Owner if caller.is_owner() => Ok(()),
-        Need::Owner => Err(format!("the key {:?} is not an owner", caller.name())),
+        Need::Owner => Err(format!(
+            "{:?} is not a superuser (or its key is scoped)",
+            caller.name()
+        )),
         Need::Namespace(ns, role) if caller.may(&ns, role) => Ok(()),
         Need::Namespace(ns, role) => Err(caller.refusal(&ns, role)),
     };
@@ -760,7 +837,7 @@ fn require(ns: &str, role: Role) -> ApiResult<()> {
     }
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
@@ -2003,115 +2080,6 @@ async fn run_query_counted(
 }
 
 // ---------------------------------------------------------------- keys
-
-/// What a key looks like over the API: never its secret or its hash.
-#[derive(Serialize)]
-struct KeyOutput {
-    name: String,
-    grants: Vec<Grant>,
-    owner: bool,
-    own_only: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    created_at: Timestamp,
-}
-
-impl From<&Principal> for KeyOutput {
-    fn from(principal: &Principal) -> Self {
-        Self {
-            name: principal.name.clone(),
-            grants: principal.grants.clone(),
-            owner: principal.owner,
-            own_only: principal.own_only,
-            description: principal.description.clone(),
-            created_at: principal.created_at,
-        }
-    }
-}
-
-/// Who the caller is and what it may do.
-async fn whoami() -> Json<Value> {
-    Json(match auth::current() {
-        Caller::Owner => json!({ "name": "owner", "owner": true, "grants": [], "own_only": false }),
-        Caller::Key(principal) => {
-            serde_json::to_value(KeyOutput::from(principal.as_ref())).unwrap_or(Value::Null)
-        }
-    })
-}
-
-async fn list_keys(State(state): State<AppState>) -> ApiResult<Json<Vec<KeyOutput>>> {
-    let principals = blocking(&state, |db| db.begin_read()?.principals()).await?;
-    Ok(Json(principals.iter().map(KeyOutput::from).collect()))
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct NewKey {
-    name: String,
-    #[serde(default)]
-    grants: Vec<Grant>,
-    #[serde(default)]
-    owner: bool,
-    #[serde(default)]
-    own_only: bool,
-    description: Option<String>,
-}
-
-/// Creates a key and returns its secret, once: only its hash is kept.
-async fn create_key(
-    State(state): State<AppState>,
-    Body(input): Body<NewKey>,
-) -> ApiResult<(StatusCode, Json<Value>)> {
-    if input.grants.is_empty() && !input.owner {
-        return Err(ApiError::bad_request(
-            "a key needs at least one grant ({namespace, role}) or owner: true",
-        ));
-    }
-    // Without a token, keys close the server: the first one must be an
-    // owner, or nobody could manage keys any more.
-    if state.token.is_none() && !input.owner {
-        let owners = blocking(&state, |db| {
-            Ok(db.begin_read()?.principals()?.iter().any(|p| p.owner))
-        })
-        .await?;
-        if !owners {
-            return Err(ApiError::bad_request(
-                "this server has no token: create an owner key first (owner: true), or the server would lock everyone out",
-            ));
-        }
-    }
-    let secret = auth::new_secret();
-    let principal = Principal {
-        name: input.name,
-        secret_hash: auth::hash_secret(&secret),
-        grants: input.grants,
-        owner: input.owner,
-        own_only: input.own_only,
-        description: input.description.filter(|d| !d.trim().is_empty()),
-        created_at: Timestamp::now(),
-    };
-    let stored = principal.clone();
-    write(&state, move |tx| tx.create_principal(&stored)).await?;
-    state.keys.reload(&state.db)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({ "key": KeyOutput::from(&principal), "secret": secret })),
-    ))
-}
-
-async fn revoke_key(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> ApiResult<StatusCode> {
-    let wanted = name.clone();
-    let removed = write(&state, move |tx| tx.delete_principal(&wanted)).await?;
-    state.keys.reload(&state.db)?;
-    if removed {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::not_found(format!("no key named {name:?}")))
-    }
-}
 
 // ---------------------------------------------------------------- algorithms
 

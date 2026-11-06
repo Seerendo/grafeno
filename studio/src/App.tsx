@@ -73,8 +73,50 @@ function ConnectScreen({ initial, error, onConnect }: {
   onConnect: (connection: Connection, remember: boolean) => void;
 }) {
   const [url, setUrl] = useState(initial.url);
+  const [mode, setMode] = useState<"signin" | "token">("signin");
   const [token, setToken] = useState(initial.token);
+  const [name, setName] = useState("");
+  const [password, setPassword] = useState("");
+  const [again, setAgain] = useState("");
   const [remember, setRemember] = useState(false);
+  const [setup, setSetup] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const cleanUrl = url.trim().replace(/\/+$/, "");
+
+  // An open server with no accounts offers to make the first one.
+  useEffect(() => {
+    let live = true;
+    const timer = window.setTimeout(() => {
+      clientFor({ url: cleanUrl, token: "" })
+        .authStatus()
+        .then((status) => live && setSetup(status.setup))
+        .catch(() => live && setSetup(false));
+    }, 300);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [cleanUrl]);
+
+  const signIn = async () => {
+    setProblem(null);
+    if (setup && password !== again) {
+      setProblem("The passwords differ.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const client = clientFor({ url: cleanUrl, token: "" });
+      const tokens = setup ? await client.setup(name.trim(), password) : await client.signIn(name.trim(), password);
+      onConnect({ url: cleanUrl, token: tokens.access_token, refresh: tokens.refresh_token, user: tokens.account.name }, remember);
+    } catch (failure) {
+      setProblem(describeError(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="connect">
       <div className="connect-art" aria-hidden="true" />
@@ -82,7 +124,8 @@ function ConnectScreen({ initial, error, onConnect }: {
         className="connect-card"
         onSubmit={(event) => {
           event.preventDefault();
-          onConnect({ url: url.trim().replace(/\/+$/, ""), token: token.trim() }, remember);
+          if (mode === "signin") void signIn();
+          else onConnect({ url: cleanUrl, token: token.trim() }, remember);
         }}
       >
         <div className="connect-brand">
@@ -96,16 +139,46 @@ function ConnectScreen({ initial, error, onConnect }: {
           Server URL
           <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="http://127.0.0.1:7810" required />
         </label>
-        <label className="field">
-          Token <span className="hint">if the server was started with --token</span>
-          <input type="password" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" />
-        </label>
+        <div className="row" role="tablist">
+          <button type="button" role="tab" aria-selected={mode === "signin"} className={mode === "signin" ? "primary" : "ghost"} onClick={() => setMode("signin")}>
+            {setup ? "Create the first account" : "Sign in"}
+          </button>
+          <button type="button" role="tab" aria-selected={mode === "token"} className={mode === "token" ? "primary" : "ghost"} onClick={() => setMode("token")}>
+            Token or key
+          </button>
+        </div>
+        {mode === "signin" ? (
+          <>
+            {setup && <p className="muted small" style={{ margin: 0 }}>This server has no accounts yet: the first one you make is its superuser.</p>}
+            <label className="field">
+              Name
+              <input value={name} onChange={(e) => setName(e.target.value)} autoComplete="username" required />
+            </label>
+            <label className="field">
+              Password {setup && <span className="hint">at least 10 characters</span>}
+              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={setup ? "new-password" : "current-password"} required />
+            </label>
+            {setup && (
+              <label className="field">
+                Password again
+                <input type="password" value={again} onChange={(e) => setAgain(e.target.value)} autoComplete="new-password" required />
+              </label>
+            )}
+          </>
+        ) : (
+          <label className="field">
+            Token <span className="hint">the server's --token, or an API key</span>
+            <input type="password" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" />
+          </label>
+        )}
         <label className="check small">
           <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
           Remember on this browser
         </label>
-        {error && <div className="error">{error}</div>}
-        <button className="primary big" type="submit">Connect</button>
+        {(problem ?? error) && <div className="error">{problem ?? error}</div>}
+        <button className="primary big" type="submit" disabled={busy}>
+          {busy ? "Signing in…" : mode === "signin" ? (setup ? "Create and sign in" : "Sign in") : "Connect"}
+        </button>
       </form>
     </div>
   );
@@ -655,12 +728,14 @@ export function App() {
           </span>
           <button
             className="ghost icon-button"
-            title={local ? "Close the database" : "Disconnect"}
+            title={local ? "Close the database" : connection?.user ? `Sign out ${connection.user}` : "Disconnect"}
             onClick={() => {
               if (local) {
                 void closeLocal();
                 return;
               }
+              // A signed-in user's session ends on the server too.
+              if (connection?.refresh) void clientFor(connection).signOut().catch(() => undefined);
               forgetConnection();
               setConnection(null);
             }}

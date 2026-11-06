@@ -1,0 +1,6 @@
+measure,value,unit
+hash,18.3,ms
+check,18.9,ms
+sign-ins on one core,53,per second
+sign-ins on 16 threads,141,per second
+memory per check,19,MiB

@@ -1,7 +1,7 @@
 //! `grafeno shell`: an interactive console for GQ queries and administration,
 //! on a database file or on a running server.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::io::{BufRead, IsTerminal, Read};
 use std::time::Instant;
 
@@ -46,7 +46,9 @@ pub enum Backend {
         urls: Vec<String>,
         current: Cell<usize>,
         position: Cell<u64>,
-        token: Option<String>,
+        token: RefCell<Option<String>>,
+        /// A signed-in user's refresh token (14.1).
+        refresh: RefCell<Option<String>>,
     },
 }
 
@@ -70,7 +72,49 @@ impl Backend {
             urls: list,
             current: Cell::new(0),
             position: Cell::new(0),
-            token,
+            token: RefCell::new(token),
+            refresh: RefCell::new(None),
+        }
+    }
+
+    /// Signs in as a user: the session's tokens replace any token given,
+    /// and the access token is renewed when it expires.
+    pub fn sign_in(&self, name: &str, password: &str) -> Result<String, String> {
+        let Backend::Remote { token, refresh, .. } = self else {
+            return Err("signing in needs a server (--url)".into());
+        };
+        token.replace(None);
+        let answer = self.call(
+            "POST",
+            "/v1/auth/signin",
+            Some(json!({ "name": name, "password": password })),
+        )?;
+        token.replace(answer["access_token"].as_str().map(str::to_owned));
+        refresh.replace(answer["refresh_token"].as_str().map(str::to_owned));
+        Ok(answer["account"]["name"]
+            .as_str()
+            .unwrap_or(name)
+            .to_owned())
+    }
+
+    /// New tokens for an expired access token; whether it worked.
+    fn renew(&self) -> bool {
+        let Backend::Remote { token, refresh, .. } = self else {
+            return false;
+        };
+        let Some(current) = refresh.borrow().clone() else {
+            return false;
+        };
+        token.replace(None);
+        let body = json!({ "refresh_token": current }).to_string();
+        match self.send_once("POST", "/v1/auth/refresh", Some(body), true) {
+            Ok((200, text)) => {
+                let answer: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                token.replace(answer["access_token"].as_str().map(str::to_owned));
+                refresh.replace(answer["refresh_token"].as_str().map(str::to_owned));
+                true
+            }
+            _ => false,
         }
     }
 
@@ -81,7 +125,8 @@ impl Backend {
         }
     }
 
-    /// Sends a request to the server and returns its JSON (or text) body.
+    /// Sends a request to the server and returns its JSON (or text) body;
+    /// an expired session is renewed once.
     fn send(
         &self,
         method: &str,
@@ -89,12 +134,40 @@ impl Backend {
         body: Option<String>,
         json_body: bool,
     ) -> Result<String, String> {
+        let (mut status, mut text) = self.send_once(method, path, body.clone(), json_body)?;
+        let code = |text: &str| {
+            serde_json::from_str::<Value>(text)
+                .ok()
+                .and_then(|body| body["error"]["code"].as_str().map(str::to_owned))
+        };
+        if status == 401 && code(&text).as_deref() == Some("session_expired") && self.renew() {
+            (status, text) = self.send_once(method, path, body, json_body)?;
+        }
+        if (200..300).contains(&status) {
+            return Ok(text);
+        }
+        let message = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|body| body["error"]["message"].as_str().map(str::to_owned))
+            .unwrap_or(text);
+        Err(format!("{message} (HTTP {status})"))
+    }
+
+    /// One request: its status and body.
+    fn send_once(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<String>,
+        json_body: bool,
+    ) -> Result<(u16, String), String> {
         let Backend::Remote {
             agent,
             urls,
             current,
             position,
             token,
+            ..
         } = self
         else {
             unreachable!("only remote backends send requests")
@@ -115,7 +188,7 @@ impl Backend {
                 "GET" => agent.get(&uri).force_send_body(),
                 _ => agent.post(&uri),
             };
-            if let Some(token) = token {
+            if let Some(token) = token.borrow().as_deref() {
                 request = request.header("authorization", format!("Bearer {token}"));
             }
             if position.get() > 0 {
@@ -154,14 +227,7 @@ impl Backend {
             .limit(1 << 30)
             .read_to_string()
             .map_err(|error| format!("cannot read the response: {error}"))?;
-        if status.is_success() {
-            return Ok(text);
-        }
-        let message = serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|body| body["error"]["message"].as_str().map(str::to_owned))
-            .unwrap_or(text);
-        Err(format!("{message} (HTTP {})", status.as_u16()))
+        Ok((status.as_u16(), text))
     }
 
     fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {

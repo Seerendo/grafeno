@@ -8,7 +8,27 @@ export { Grafeno, GrafenoError };
 
 export interface Connection {
   url: string;
+  /** A token or API key, or a session's access token. */
   token: string;
+  /** A signed-in user's refresh token and name (14.1). */
+  refresh?: string;
+  user?: string;
+}
+
+/** Keeps a session's new tokens wherever the connection was kept. */
+function keepTokens(url: string, tokens: { access_token: string; refresh_token: string } | null): void {
+  for (const storage of storages()) {
+    try {
+      const saved = storage.getItem(STORAGE_KEY);
+      if (!saved) continue;
+      const connection = JSON.parse(saved) as Connection;
+      if (connection.url !== url || !connection.refresh) continue;
+      if (tokens) storage.setItem(STORAGE_KEY, JSON.stringify({ ...connection, token: tokens.access_token, refresh: tokens.refresh_token }));
+      else storage.removeItem(STORAGE_KEY);
+    } catch {
+      // Not kept: the session still works for this page.
+    }
+  }
 }
 
 const STORAGE_KEY = "grafeno.studio.connection";
@@ -67,7 +87,13 @@ export function defaultUrl(): string {
 export function clientFor(connection: Connection): Grafeno {
   // In the desktop app, requests go through the app (no CORS, and the
   // open database answers in-process).
-  return new Grafeno({ url: connection.url, token: connection.token || undefined, fetch: isDesktop ? desktopFetch : undefined });
+  return new Grafeno({
+    url: connection.url,
+    token: connection.refresh ? undefined : connection.token || undefined,
+    session: connection.refresh ? { access_token: connection.token, refresh_token: connection.refresh } : undefined,
+    onSession: connection.refresh ? (tokens) => keepTokens(connection.url, tokens) : undefined,
+    fetch: isDesktop ? desktopFetch : undefined,
+  });
 }
 
 /** Checks that the server answers and accepts the token. */
@@ -80,7 +106,8 @@ export async function probe(connection: Connection): Promise<{ version: string }
 
 export function describeError(error: unknown): string {
   if (error instanceof GrafenoError) {
-    if (error.status === 401) return "The server needs a valid token.";
+    if (error.status === 401 && (error.code === "session_expired" || error.message.includes("session"))) return "The session ended: sign in again.";
+    if (error.status === 401) return error.message || "The server needs a valid token.";
     if (error.status === 0) return `Cannot reach the server: ${error.message}`;
     return error.message;
   }

@@ -43,10 +43,11 @@ pub const FENCE: (&str, &str) = ("cluster", "moved");
 
 /// The newest version of [`Entry`]'s format this build reads and writes.
 /// 1: records and bulk work (13.1). 2: also change log entries copied as
-/// they are ([`Op::Change`], 13.5). An entry carries the oldest format that
+/// they are ([`Op::Change`], 13.5). 3: accounts, API keys and sessions
+/// instead of principals (14.1). An entry carries the oldest format that
 /// can hold it, so a member of the version before reads every entry that
 /// does not need the new one.
-pub const ENTRY_FORMAT: u32 = 2;
+pub const ENTRY_FORMAT: u32 = 3;
 
 pub(crate) const ENABLED: &str = "replication_enabled";
 const FIRST: &str = "replication_first";
@@ -63,7 +64,9 @@ pub(crate) enum Touch {
     Memory(String, u128),
     Index(String, String),
     Constraint(String, String),
-    Principal(String),
+    Account(String),
+    ApiKey(String),
+    Session(String),
     Namespace(String),
     MatchRule(String, String),
     State(String, String, String),
@@ -132,9 +135,23 @@ pub enum Op {
         name: String,
         constraint: Option<Json>,
     },
+    /// A key of layout 14 and before (from a member of that version): an
+    /// account and a key now.
     Principal {
         name: String,
         principal: Option<Json>,
+    },
+    Account {
+        name: String,
+        account: Option<Json>,
+    },
+    ApiKey {
+        name: String,
+        key: Option<Json>,
+    },
+    Session {
+        id: String,
+        session: Option<Json>,
     },
     Namespace {
         ns: String,
@@ -185,7 +202,9 @@ impl Op {
             Op::Bulk(Bulk::DropNamespace { ns })
             | Op::Bulk(Bulk::RebuildIndexes { ns })
             | Op::Bulk(Bulk::CompactVectors { ns }) => Some(ns),
-            Op::Principal { .. } => None,
+            Op::Principal { .. } | Op::Account { .. } | Op::ApiKey { .. } | Op::Session { .. } => {
+                None
+            }
         }
     }
 
@@ -199,7 +218,9 @@ impl Op {
             Op::Memory { ns, id, .. } => Touch::Memory(ns.clone(), id.as_u128()),
             Op::Index { ns, name, .. } => Touch::Index(ns.clone(), name.clone()),
             Op::Constraint { ns, name, .. } => Touch::Constraint(ns.clone(), name.clone()),
-            Op::Principal { name, .. } => Touch::Principal(name.clone()),
+            Op::Principal { name, .. } | Op::Account { name, .. } => Touch::Account(name.clone()),
+            Op::ApiKey { name, .. } => Touch::ApiKey(name.clone()),
+            Op::Session { id, .. } => Touch::Session(id.clone()),
             Op::Namespace { ns, .. } => Touch::Namespace(ns.clone()),
             Op::MatchRule { ns, label, .. } => Touch::MatchRule(ns.clone(), label.clone()),
             Op::State { ns, kind, key, .. } => Touch::State(ns.clone(), kind.clone(), key.clone()),
@@ -289,7 +310,7 @@ impl Touch {
             | Touch::State(ns, _, _)
             | Touch::Merge(ns, _)
             | Touch::Change(ns, _) => Some(ns),
-            Touch::Principal(_) | Touch::Bulk(_) => None,
+            Touch::Account(_) | Touch::ApiKey(_) | Touch::Session(_) | Touch::Bulk(_) => None,
         }
     }
 }
@@ -393,12 +414,32 @@ impl WriteTx {
                     .map(|guard| json_of(guard.value()))
                     .transpose()?,
             },
-            Touch::Principal(name) => Op::Principal {
+            Touch::Account(name) => Op::Account {
                 name: name.clone(),
-                principal: tx
-                    .open_table(crate::access::PRINCIPALS)
+                account: tx
+                    .open_table(crate::access::ACCOUNTS)
                     .map_err(storage)?
                     .get(name.as_str())
+                    .map_err(storage)?
+                    .map(|guard| json_of(guard.value()))
+                    .transpose()?,
+            },
+            Touch::ApiKey(name) => Op::ApiKey {
+                name: name.clone(),
+                key: tx
+                    .open_table(crate::access::API_KEYS)
+                    .map_err(storage)?
+                    .get(name.as_str())
+                    .map_err(storage)?
+                    .map(|guard| json_of(guard.value()))
+                    .transpose()?,
+            },
+            Touch::Session(id) => Op::Session {
+                id: id.clone(),
+                session: tx
+                    .open_table(crate::access::SESSIONS)
+                    .map_err(storage)?
+                    .get(id.as_str())
                     .map_err(storage)?
                     .map(|guard| json_of(guard.value()))
                     .transpose()?,
@@ -523,7 +564,14 @@ impl WriteTx {
                 ops.push(self.after_image(&Touch::Namespace(ns))?);
             }
         }
-        let format = if ops.iter().any(|op| matches!(op, Op::Change { .. })) {
+        let format = if ops.iter().any(|op| {
+            matches!(
+                op,
+                Op::Account { .. } | Op::ApiKey { .. } | Op::Session { .. }
+            )
+        }) {
+            3
+        } else if ops.iter().any(|op| matches!(op, Op::Change { .. })) {
             2
         } else {
             1
@@ -715,12 +763,27 @@ impl WriteTx {
                     }
                 }
             }
-            Op::Principal { name, principal } => {
+            Op::Principal { name, principal } => match principal {
+                // A member of layout 14 or before wrote a key: an account
+                // and a key here.
+                Some(value) => {
+                    let principal: crate::access::Principal = serde_json::from_value(value.clone())
+                        .map_err(|e| Error::Serialization(e.to_string()))?;
+                    let (account, key) = principal.split();
+                    self.put_account(&account)?;
+                    self.put_api_key(&key)?;
+                }
+                None => {
+                    self.delete_api_key(name)?;
+                    self.delete_account(name)?;
+                }
+            },
+            Op::Account { name, account } => {
                 let mut table = self
                     .tx
-                    .open_table(crate::access::PRINCIPALS)
+                    .open_table(crate::access::ACCOUNTS)
                     .map_err(storage)?;
-                match principal {
+                match account {
                     Some(value) => {
                         table
                             .insert(name.as_str(), bytes_of(value)?.as_slice())
@@ -728,6 +791,38 @@ impl WriteTx {
                     }
                     None => {
                         table.remove(name.as_str()).map_err(storage)?;
+                    }
+                }
+            }
+            Op::ApiKey { name, key } => {
+                let mut table = self
+                    .tx
+                    .open_table(crate::access::API_KEYS)
+                    .map_err(storage)?;
+                match key {
+                    Some(value) => {
+                        table
+                            .insert(name.as_str(), bytes_of(value)?.as_slice())
+                            .map_err(storage)?;
+                    }
+                    None => {
+                        table.remove(name.as_str()).map_err(storage)?;
+                    }
+                }
+            }
+            Op::Session { id, session } => {
+                let mut table = self
+                    .tx
+                    .open_table(crate::access::SESSIONS)
+                    .map_err(storage)?;
+                match session {
+                    Some(value) => {
+                        table
+                            .insert(id.as_str(), bytes_of(value)?.as_slice())
+                            .map_err(storage)?;
+                    }
+                    None => {
+                        table.remove(id.as_str()).map_err(storage)?;
                     }
                 }
             }

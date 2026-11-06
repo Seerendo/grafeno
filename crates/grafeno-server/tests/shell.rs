@@ -145,3 +145,151 @@ fn creates_and_drops_namespaces() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn grafeno(args: &[&str], stdin: &str) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_grafeno"))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(stdin.as_bytes()).unwrap();
+    drop(input);
+    child.wait_with_output().unwrap()
+}
+
+/// Phase 14.1: a user made with `grafeno users` signs in from the shell
+/// (`--user`, the password on standard input) and works within its grants.
+#[test]
+fn users_sign_in_from_the_shell() {
+    let dir = std::env::temp_dir().join(format!("grafeno-shell-users-{}", NodeId::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("users.redb");
+    let db = db.to_str().unwrap();
+    // A weak password is refused; a good one makes the user.
+    let weak = grafeno(
+        &[
+            "users",
+            "create",
+            "ana",
+            "-g",
+            "notes:write",
+            "--password-stdin",
+            "--db",
+            db,
+        ],
+        "short\n",
+    );
+    assert!(!weak.status.success());
+    assert!(
+        text(&weak.stderr).contains("at least"),
+        "{}",
+        text(&weak.stderr)
+    );
+    let made = grafeno(
+        &[
+            "users",
+            "create",
+            "ana",
+            "-g",
+            "notes:write",
+            "--password-stdin",
+            "--db",
+            db,
+        ],
+        "her long passphrase\n",
+    );
+    assert!(made.status.success(), "{}", text(&made.stderr));
+    let listed = grafeno(&["users", "list", "--db", db], "");
+    assert!(text(&listed.stdout).contains("ana") && text(&listed.stdout).contains("notes:write"));
+
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut server = Command::new(env!("CARGO_BIN_EXE_grafeno"))
+        .args([
+            "serve",
+            "--db",
+            db,
+            "--addr",
+            &format!("127.0.0.1:{port}"),
+            "--no-studio",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let url = format!("http://127.0.0.1:{port}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the server did not start"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let run = |password: &str, script: &str| {
+        grafeno(
+            &[
+                "shell",
+                "--url",
+                &url,
+                "--user",
+                "ana",
+                "--password-stdin",
+                "-n",
+                "notes",
+                "-c",
+                script,
+            ],
+            &format!("{password}\n"),
+        )
+    };
+    let ok = run(
+        "her long passphrase",
+        "CREATE (:Note {t: 'from the shell'}); MATCH (n:Note) RETURN n.t, n.@recorded_by;",
+    );
+    let out = text(&ok.stdout);
+    assert!(ok.status.success(), "{}", text(&ok.stderr));
+    assert!(text(&ok.stderr).contains("Signed in as ana"));
+    assert!(
+        out.contains("from the shell") && out.contains("ana"),
+        "{out}"
+    );
+    let wrong = run("not her passphrase", "MATCH (n) RETURN count(n);");
+    assert!(!wrong.status.success());
+    assert!(
+        text(&wrong.stderr).contains("wrong name or password"),
+        "{}",
+        text(&wrong.stderr)
+    );
+    // Outside its grants, refused.
+    let other = grafeno(
+        &[
+            "shell",
+            "--url",
+            &url,
+            "--user",
+            "ana",
+            "--password-stdin",
+            "-n",
+            "secret",
+            "-c",
+            "MATCH (n) RETURN count(n);",
+        ],
+        "her long passphrase\n",
+    );
+    assert!(
+        text(&other.stderr).contains("no read access"),
+        "{}{}",
+        text(&other.stdout),
+        text(&other.stderr)
+    );
+    let _ = server.kill();
+    let _ = server.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1,15 +1,19 @@
-//! Who is calling, and what it may do.
+//! Who is calling, and what it may do (phase 14.1).
 //!
-//! The server's static token (from `grafeno.toml`) is the owner. API keys
-//! are principals stored in the database ([`grafeno::Principal`]): each has
-//! grants per namespace (read, write, admin), may be an owner, and may be
-//! limited to changing what it recorded itself. A server with neither a
-//! token nor keys is open, as on a developer's machine.
+//! Callers are accounts ([`grafeno::Account`]): users, who sign in with a
+//! password and get a session, and service accounts, which use API keys.
+//! A request carries a session's access token (`gfs_<id>.<secret>`) or an
+//! API key (`gfk_…`), whose account's grants (narrowed by the key's scope)
+//! decide what it may do. The server's static token, when one is
+//! configured, is a break-glass credential with every right. A server with
+//! neither a token nor accounts is open, as on a developer's machine, and
+//! the first sign-in there creates its first superuser.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
-use grafeno::{Actor, Grafeno, Principal, Role};
+use grafeno::{Account, Actor, Grafeno, KeyScope, Role};
 use sha2::{Digest, Sha256};
 
 /// The hex SHA-256 of a secret, as stored.
@@ -18,51 +22,327 @@ pub fn hash_secret(secret: &str) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// A new secret: `gfk_` and 40 random hex digits.
+fn random_hex(bytes: usize) -> String {
+    let mut buffer = vec![0u8; bytes];
+    getrandom::fill(&mut buffer).expect("the system has randomness");
+    buffer.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A new API key secret: `gfk_` and 40 random hex digits.
 pub fn new_secret() -> String {
-    let mut bytes = [0u8; 20];
-    getrandom::fill(&mut bytes).expect("the system has randomness");
-    format!(
-        "gfk_{}",
-        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    format!("gfk_{}", random_hex(20))
+}
+
+/// A session's access token starts with this.
+pub const ACCESS_PREFIX: &str = "gfs_";
+/// A session's refresh token starts with this.
+pub const REFRESH_PREFIX: &str = "gfr_";
+
+/// A new session id.
+pub fn new_session_id() -> String {
+    random_hex(12)
+}
+
+/// A new token of a session: `<prefix><id>.<secret>`, and its secret.
+pub fn new_token(prefix: &str, id: &str) -> (String, String) {
+    let secret = random_hex(24);
+    (format!("{prefix}{id}.{secret}"), secret)
+}
+
+/// The session id and secret of a token with `prefix`.
+pub fn split_token<'t>(token: &'t str, prefix: &str) -> Option<(&'t str, &'t str)> {
+    token.strip_prefix(prefix)?.split_once('.')
+}
+
+// ------------------------------------------------------------- passwords
+
+/// Argon2id with the parameters OWASP recommends (19 MiB, 2 passes, 1
+/// lane): about 19 ms a hash on the laptop of the measurements.
+fn argon() -> argon2::Argon2<'static> {
+    argon2::Argon2::new(
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        argon2::Params::new(19 * 1024, 2, 1, None).expect("valid parameters"),
     )
 }
 
-/// The keys of a database, by the hash of their secret.
-#[derive(Default)]
-pub struct Keyring {
-    by_hash: RwLock<HashMap<String, Arc<Principal>>>,
+/// A password's Argon2id hash, in PHC format.
+pub fn hash_password(password: &str) -> String {
+    use argon2::password_hash::{PasswordHasher, SaltString};
+    let mut salt = [0u8; 16];
+    getrandom::fill(&mut salt).expect("the system has randomness");
+    let salt = SaltString::encode_b64(&salt).expect("a valid salt");
+    argon()
+        .hash_password(password.as_bytes(), &salt)
+        .expect("hashing works")
+        .to_string()
 }
 
-impl Keyring {
-    pub fn load(db: &Grafeno) -> grafeno::Result<Self> {
-        let keyring = Self::default();
-        keyring.reload(db)?;
-        Ok(keyring)
-    }
+/// Whether `password` is the one `hash` was made from.
+pub fn verify_password(hash: &str, password: &str) -> bool {
+    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+    PasswordHash::new(hash).is_ok_and(|parsed| {
+        argon()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok()
+    })
+}
 
-    /// Reads the keys again, after one was created or revoked.
-    pub fn reload(&self, db: &Grafeno) -> grafeno::Result<()> {
-        let principals = db.begin_read()?.principals()?;
-        let map = principals
-            .into_iter()
-            .map(|principal| (principal.secret_hash.clone(), Arc::new(principal)))
-            .collect();
-        *self.by_hash.write().expect("not poisoned") = map;
+/// A check run when no password matches, so that a wrong name takes as
+/// long as a wrong password.
+pub fn verify_nothing(password: &str) {
+    static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let hash = DUMMY.get_or_init(|| hash_password("not a password anyone has"));
+    let _ = verify_password(hash, password);
+}
+
+/// Passwords too common to accept (the start of the usual lists).
+const COMMON: &[&str] = &[
+    "password",
+    "password1",
+    "password12",
+    "password123",
+    "passw0rd",
+    "123456789",
+    "1234567890",
+    "12345678910",
+    "qwertyuiop",
+    "qwerty123",
+    "qwerty1234",
+    "1q2w3e4r5t",
+    "1qaz2wsx3edc",
+    "iloveyou",
+    "iloveyou1",
+    "sunshine1",
+    "princess1",
+    "football1",
+    "baseball1",
+    "welcome1",
+    "welcome123",
+    "abc1234567",
+    "abcdefghij",
+    "letmein123",
+    "monkey1234",
+    "dragon1234",
+    "trustno1234",
+    "superman12",
+    "1111111111",
+    "0000000000",
+    "administrator",
+    "admin12345",
+    "changeme123",
+    "changeme",
+    "contrasena",
+    "contraseña",
+    "contraseña1",
+    "123123123123",
+    "azertyuiop",
+    "zaq12wsxcde",
+    "q1w2e3r4t5",
+    "asdfghjkl1",
+    "starwars12",
+    "computer12",
+];
+
+/// The shortest password accepted.
+pub const MIN_PASSWORD: usize = 10;
+
+/// Why a password is refused, if it is.
+pub fn check_password(name: &str, password: &str) -> Result<(), String> {
+    let length = password.chars().count();
+    if length < MIN_PASSWORD {
+        return Err(format!("a password has at least {MIN_PASSWORD} characters"));
+    }
+    if length > 128 {
+        return Err("a password has at most 128 characters".into());
+    }
+    let lower = password.to_lowercase();
+    if lower.contains(&name.to_lowercase()) && name.len() >= 3 {
+        return Err("a password must not contain the account's name".into());
+    }
+    if COMMON.contains(&lower.as_str())
+        || lower
+            .chars()
+            .all(|c| c == lower.chars().next().unwrap_or(' '))
+    {
+        return Err("this password is too common: choose another".into());
+    }
+    Ok(())
+}
+
+// -------------------------------------------------------------- attempts
+
+/// Failed sign-ins, per account and per address, kept by this member: an
+/// account is locked for a while after too many, and an address refused.
+#[derive(Default)]
+pub struct Throttle {
+    accounts: Mutex<HashMap<String, Vec<Instant>>>,
+    addresses: Mutex<HashMap<String, Vec<Instant>>>,
+}
+
+/// How many failures lock an account or an address, and for how long.
+#[derive(Clone, Copy, Debug)]
+pub struct Lockout {
+    pub account_attempts: usize,
+    pub address_attempts: usize,
+    pub window: Duration,
+}
+
+impl Default for Lockout {
+    fn default() -> Self {
+        Self {
+            account_attempts: 5,
+            address_attempts: 20,
+            window: Duration::from_secs(15 * 60),
+        }
+    }
+}
+
+fn recent(map: &Mutex<HashMap<String, Vec<Instant>>>, key: &str, window: Duration) -> usize {
+    let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    let entry = map.entry(key.to_owned()).or_default();
+    entry.retain(|at| now.duration_since(*at) < window);
+    entry.len()
+}
+
+impl Throttle {
+    /// Why a sign-in is refused before its password is checked: the
+    /// account is locked, or the address made too many attempts.
+    pub fn check(
+        &self,
+        lockout: Lockout,
+        account: &str,
+        address: Option<&str>,
+    ) -> Result<(), String> {
+        if let Some(address) = address
+            && recent(&self.addresses, address, lockout.window) >= lockout.address_attempts
+        {
+            return Err("too many failed sign-ins from this address: try again later".into());
+        }
+        if recent(&self.accounts, account, lockout.window) >= lockout.account_attempts {
+            return Err(format!(
+                "the account is locked after {} failed sign-ins: try again in {} minutes",
+                lockout.account_attempts,
+                lockout.window.as_secs().div_ceil(60)
+            ));
+        }
         Ok(())
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.by_hash.read().expect("not poisoned").is_empty()
+    pub fn failed(&self, account: &str, address: Option<&str>) {
+        let now = Instant::now();
+        self.accounts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(account.to_owned())
+            .or_default()
+            .push(now);
+        if let Some(address) = address {
+            self.addresses
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(address.to_owned())
+                .or_default()
+                .push(now);
+        }
     }
 
-    pub fn find(&self, secret: &str) -> Option<Arc<Principal>> {
-        self.by_hash
-            .read()
-            .expect("not poisoned")
-            .get(&hash_secret(secret))
-            .cloned()
+    pub fn succeeded(&self, account: &str) {
+        self.accounts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(account);
     }
+}
+
+// ------------------------------------------------------------ credentials
+
+/// Which key a secret belongs to, by its hash: kept in memory, read again
+/// when a secret is not found (keys created on another cluster member
+/// arrive through the log), at most every 200 ms.
+pub struct Credentials {
+    by_hash: RwLock<HashMap<String, String>>,
+    reloaded: Mutex<Option<Instant>>,
+    accounts: std::sync::atomic::AtomicBool,
+}
+
+impl Default for Credentials {
+    fn default() -> Self {
+        Self {
+            by_hash: RwLock::default(),
+            reloaded: Mutex::new(None),
+            accounts: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+impl Credentials {
+    pub fn load(db: &Grafeno) -> grafeno::Result<Self> {
+        let credentials = Self::default();
+        credentials.reload(db)?;
+        Ok(credentials)
+    }
+
+    /// Reads the keys again (after one was created, rotated or revoked).
+    pub fn reload(&self, db: &Grafeno) -> grafeno::Result<()> {
+        let read = db.begin_read()?;
+        let map = read
+            .api_keys()?
+            .into_iter()
+            .map(|key| (key.secret_hash, key.name))
+            .collect();
+        let any = !read.accounts()?.is_empty();
+        *self.by_hash.write().unwrap_or_else(|e| e.into_inner()) = map;
+        self.accounts
+            .store(any, std::sync::atomic::Ordering::Relaxed);
+        *self.reloaded.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+        Ok(())
+    }
+
+    /// Whether the database has accounts (an open server has none).
+    pub fn has_accounts(&self) -> bool {
+        self.accounts.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Notes that an account now exists.
+    pub fn note_account(&self) {
+        self.accounts
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The name of the key whose secret hashes to `hash`.
+    pub fn key_name(&self, db: &Grafeno, hash: &str) -> Option<String> {
+        if let Some(name) = self
+            .by_hash
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(hash)
+        {
+            return Some(name.clone());
+        }
+        let stale = self
+            .reloaded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none_or(|at| at.elapsed() >= Duration::from_millis(200));
+        if stale && self.reload(db).is_ok() {
+            return self
+                .by_hash
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(hash)
+                .cloned();
+        }
+        None
+    }
+}
+
+/// How a caller proved who it is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Via {
+    Key(String),
+    Session(String),
 }
 
 /// The caller of a request.
@@ -70,38 +350,65 @@ impl Keyring {
 pub enum Caller {
     /// The static token, or an open server: everything.
     Owner,
-    Key(Arc<Principal>),
+    /// Nobody yet (signing in): nothing.
+    Anonymous,
+    Account {
+        account: Arc<Account>,
+        /// A key's scope, narrowing the account's rights.
+        scope: Option<KeyScope>,
+        via: Via,
+    },
 }
 
 impl Caller {
     pub fn may(&self, ns: &str, role: Role) -> bool {
         match self {
             Caller::Owner => true,
-            Caller::Key(principal) => principal.may(ns, role),
+            Caller::Anonymous => false,
+            Caller::Account { account, scope, .. } => {
+                let have = account.role_in(ns);
+                let have = match scope {
+                    Some(scope) => scope.narrow(ns, have),
+                    None => have,
+                };
+                have.is_some_and(|have| have >= role)
+            }
         }
     }
 
+    /// Every right: the static token, an open server, or a superuser not
+    /// narrowed by a key's scope.
     pub fn is_owner(&self) -> bool {
         match self {
             Caller::Owner => true,
-            Caller::Key(principal) => principal.owner,
+            Caller::Anonymous => false,
+            Caller::Account { account, scope, .. } => account.superuser && scope.is_none(),
         }
     }
 
     pub fn name(&self) -> &str {
         match self {
             Caller::Owner => "owner",
-            Caller::Key(principal) => &principal.name,
+            Caller::Anonymous => "anonymous",
+            Caller::Account { account, .. } => &account.name,
+        }
+    }
+
+    /// The account behind the caller, if any.
+    pub fn account(&self) -> Option<&Arc<Account>> {
+        match self {
+            Caller::Account { account, .. } => Some(account),
+            _ => None,
         }
     }
 
     /// Who the engine records as the writer (nobody for the owner token).
     pub fn actor(&self) -> Option<Actor> {
         match self {
-            Caller::Owner => None,
-            Caller::Key(principal) => Some(Actor {
-                name: principal.name.clone(),
-                own_only: principal.own_only,
+            Caller::Owner | Caller::Anonymous => None,
+            Caller::Account { account, .. } => Some(Actor {
+                name: account.name.clone(),
+                own_only: account.own_only,
             }),
         }
     }
@@ -113,10 +420,20 @@ impl Caller {
             Role::Write => "write",
             Role::Admin => "admin",
         };
-        format!(
-            "the key {:?} has no {role} access to the namespace {ns:?}",
-            self.name()
-        )
+        match self {
+            Caller::Account {
+                via: Via::Key(key),
+                scope: Some(_),
+                ..
+            } => format!(
+                "the key {key:?} (of {:?}) has no {role} access to the namespace {ns:?} within its scope",
+                self.name()
+            ),
+            _ => format!(
+                "the account {:?} has no {role} access to the namespace {ns:?}",
+                self.name()
+            ),
+        }
     }
 }
 
@@ -134,6 +451,8 @@ pub fn current() -> Caller {
 /// What a request under `/v1` needs, from its method and path.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Need {
+    /// Anybody, signed in or not (signing in).
+    Public,
     /// Any caller the server accepts.
     Caller,
     /// The owner (keys, import).
@@ -172,6 +491,13 @@ fn decode(segment: &str) -> String {
 pub fn need(method: &str, path: &str) -> Need {
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     match parts.as_slice() {
+        // Signing in, refreshing, and the first account of an open server.
+        ["auth", "signin"] | ["auth", "refresh"] | ["auth", "setup"] | ["auth", "status"] => {
+            Need::Public
+        }
+        // Their own sessions, password and keys; the handlers check more.
+        ["auth", ..] | ["keys", ..] => Need::Caller,
+        ["accounts", ..] => Need::Owner,
         ["algorithms"] | ["whoami"] | ["metrics"] => Need::Caller,
         // Listing filters what the caller may read; creating checks the
         // name in the handler.
@@ -186,7 +512,7 @@ pub fn need(method: &str, path: &str) -> Need {
         ),
         // Export checks each namespace it writes out.
         ["export"] => Need::Caller,
-        ["import"] | ["keys", ..] | ["backup"] | ["background"] | ["cluster", ..] => Need::Owner,
+        ["import"] | ["backup"] | ["background"] | ["cluster", ..] => Need::Owner,
         [ns, rest @ ..] => {
             let ns = decode(ns);
             let reads = matches!(
@@ -247,8 +573,31 @@ mod tests {
         );
         assert_eq!(need("GET", "/namespaces/demo"), ns("demo", Role::Read));
         assert_eq!(need("POST", "/import"), Need::Owner);
-        assert_eq!(need("DELETE", "/keys/ana"), Need::Owner);
+        assert_eq!(need("DELETE", "/keys/ana"), Need::Caller);
+        assert_eq!(need("POST", "/accounts"), Need::Owner);
+        assert_eq!(need("POST", "/auth/signin"), Need::Public);
+        assert_eq!(need("POST", "/auth/signout"), Need::Caller);
         assert_eq!(need("GET", "/namespaces"), Need::Caller);
+    }
+
+    #[test]
+    fn passwords_and_tokens() {
+        let hash = hash_password("a long passphrase");
+        assert!(hash.starts_with("$argon2id$"));
+        assert!(verify_password(&hash, "a long passphrase"));
+        assert!(!verify_password(&hash, "a long passphrasf"));
+        assert!(!verify_password("not a hash", "a long passphrase"));
+        assert!(check_password("ana", "short").is_err());
+        assert!(check_password("ana", "password123").is_err());
+        assert!(check_password("anabelle", "my anabelle 2024").is_err());
+        assert!(check_password("ana", "aaaaaaaaaaaa").is_err());
+        assert!(check_password("ana", "correct horse battery").is_ok());
+        let (token, secret) = new_token(ACCESS_PREFIX, "abc");
+        assert_eq!(
+            split_token(&token, ACCESS_PREFIX),
+            Some(("abc", secret.as_str()))
+        );
+        assert_eq!(split_token(&token, REFRESH_PREFIX), None);
     }
 
     #[test]

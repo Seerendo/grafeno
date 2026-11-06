@@ -34,6 +34,13 @@
 //! max_entries = 1000000  # 0 for no limit
 //! max_age_days = 7       # 0 for no limit
 //!
+//! [auth]                 # accounts and sign-in (14.1)
+//! session_minutes = 15   # an access token's life
+//! refresh_days = 30      # a session's life, refreshed or not
+//! lockout_attempts = 5   # failed sign-ins that lock an account
+//! address_attempts = 20  # failed sign-ins that refuse an address
+//! lockout_minutes = 15   # how long both last
+//!
 //! [cluster]              # several servers kept in sync by Raft (13.2)
 //! id = 1
 //! addr = "10.0.0.1:7811" # where members talk to each other
@@ -89,6 +96,53 @@ pub struct Config {
     /// Membership of a cluster (phase 13.2); absent for a single server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cluster: Option<crate::cluster::ClusterConfig>,
+    /// Sessions and lockouts (14.1).
+    #[serde(default, skip_serializing_if = "AuthSection::is_empty")]
+    pub auth: AuthSection,
+}
+
+/// `[auth]`: missing values take [`crate::accounts::AuthConfig`]'s defaults.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthSection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_minutes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_days: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lockout_attempts: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address_attempts: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lockout_minutes: Option<u64>,
+}
+
+impl AuthSection {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn config(&self) -> crate::accounts::AuthConfig {
+        let default = crate::accounts::AuthConfig::default();
+        let minutes = |m: u64| std::time::Duration::from_secs(m.max(1) * 60);
+        crate::accounts::AuthConfig {
+            session: self.session_minutes.map_or(default.session, minutes),
+            refresh: self.refresh_days.map_or(default.refresh, |d| {
+                std::time::Duration::from_secs(d.max(1) * 24 * 3600)
+            }),
+            lockout: crate::auth::Lockout {
+                account_attempts: self
+                    .lockout_attempts
+                    .unwrap_or(default.lockout.account_attempts)
+                    .max(1),
+                address_attempts: self
+                    .address_attempts
+                    .unwrap_or(default.lockout.address_attempts)
+                    .max(1),
+                window: self.lockout_minutes.map_or(default.lockout.window, minutes),
+            },
+        }
+    }
 }
 
 /// How much of the change log is kept; missing values take
@@ -346,6 +400,7 @@ pub fn init(path: &Path, db: &Path, addr: SocketAddr, force: bool) -> Result<Con
         changes: ChangesConfig::default(),
         background: crate::events::BackgroundConfig::default(),
         cluster: None,
+        auth: AuthSection::default(),
     };
     let text = format!(
         "# Grafeno server settings. Restart the service after changing them.\n\

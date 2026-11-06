@@ -41,6 +41,8 @@ pub struct ServerSettings {
     pub background: crate::events::BackgroundConfig,
     /// Membership of a cluster, if this server is a member.
     pub cluster: Option<crate::cluster::ClusterConfig>,
+    /// Sessions and lockouts.
+    pub auth: crate::accounts::AuthConfig,
 }
 
 /// Values given on the command line (or in the environment), if any.
@@ -93,6 +95,7 @@ impl ServerSettings {
             changes: config.changes.retention(),
             background: config.background.clone(),
             cluster: config.cluster.clone(),
+            auth: config.auth.config(),
         }
     }
 
@@ -117,7 +120,8 @@ pub fn run(
         .with_background(settings.background.clone())
         .with_import_chunk(settings.import_chunk)
         .with_limits(settings.limits.clone())
-        .with_max_requests(settings.max_requests);
+        .with_max_requests(settings.max_requests)
+        .with_auth(settings.auth);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
