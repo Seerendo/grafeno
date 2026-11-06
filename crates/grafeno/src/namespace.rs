@@ -28,6 +28,7 @@ pub const RESERVED: &[&str] = &[
     "keys",
     "backup",
     "metrics",
+    "cluster",
 ];
 
 /// Names longer than this are refused when a namespace is created.

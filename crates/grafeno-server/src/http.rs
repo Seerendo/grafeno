@@ -33,8 +33,9 @@ const BODY_LIMIT: usize = 32 * 1024 * 1024;
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<Grafeno>,
-    /// Commits concurrent writes in groups.
-    pub writer: Arc<grafeno::Writer>,
+    /// Commits concurrent writes in groups, or, on a cluster member,
+    /// through the cluster's leader.
+    pub writer: Arc<Writes>,
     pub token: Option<Arc<str>>,
     /// API keys, loaded from the database.
     pub keys: Arc<Keyring>,
@@ -52,6 +53,64 @@ pub struct AppState {
     /// Work that runs from the change log.
     pub background: crate::events::BackgroundConfig,
     pub runners: Arc<std::sync::Mutex<Vec<crate::events::RunnerStatus>>>,
+}
+
+/// Where writes go: the group-commit writer of a single server, or the
+/// cluster's leader through this member (writes are then serialized on the
+/// leader, and a follower answers "busy" naming it).
+pub struct Writes {
+    local: Arc<grafeno::Writer>,
+    cluster: Option<Arc<grafeno_cluster::Node>>,
+}
+
+impl Writes {
+    pub fn write<T: Send + 'static>(
+        &self,
+        f: impl Fn(&mut WriteTx) -> grafeno::Result<T> + Send + 'static,
+    ) -> grafeno::Result<T> {
+        match &self.cluster {
+            Some(node) => node.write(f).map_err(crate::cluster::engine_error),
+            None => self.local.write(f),
+        }
+    }
+
+    pub fn write_bulk<T: Send + 'static>(
+        &self,
+        f: impl Fn(&mut WriteTx) -> grafeno::Result<T> + Send + 'static,
+    ) -> grafeno::Result<T> {
+        match &self.cluster {
+            Some(node) => node.write(f).map_err(crate::cluster::engine_error),
+            None => self.local.write_bulk(f),
+        }
+    }
+
+    pub fn flush(&self) -> grafeno::Result<()> {
+        self.local.flush()
+    }
+
+    /// Imports an export in chunks (single servers only for now: a cluster
+    /// member refuses, until imports go through the leader's log).
+    pub fn import(
+        &self,
+        input: impl std::io::BufRead,
+        chunk: usize,
+    ) -> grafeno::Result<grafeno::DumpStats> {
+        if self.cluster.is_some() {
+            return Err(grafeno::Error::Invalid(
+                "imports into a cluster are not supported yet: import into a single server and start the cluster from it".into(),
+            ));
+        }
+        self.local.import(input, chunk)
+    }
+
+    pub fn metrics(&self) -> grafeno::WriterSnapshot {
+        self.local.metrics()
+    }
+
+    /// The cluster member, on a cluster.
+    pub fn cluster(&self) -> Option<&Arc<grafeno_cluster::Node>> {
+        self.cluster.as_ref()
+    }
 }
 
 /// Requests served at once under `/v1` by default.
@@ -77,7 +136,10 @@ impl AppState {
     ) -> Self {
         Self {
             events: crate::events::Events::attach(&db),
-            writer: Arc::new(grafeno::Writer::new(db.clone(), options)),
+            writer: Arc::new(Writes {
+                local: Arc::new(grafeno::Writer::new(db.clone(), options)),
+                cluster: None,
+            }),
             keys: Arc::new(Keyring::load(&db).unwrap_or_default()),
             db,
             token: token.map(Arc::from),
@@ -88,6 +150,15 @@ impl AppState {
             background: crate::events::BackgroundConfig::default(),
             runners: Arc::default(),
         }
+    }
+
+    /// Sends every write through a cluster member (phase 13.2).
+    pub fn with_cluster(mut self, node: Arc<grafeno_cluster::Node>) -> Self {
+        self.writer = Arc::new(Writes {
+            local: self.writer.local.clone(),
+            cluster: Some(node),
+        });
+        self
     }
 
     pub fn with_background(mut self, background: crate::events::BackgroundConfig) -> Self {
@@ -264,6 +335,9 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/{ns}/consolidation", get(consolidation))
         .route("/{ns}/summaries", post(summaries))
         .route("/metrics", get(metrics))
+        .route("/cluster", get(cluster_status))
+        .route("/cluster/voters", post(cluster_voters))
+        .route("/cluster/compact", post(cluster_compact))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
         .route_layer(middleware::from_fn_with_state(state.clone(), admit))
         .route_layer(middleware::from_fn_with_state(state.clone(), observe));
@@ -2391,6 +2465,48 @@ async fn delete_webhook(
 }
 
 /// What the background tasks have done.
+fn member(state: &AppState) -> ApiResult<Arc<grafeno_cluster::Node>> {
+    state.writer.cluster().cloned().ok_or_else(|| {
+        ApiError::from(grafeno::Error::Invalid(
+            "this server is not a cluster member".into(),
+        ))
+    })
+}
+
+/// This member's view of the cluster.
+async fn cluster_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let node = member(&state)?;
+    Ok(Json(json!(node.status())))
+}
+
+#[derive(serde::Deserialize)]
+struct VotersBody {
+    voters: Vec<u64>,
+}
+
+/// Changes the voting members (on the leader).
+async fn cluster_voters(
+    State(state): State<AppState>,
+    Json(body): Json<VotersBody>,
+) -> ApiResult<Json<Value>> {
+    let node = member(&state)?;
+    let index = tokio::task::spawn_blocking(move || node.change_membership(&body.voters))
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .map_err(|error| ApiError::from(crate::cluster::engine_error(error)))?;
+    Ok(Json(json!({ "index": index })))
+}
+
+/// Snapshots this member's database and drops its log up to it.
+async fn cluster_compact(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let node = member(&state)?;
+    let index = tokio::task::spawn_blocking(move || node.compact())
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .map_err(|error| ApiError::from(crate::cluster::engine_error(error)))?;
+    Ok(Json(json!({ "snapshot_index": index })))
+}
+
 async fn background(State(state): State<AppState>) -> Json<Value> {
     let runners = state
         .runners

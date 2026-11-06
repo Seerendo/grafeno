@@ -165,6 +165,39 @@ docker build -t grafeno .
 docker run -d -p 7810:7810 -v grafeno-data:/data -e GRAFENO_TOKEN=change-me grafeno
 ```
 
+## A cluster of servers
+
+Three (or five) servers can hold the same data and keep serving when one
+fails (phase 13.2). Each gets the same `[cluster]` section in its
+`grafeno.toml`, with its own `id` and `addr`:
+
+```toml
+[cluster]
+id = 1                         # 2 and 3 on the others
+addr = "10.0.0.1:7811"         # where this member listens for the others
+secret = "a long random string, the same on every member"
+voters = [1, 2, 3]             # the first members; [] on a member that joins later
+peers = [
+  { id = 1, addr = "10.0.0.1:7811" },
+  { id = 2, addr = "10.0.0.2:7811" },
+  { id = 3, addr = "10.0.0.3:7811" },
+]
+```
+
+Start all three: they elect a leader within a second or so. Writes go to
+the leader (a follower answers 503 with `write to member N`); reads work on
+every member. `grafeno cluster status --url http://10.0.0.1:7810 --token …`
+shows a member's view; `grafeno cluster voters 1 2 3 4` (on the leader)
+changes the members, the new one listed in every member's `peers` and
+started with `voters = []`; `grafeno cluster compact` snapshots a member's
+database and trims its log. Each member keeps its Raft state in
+`<db>.raft` and snapshots in `<db>.snapshots/`.
+
+For now: traffic between members is authenticated by the secret but not
+encrypted (keep them on a private network); imports go into a single server
+before it starts a cluster; background work (extraction, summaries,
+webhooks) is meant for single servers until it runs on the leader alone.
+
 ## Backups
 
 A backup is a consistent copy of the whole database file (every

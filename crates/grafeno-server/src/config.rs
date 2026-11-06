@@ -34,6 +34,13 @@
 //! max_entries = 1000000  # 0 for no limit
 //! max_age_days = 7       # 0 for no limit
 //!
+//! [cluster]              # several servers kept in sync by Raft (13.2)
+//! id = 1
+//! addr = "10.0.0.1:7811" # where members talk to each other
+//! secret = "…"           # the same on every member
+//! voters = [1, 2, 3]     # the first members ([] when joining)
+//! peers = [{ id = 1, addr = "10.0.0.1:7811" }, { id = 2, addr = "10.0.0.2:7811" }]
+//!
 //! [background]           # work that runs from the change log
 //! extract = ["notes"]    # extract mentions as texts change (11.1)
 //! communities = ["notes"]  # keep community summaries fresh (11.3)
@@ -79,6 +86,9 @@ pub struct Config {
         skip_serializing_if = "crate::events::BackgroundConfig::is_empty"
     )]
     pub background: crate::events::BackgroundConfig,
+    /// Membership of a cluster (phase 13.2); absent for a single server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<crate::cluster::ClusterConfig>,
 }
 
 /// How much of the change log is kept; missing values take
@@ -335,6 +345,7 @@ pub fn init(path: &Path, db: &Path, addr: SocketAddr, force: bool) -> Result<Con
         writer: WriterConfig::default(),
         changes: ChangesConfig::default(),
         background: crate::events::BackgroundConfig::default(),
+        cluster: None,
     };
     let text = format!(
         "# Grafeno server settings. Restart the service after changing them.\n\

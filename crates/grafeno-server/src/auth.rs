@@ -181,7 +181,7 @@ pub fn need(method: &str, path: &str) -> Need {
         ),
         // Export checks each namespace it writes out.
         ["export"] => Need::Caller,
-        ["import"] | ["keys", ..] | ["backup"] | ["background"] => Need::Owner,
+        ["import"] | ["keys", ..] | ["backup"] | ["background"] | ["cluster", ..] => Need::Owner,
         [ns, rest @ ..] => {
             let ns = decode(ns);
             let reads = matches!(

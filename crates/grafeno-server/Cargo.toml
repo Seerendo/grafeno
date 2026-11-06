@@ -24,6 +24,8 @@ studio = []
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 grafeno.workspace = true
+grafeno-cluster.workspace = true
+grafeno-raft.workspace = true
 grafeno-memory = { path = "../grafeno-memory" }
 grafeno-query.workspace = true
 serde.workspace = true

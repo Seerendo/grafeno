@@ -115,6 +115,10 @@ enum Command {
     /// API keys: names with grants per namespace (read, write, admin).
     #[command(subcommand)]
     Keys(KeysCommand),
+    /// A cluster member's view, its voters, and compacting its log (on a
+    /// running member, through its API).
+    #[command(subcommand)]
+    Cluster(ClusterCommand),
     /// Write a consistent copy of the whole database to a new file, from a
     /// file directly or from a running server, which keeps serving.
     Backup {
@@ -235,6 +239,85 @@ struct KeysTarget {
     /// A database file, opened directly.
     #[arg(long, env = "GRAFENO_DB", default_value = "grafeno.redb")]
     db: PathBuf,
+}
+
+#[derive(Args)]
+struct MemberTarget {
+    /// The member's API address.
+    #[arg(long, env = "GRAFENO_URL", default_value = "http://127.0.0.1:7810")]
+    url: String,
+    /// An owner token or key.
+    #[arg(long, env = "GRAFENO_TOKEN", hide_env_values = true)]
+    token: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum ClusterCommand {
+    /// Role, term, leader, positions and voters, as this member sees them.
+    Status {
+        #[command(flatten)]
+        target: MemberTarget,
+    },
+    /// Changes the voting members (ask the leader): the old and new sets
+    /// decide together, then the new set alone.
+    Voters {
+        #[command(flatten)]
+        target: MemberTarget,
+        /// The new voters' ids.
+        #[arg(required = true)]
+        ids: Vec<u64>,
+    },
+    /// Snapshots the member's database and drops its log up to it.
+    Compact {
+        #[command(flatten)]
+        target: MemberTarget,
+    },
+}
+
+fn cluster_call(
+    target: &MemberTarget,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<(), String> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let url = format!("{}/v1/cluster{path}", target.url.trim_end_matches('/'));
+    let auth = target.token.as_ref().map(|token| format!("Bearer {token}"));
+    let response = match (method, body) {
+        ("GET", _) => {
+            let mut request = agent.get(&url);
+            if let Some(auth) = &auth {
+                request = request.header("Authorization", auth);
+            }
+            request.call()
+        }
+        (_, body) => {
+            let mut request = agent.post(&url);
+            if let Some(auth) = &auth {
+                request = request.header("Authorization", auth);
+            }
+            request.send_json(body.unwrap_or(serde_json::json!({})))
+        }
+    };
+    let mut response = response.map_err(|error| format!("{url}: {error}"))?;
+    let status = response.status();
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|error| error.to_string())?;
+    let pretty = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|value| serde_json::to_string_pretty(&value).ok())
+        .unwrap_or(text);
+    if status.is_success() {
+        println!("{pretty}");
+        Ok(())
+    } else {
+        Err(format!("{status}: {pretty}"))
+    }
 }
 
 #[derive(Subcommand)]
@@ -531,6 +614,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Command::Cluster(command) => match command {
+            ClusterCommand::Status { target } => cluster_call(&target, "GET", "", None)?,
+            ClusterCommand::Voters { target, ids } => cluster_call(
+                &target,
+                "POST",
+                "/voters",
+                Some(serde_json::json!({ "voters": ids })),
+            )?,
+            ClusterCommand::Compact { target } => cluster_call(&target, "POST", "/compact", None)?,
+        },
         Command::Keys(command) => {
             use grafeno_server::keys;
             match command {

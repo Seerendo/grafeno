@@ -328,6 +328,20 @@ Syncing a note and replacing its links in one request:
 ] }
 ```
 
+### Cluster
+
+On a cluster member (`[cluster]` in `grafeno.toml`, see
+[docs/install.md](../../docs/install.md)), writes go through the leader:
+a follower answers `busy` (503) with `write to member N`. Owner routes:
+
+| Method | Path | Body | Returns |
+| --- | --- | --- | --- |
+| `GET` | `/v1/cluster` | | `{id, role, term, leader, commit, applied, last_index, snapshot_index, voters, outgoing}` |
+| `POST` | `/v1/cluster/voters` | `{voters: [ids]}` | `{index}` (on the leader) |
+| `POST` | `/v1/cluster/compact` | | `{snapshot_index}` |
+
+`grafeno cluster status|voters|compact --url … --token …` call them.
+
 ## MCP
 
 `grafeno mcp` speaks MCP (protocol versions 2025-06-18, 2025-03-26 and

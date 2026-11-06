@@ -663,6 +663,24 @@ Each entry holds the final value of every record its transaction wrote,
 texts included, and the change log entries of the commit, as JSON; a
 binary encoding comes with 13.2, when entries go over the network.
 
+## A Raft cluster (`crates/grafeno-cluster/examples/cluster_bench.rs`)
+
+Sequential writes of one node each, on files on one NVMe disk with
+immediate durability, 2026-11-06; the cluster's three members run in one
+process, connected by the memory transport.
+
+| | Writes/s | p50 | p99 |
+| --- | --- | --- | --- |
+| one server | 618 | 1.58 ms | 2.27 ms |
+| three-member cluster | 137 | 7.22 ms | 9.94 ms |
+
+A write through the cluster is a dry run on the leader, an fsync of the
+Raft log on the leader and on each follower, and an apply with its own
+fsync on every member, all sharing one disk here; grouping writes in one
+entry is the lever (not built yet). With the leader cut off, another
+member is elected and commits a write in 510 to 831 ms (median 595, five
+runs) with 50 ms ticks (election timeouts of 0.5 to 1 s).
+
 ## Remaining limits
 
 - **Vector search reads each visited vector from redb** (about 0.4 µs per

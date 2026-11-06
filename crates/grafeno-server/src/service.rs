@@ -39,6 +39,8 @@ pub struct ServerSettings {
     pub changes: grafeno::Retention,
     /// Work that runs from the change log.
     pub background: crate::events::BackgroundConfig,
+    /// Membership of a cluster, if this server is a member.
+    pub cluster: Option<crate::cluster::ClusterConfig>,
 }
 
 /// Values given on the command line (or in the environment), if any.
@@ -90,6 +92,7 @@ impl ServerSettings {
             import_chunk: config.writer.import_chunk(),
             changes: config.changes.retention(),
             background: config.background.clone(),
+            cluster: config.cluster.clone(),
         }
     }
 
@@ -110,20 +113,25 @@ pub fn run(
     grafeno_query::set_parallelism(settings.scan_threads);
     db.set_durability(settings.durability);
     db.set_change_retention(settings.changes);
-    let state = AppState::with_writer(db, settings.token.as_deref(), settings.writer)
+    let mut state = AppState::with_writer(db.clone(), settings.token.as_deref(), settings.writer)
         .with_background(settings.background.clone())
         .with_import_chunk(settings.import_chunk)
         .with_limits(settings.limits.clone())
         .with_max_requests(settings.max_requests);
-    tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .build()?
-        .block_on(http::serve_until(
-            state,
-            settings.addr,
-            settings.options,
-            shutdown,
-        ))?;
+        .build()?;
+    if let Some(cluster) = &settings.cluster {
+        let node = crate::cluster::start(db, settings.db.as_deref(), cluster)?;
+        runtime.block_on(crate::cluster::listen(node.clone(), cluster))?;
+        state = state.with_cluster(node);
+    }
+    runtime.block_on(http::serve_until(
+        state,
+        settings.addr,
+        settings.options,
+        shutdown,
+    ))?;
     Ok(())
 }
 

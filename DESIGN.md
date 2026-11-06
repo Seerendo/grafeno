@@ -392,7 +392,7 @@ without a current user. They remain possible for embedded use.
     Cypher and tool compatibility, query optimization under concurrency,
     batched execution, batched and parallel traversal, compact storage and
     vector quantization.
-13. **Distributed operation** (in progress, 13.1 done; six steps; see below): several
+13. **Distributed operation** (in progress, 13.1 and 13.2 done; six steps; see below): several
     servers holding the same data, kept in sync by a replicated log with
     Raft; a leader elected among them coordinates writes, the others take
     over when it fails, and reads and large queries spread over all of
@@ -1825,7 +1825,7 @@ As built (`crates/grafeno/src/replication.rs`, layout version 14):
   A binary encoding of entries is left for 13.2, where they cross the
   network.
 
-**13.2 Raft: leader election and log replication.**
+**13.2 Raft: leader election and log replication** (done).
 
 - Consensus among three or five members: terms, elections with randomized
   timeouts, log replication with quorum commit, a pre-vote phase so that a
@@ -1849,6 +1849,85 @@ As built (`crates/grafeno/src/replication.rs`, layout version 14):
   restarts, all from a seed) runs thousands of schedules and never loses an
   acknowledged write, never applies two different entries at one index, and
   always elects a leader once a majority can talk.
+
+As built (`crates/grafeno-raft`, `crates/grafeno-cluster`,
+`crates/grafeno-server/src/cluster.rs`):
+
+- The choice: Raft written here, not `openraft`. As a deterministic state
+  machine (`Raft::tick`, `step`, `propose`, `change_membership`, `compact`,
+  and a `Ready` with the hard state and entries to persist, the messages to
+  send after persisting, and the committed entries to apply), the protocol
+  can be simulated from a seed, which an async library on tokio makes hard;
+  it adds no dependency and fits 13.1's log and the server's threads. It has
+  terms and randomized timeouts, pre-vote, leader stickiness and
+  check-quorum, replication with conflict hints, commitment of the leader's
+  own term (a no-op per term), membership by joint consensus in two
+  automatic phases (a removed leader steps down once the new configuration
+  commits), compaction, and snapshots whose data the caller carries. A
+  snapshot that gets no answer is sent again at the next check-quorum.
+- The simulation (`grafeno-raft/tests/simulation.rs`): five members, three
+  voting at first; a network that drops, delays, duplicates and reorders
+  messages and splits in two; crashes and restarts from persisted state;
+  membership changes and compaction; client writes retried as a client
+  would. Each schedule checks one leader per term, one entry per committed
+  index, that no acknowledged write is lost, and that once healed a leader
+  is elected and every member converges. 300 schedules run with `cargo
+  test` (3 000 passed while it was written; `RAFT_SEEDS` runs more); in
+  300 schedules there were 2 076 terms with a leader, 1 109 snapshots
+  installed, 1 614 configurations committed, 35 638 acknowledged writes
+  and 1 785 crashes. Writing it found its own bugs (a snapshot lost in the
+  network was never sent again) and the test's (a write proposed to a
+  leader that is then deposed may be dropped; members leave).
+- A member (`grafeno_cluster::Node`): a thread owns the member's `Raft`,
+  ticks it, persists in a redb file of its own (`<db>.raft`: the data file
+  has one writer), sends through a `Transport`, and applies committed
+  entries to the database in order. Raft's own entries (no-ops,
+  configurations) apply as empty entries, so the database's position and
+  Raft's index are the same number.
+- Writes on the leader (`Node::write`): `Grafeno::dry_run` runs the write in
+  a transaction it discards and returns its value and 13.1's entry; the
+  entry is proposed, and once a majority has it every member, the leader
+  included, applies it, and the write returns. One way of applying for all,
+  so a member that crashed anywhere recovers from its recorded position.
+  Writes are serialized on the leader (each runs on the state the previous
+  left); grouping several in one entry is left for later. A follower
+  refuses with the leader's id; a write whose entry a new leader replaced
+  fails as `Lost` (it did not happen); one with no answer in time fails as
+  `Timeout` (it may have).
+- Snapshots are backups at the applied index (`Node::compact`); a member
+  too far behind receives the file's bytes beside the message and replaces
+  its data in one transaction (`Grafeno::restore_backup`).
+- The server: `[cluster]` in `grafeno.toml` (id, the address members talk
+  on, a shared secret, the first voters, the peers' addresses, the tick).
+  Members talk on their own port, `POST /raft` with one message (a length,
+  the message as JSON, then a snapshot's bytes), authenticated by the
+  secret; a thread and a bounded queue per peer, so sending never blocks
+  Raft. Every write handler goes through `Writes`, which on a member calls
+  the leader's path; a follower answers 503 naming the leader. `GET
+  /v1/cluster`, `POST /v1/cluster/voters`, `POST /v1/cluster/compact` (owner)
+  and `grafeno cluster status|voters|compact`.
+- Not built in this step: TLS between members (the traffic is
+  authenticated, not encrypted: keep members on a private network),
+  imports into a cluster (refused; import into one server and start the
+  cluster from it), peers learned at run time (addresses come from the
+  configuration), and work that must run on the leader alone
+  (extraction, summaries, webhooks run on every member and fail on
+  followers): 13.3.
+- Tests: the simulation; `grafeno-cluster/tests/cluster.rs` (members in one
+  process: replication with equal exports, change logs and positions; a
+  leader cut off while the others elect another, its lone write never
+  happening; a restart from persisted state; members joining from the log
+  and from a snapshot, and leaving); `grafeno-server/tests/cluster.rs`
+  (three `grafeno serve` processes: writes through the leader's API, a
+  follower naming the leader, the leader's process killed and writes going
+  on).
+- Measured (`grafeno-cluster/examples/cluster_bench.rs`, files on one NVMe
+  disk, immediate durability, sequential writes of one node): one server
+  618 writes a second (p50 1.58 ms), a three-member cluster in one process
+  137 (p50 7.22 ms, p99 9.94 ms): each write is a dry run, an fsync of the
+  Raft log on the leader and on each follower, then an apply with its own
+  fsync on each member, all on one disk. A leader cut off is replaced and a
+  write committed in 510 to 831 ms (median 595) with 50 ms ticks.
 
 **13.3 Continuing when an instance fails.**
 
@@ -2320,6 +2399,7 @@ spinning disk, on ARM, or for days at a time.
 | Compact adjacency and int8 vectors (12.5) | adjacency 19% smaller; searches walk a quarter of the vector bytes at the same recall (0.996) and speed in memory | E1-disk | `compact_storage.csv` |
 | Vector search, 1 M vectors in 512 MiB, int8 copies (12.5) | 3.5 to 4.2 ms (4.9 to 5.2 ms before), same resident memory | E2 | `vector_search_int8.csv` |
 | Replication log (13.1) | writes at 80% of the speed with the log on; 568 bytes per record; a replica applies 22 300 records/s | E1-mem | `replication_log.csv` |
+| Raft cluster of three (13.2) | 137 sequential writes/s (618 on one server), p50 7.2 ms; a leader replaced in 0.5 to 0.8 s | E1-disk | `cluster.csv` |
 
 ### Guarantees and the tests that hold them
 
@@ -2352,6 +2432,7 @@ real binary. The ones that carry each guarantee:
 | Batched and parallel traversal give the same rows in the same order | `grafeno-query/tests/traversal.rs` | eight pattern shapes (both directions from a middle anchor, edge variables and properties, targets filtered by earlier nodes, edge uniqueness, variable length with paths, bound nodes, row filters) against one anchor at a time; a hub's 12 000 two-hop rows on one and four threads; shared nodes read once; `max_rows` across slices |
 | int8 searches keep their quality and compact entries read back exactly | `grafeno/tests/quantized.rs`, `src/store.rs` and `src/vector.rs` tests | recall@10 of 0.95 or more with exact scores; the copies through removal, replacement, compaction, backup and namespace drop; adjacency values round trip at every bound; quantized dot products within 0.02 |
 | A replica that applies the log holds the same data | `grafeno/tests/replication.rs`, `model.rs`, `grafeno-query/tests/replication.rs` | every kind of write replayed onto an empty database and compared (exports, counters, change log, constraints and their events, merges, state, principals); idempotence, gaps, catching up from a backup after truncation, group commits with failures; the model's random sequences replayed |
+| Raft never loses an acknowledged write and members agree | `grafeno-raft/tests/simulation.rs`, `grafeno-cluster/tests/cluster.rs`, `grafeno-server/tests/cluster.rs` | random schedules of drops, delays, duplicates, partitions, crashes, membership changes and snapshots checked for one leader per term, one entry per index, no lost acknowledged write and convergence; members in one process and three real processes through failover, restart, joining and leaving |
 | Costly queries stop | `grafeno-query/tests/adversarial.rs` | 32 hostile queries within their limits; nesting just under the limit runs on a 2 MiB stack; `max_cost` refuses; procedure rows count against `max_memory` |
 | Nothing a client sends crashes the parser | `grafeno-query/tests/fuzz.rs` | proptest: random tokens, valid queries with random edits, arbitrary text, through the lexer, parser, planner, `EXPLAIN` and executor |
 | The API keeps its contract | `grafeno-server/tests/http.rs`, `mcp.rs`, `shell.rs`, `clients/typescript/test` | every endpoint and MCP tool, limits, conflicts (409 with details), metrics, the CLI shell, and the client against the real binary |
@@ -2377,6 +2458,8 @@ cargo run --release -p grafeno-query --example batch_bench -- 200000
 cargo run --release -p grafeno-query --example traversal_bench -- 200000
 cargo run --release -p grafeno --example storage_bench -- 100000 50000
 cargo run --release -p grafeno --example replication_bench -- 100000
+cargo test --release -p grafeno-raft --test simulation   # RAFT_SEEDS=3000 for more
+cargo run --release -p grafeno-cluster --example cluster_bench -- 500
 cargo run --release -p grafeno --example changes_bench -- 100000
 cargo run --release -p grafeno-server --example events_bench -- 100000
 cargo test --release -p grafeno-query --test adversarial -- --nocapture
@@ -2428,10 +2511,10 @@ docker run --rm --memory 512m --memory-swap 512m -e CACHE_MB=128 -e PROJECTION_C
   (phase 14 allows both).
 - On Windows, building needs the MSVC toolchain (Visual Studio Build Tools):
   tokio's `windows-sys` does not build with the self-contained GNU toolchain.
-- Phase 13: `openraft` or a Raft of our own; the cluster transport (HTTP/2
-  with the existing stack, or gRPC); the default read consistency
-  (linearizable or bounded); and how floating-point aggregates merge across
-  members so that results equal one server's.
+- Phase 13: TLS between members (13.2 authenticates with a shared secret
+  only); the default read consistency (linearizable or bounded); and how
+  floating-point aggregates merge across members so that results equal one
+  server's. (Decided in 13.2: a Raft of our own; HTTP between members.)
 - Phase 14: whether denials exist (they make exceptions to broad grants
   easy, as in Neo4j, but PostgreSQL does without them); whether hidden
   properties are absent or masked; session tokens signed (stateless,

@@ -1,0 +1,7 @@
+measure,one_server,three_members,unit
+sequential writes,618,137,writes/s
+write latency p50,1.58,7.22,ms
+write latency p99,2.27,9.94,ms
+failover min (leader cut off until another commits),,510,ms
+failover median,,595,ms
+failover max,,831,ms

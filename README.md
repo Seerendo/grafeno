@@ -176,6 +176,11 @@ measured speed, memory and limits, with charts, in
   transaction is kept as the effects it had (records' final values, the
   change log entries); another database applies the entries in order and
   holds the same data, catching up from a backup and the entries after it.
+- **Phase 13.2, Raft:** servers form a cluster (`[cluster]` in
+  `grafeno.toml`): a leader elected with Raft (written here, tested by a
+  deterministic simulation of thousands of failure schedules) orders the
+  writes, a majority must hold each before it returns, and a new leader
+  takes over in under a second when one fails.
 
 Next, the rest of phase 13: distributed operation (servers kept in sync by a
 replicated log with Raft, failover, reads and large queries spread over
