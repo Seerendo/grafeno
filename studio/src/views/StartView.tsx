@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { describeError, type Connection } from "../api.ts";
 import { type RecentDatabase, desktop } from "../desktop.ts";
@@ -21,6 +21,7 @@ export function StartView({
   onOpen: (path: string) => void;
   onConnect: (connection: Connection, remember: boolean) => void;
 }) {
+  const active = useRef(false);
   const [recovering, setRecovering] = useState(false);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const unavailable = busy || recovering;
@@ -30,7 +31,11 @@ export function StartView({
   const [remember, setRemember] = useState(saved !== null);
 
   const refresh = () => void desktop.recent().then(setRecent).catch(() => setRecent([]));
-  useEffect(refresh, []);
+  useEffect(() => {
+    active.current = true;
+    refresh();
+    return () => { active.current = false; };
+  }, []);
 
   const pick = async (create: boolean) => {
     const path = await desktop.pickDatabase(create);
@@ -46,11 +51,12 @@ export function StartView({
       const path = await desktop.pickSave("memoria-recuperada.redb", "redb");
       if (!path) return;
       await desktop.restoreTo(source, path);
-      onOpen(path);
+      // Una recuperación pendiente no desplaza una base abierta desde el menú.
+      if (active.current) onOpen(path);
     } catch (problem) {
-      setRecoveryError(describeError(problem));
+      if (active.current) setRecoveryError(describeError(problem));
     } finally {
-      setRecovering(false);
+      if (active.current) setRecovering(false);
     }
   };
 

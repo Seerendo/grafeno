@@ -70,8 +70,8 @@ fn publish(file: NamedTempFile, path: &Path) -> Result<u64> {
 impl Grafeno {
     /// Recovers a closed backup into a new database file. The source is read
     /// only; checksum verification, layout upgrades and namespace checks run
-    /// on a private copy. A repaired or inconsistent copy is rejected. Existing
-    /// destinations (including symbolic links) are never replaced.
+    /// on a private copy. Reported repairs and namespace inconsistencies are
+    /// rejected. Existing destinations (including symbolic links) are never replaced.
     ///
     /// Use a completed backup, not a live database that another process writes.
     /// No session is opened or replaced by this operation.
