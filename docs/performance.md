@@ -28,6 +28,7 @@ test environments").
 | Linking what memories mention to known entities | 3 200 texts/s, 99.4% linked right, none wrong |
 | Planning by value distribution (200 000 people) | 355 ms → 11 ms where the rare condition was written second |
 | Reads with 16 readers and a busy writer | 8 000 queries/s, p99 under 9 ms |
+| Grouping 200 000 rows | 233 ms (609 ms before 12.3); 2 million matches counted within the limits |
 
 ## Test environments
 
@@ -202,6 +203,18 @@ splits across threads: 161 ms on 16 threads against 706 ms on one.
 Reads run on snapshots and never wait for the writer: 16 readers do about
 9 200 queries a second (a point lookup and two hops each), and 8 000 while
 a writer commits 10 500 nodes a second, with p99 under 9 ms.
+
+## Aggregates over many rows
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/charts/batch-aggregation-dark.svg">
+  <img alt="Aggregates over 200 000 people: grouping 609 ms to 233 ms, a filter and four aggregates 479 ms to 162 ms, two hops counting 2 million rows 6.3 s to 4.8 s" src="assets/charts/batch-aggregation-light.svg">
+</picture>
+
+A `MATCH` followed by aggregates folds its rows into the groups as it finds
+them, a batch at a time, instead of holding every row: grouping 200 000
+people is 2.6 times faster, and counting two million matches fits the
+server's limits.
 
 ## Moving graphs in and out
 

@@ -11,6 +11,7 @@ use grafeno::{
 use serde::Serialize;
 
 use crate::QueryError;
+use crate::aggregate::{Groups, Spec};
 use crate::ast::{
     Clause, Expr, Key, Mode, NodePattern, Pattern, ProcedureCall, Projection, Query, RelPattern,
     RemoveItem, Schema, SetItem, Statement,
@@ -580,6 +581,8 @@ struct Runner<'a> {
     profile: Option<Vec<PlanStep>>,
     info: PlanInfo,
     budget: Budget,
+    /// Groups a MATCH folded for the RETURN or WITH right after it.
+    folded: Option<Vec<(Vec<Value>, Row)>>,
     /// Records read when the last PROFILE step ended.
     reads_seen: u64,
 }
@@ -622,6 +625,7 @@ impl<'a> Runner<'a> {
             profile: (mode == Mode::Profile).then(Vec::new),
             info,
             budget: Budget::new(limits),
+            folded: None,
             reads_seen: 0,
         })
     }
@@ -717,11 +721,26 @@ impl<'a> Runner<'a> {
                 })
             });
             if let Clause::Return(projection) = clause {
+                let folded = self.folded.take();
                 let edges = EdgeFilter::any();
                 let ctx = self.ctx(&edges);
-                let (columns, rows) = project(&ctx, flow.rows, projection, &flow.vars)?;
+                let (columns, rows) =
+                    project_folded(&ctx, flow.rows, projection, &flow.vars, folded)?;
                 self.record("RETURN", details.unwrap_or_default(), rows.len(), started);
                 return Ok((columns, rows));
+            }
+            // A MATCH right before an aggregating RETURN or WITH folds its
+            // rows as it makes them.
+            if let Some(spec) = self.folding_spec(clause, query.clauses.get(index + 1), &flow)? {
+                let mut groups = Groups::default();
+                flow = self.apply_folding(clause, flow, None, Some((&spec, &mut groups)))?;
+                let rows = groups.rows as usize;
+                let edges = EdgeFilter::any();
+                let ctx = self.ctx(&edges);
+                self.folded = Some(groups.finish(&spec, &ctx)?);
+                bound.extend(flow.vars.iter().cloned());
+                self.record(clause.name(), details.unwrap_or_default(), rows, started);
+                continue;
             }
             // A MATCH right before a plain RETURN … LIMIT n stops after
             // the rows it needs.
@@ -762,6 +781,44 @@ impl<'a> Runner<'a> {
         Ok((Vec::new(), Vec::new()))
     }
 
+    /// What to fold while matching, when `clause` is a (non-optional)
+    /// `MATCH` and `next` a RETURN or WITH with aggregates.
+    fn folding_spec(
+        &self,
+        clause: &Clause,
+        next: Option<&Clause>,
+        flow: &Flow,
+    ) -> Result<Option<Spec>, QueryError> {
+        let (
+            Clause::Match {
+                optional: false,
+                patterns,
+                ..
+            },
+            Some(Clause::Return(projection) | Clause::With(projection)),
+        ) = (clause, next)
+        else {
+            return Ok(None);
+        };
+        if !projection.star
+            && !projection
+                .items
+                .iter()
+                .any(|item| item.expr.has_aggregate())
+        {
+            return Ok(None);
+        }
+        // The variables after the match, in the order it binds them.
+        let mut vars = flow.vars.clone();
+        for var in patterns.iter().flat_map(Pattern::variables) {
+            if !vars.iter().any(|known| known == var) {
+                vars.push(var.to_owned());
+            }
+        }
+        let (items, _) = projection_items(projection, &vars)?;
+        Ok(Spec::new(&items))
+    }
+
     /// How many rows a RETURN needs from the clause before it: `SKIP + LIMIT`
     /// when it neither sorts, groups nor drops duplicates.
     fn row_cap(&self, projection: &Projection) -> Result<Option<usize>, QueryError> {
@@ -797,8 +854,21 @@ impl<'a> Runner<'a> {
     fn apply(
         &mut self,
         clause: &Clause,
+        flow: Flow,
+        cap: Option<usize>,
+    ) -> Result<Flow, QueryError> {
+        self.apply_folding(clause, flow, cap, None)
+    }
+
+    /// [`Runner::apply`]; a `MATCH` given `fold` folds its rows into those
+    /// groups as it makes them instead of keeping them (batched
+    /// aggregation for the `RETURN` or `WITH` after it).
+    fn apply_folding(
+        &mut self,
+        clause: &Clause,
         mut flow: Flow,
         cap: Option<usize>,
+        mut fold: Option<(&Spec, &mut Groups)>,
     ) -> Result<Flow, QueryError> {
         match clause {
             Clause::Match {
@@ -858,7 +928,25 @@ impl<'a> Runner<'a> {
                                 None
                             },
                         };
-                        rows = match_pattern(&ctx, rows, pattern, &matcher)?;
+                        if last
+                            && !*optional
+                            && let Some((spec, groups)) = &mut fold
+                        {
+                            let spec: &Spec = spec;
+                            match_pattern_into(
+                                &ctx,
+                                rows,
+                                pattern,
+                                &matcher,
+                                &Emit {
+                                    prepare: &|ctx, rows| spec.columns(ctx, rows),
+                                },
+                                &mut |columns| groups.fold(spec, columns),
+                            )?;
+                            rows = Vec::new();
+                        } else {
+                            rows = match_pattern(&ctx, rows, pattern, &matcher)?;
+                        }
                     }
                     if rows.is_empty() && *optional {
                         let mut row = row;
@@ -899,9 +987,11 @@ impl<'a> Runner<'a> {
                 flow.bind([var]);
             }
             Clause::With(projection) => {
+                let folded = self.folded.take();
                 let edges = EdgeFilter::any();
                 let ctx = self.ctx(&edges);
-                let (columns, values) = project(&ctx, flow.rows, projection, &flow.vars)?;
+                let (columns, values) =
+                    project_folded(&ctx, flow.rows, projection, &flow.vars, folded)?;
                 let mut rows: Vec<Row> = values
                     .into_iter()
                     .map(|values| columns.iter().cloned().zip(values).collect())
@@ -1288,7 +1378,47 @@ fn match_pattern(
     pattern: &Pattern,
     matcher: &Matcher,
 ) -> Result<Vec<Row>, QueryError> {
+    let mut out = Vec::new();
+    let budget = ctx.budget;
+    match_pattern_into(
+        ctx,
+        rows,
+        pattern,
+        matcher,
+        &Emit {
+            prepare: &|_, rows| Ok(rows),
+        },
+        &mut |rows: Vec<Row>| {
+            out.extend(rows);
+            // Every row so far is held.
+            budget.rows(out.len())
+        },
+    )?;
+    Ok(out)
+}
+
+/// Turns a batch of rows into what a consumer takes.
+type Prepare<'a, T> = dyn Fn(&Context, Vec<Row>) -> Result<T, QueryError> + Sync + 'a;
+
+/// Where the rows of a match go: `prepare` turns each batch into what
+/// `take` consumes, on the thread that matched it (a worker of a parallel
+/// scan included); `take` receives the batches in row order.
+struct Emit<'e, T> {
+    prepare: &'e Prepare<'e, T>,
+}
+
+/// Every match of `pattern` from each of `rows`, handed over in batches of
+/// up to [`crate::aggregate::BATCH`] rows (or all at once with a row cap).
+fn match_pattern_into<T: Send>(
+    ctx: &Context,
+    rows: Vec<Row>,
+    pattern: &Pattern,
+    matcher: &Matcher,
+    emit: &Emit<T>,
+    take: &mut (dyn FnMut(T) -> Result<(), QueryError> + Send),
+) -> Result<(), QueryError> {
     let nodes = pattern.nodes();
+    // Rows of the serial path not yet handed over.
     let mut out = Vec::new();
     for row in rows {
         let value_of = |expr: &Expr| eval(ctx, expr, Scope::Row(&row)).ok();
@@ -1320,10 +1450,13 @@ fn match_pattern(
             filter: matcher.filter,
         };
         if let Some(ids) = parallel_candidates(ctx, &source, &row, matcher)? {
-            out.extend(crate::parallel::map_chunks(
+            if !out.is_empty() {
+                take((emit.prepare)(ctx, std::mem::take(&mut out))?)?;
+            }
+            crate::parallel::map_chunks(
                 ctx,
                 &ids,
-                |ctx, chunk| -> Result<Vec<Row>, QueryError> {
+                |ctx, chunk| -> Result<T, QueryError> {
                     let mut rows = Vec::new();
                     for id in chunk {
                         let Some(node) = ctx.node(*id)? else {
@@ -1334,10 +1467,11 @@ fn match_pattern(
                             start.extend(ctx, &row, node, &mut rows, None)?;
                         }
                     }
-                    Ok(rows)
+                    ctx.budget.rows(rows.len())?;
+                    (emit.prepare)(ctx, rows)
                 },
-            )?);
-            ctx.budget.rows(out.len())?;
+                take,
+            )?;
             continue;
         }
         let mut cursor = None;
@@ -1345,7 +1479,10 @@ fn match_pattern(
             let (page, next) = candidates(ctx, nodes[anchor], &source, &row, cursor)?;
             for node in page {
                 if start.extend(ctx, &row, node, &mut out, matcher.cap)? {
-                    return Ok(out);
+                    return take((emit.prepare)(ctx, out)?);
+                }
+                if matcher.cap.is_none() && out.len() >= crate::aggregate::BATCH {
+                    take((emit.prepare)(ctx, std::mem::take(&mut out))?)?;
                 }
                 ctx.budget.rows(out.len())?;
             }
@@ -1355,7 +1492,10 @@ fn match_pattern(
             }
         }
     }
-    Ok(out)
+    if !out.is_empty() {
+        take((emit.prepare)(ctx, out)?)?;
+    }
+    Ok(())
 }
 
 /// A pattern bound at its anchor, ready to grow from each candidate.
@@ -2258,15 +2398,16 @@ impl Runner<'_> {
 
 // ---------------------------------------------------------------- projection
 
-/// Evaluates a RETURN or WITH: grouping when there are aggregates, then
-/// DISTINCT, ORDER BY, SKIP and LIMIT.
-fn project(
-    ctx: &Context,
-    rows: Vec<Row>,
+/// A projected expression and its column name.
+type Item = (Expr, String);
+
+/// The items of a RETURN or WITH (`*` expanded to the variables) and their
+/// column names.
+fn projection_items(
     projection: &Projection,
     variables: &[String],
-) -> Result<(Vec<String>, Vec<Vec<Value>>), QueryError> {
-    let mut items: Vec<(Expr, String)> = Vec::new();
+) -> Result<(Vec<Item>, Vec<String>), QueryError> {
+    let mut items: Vec<Item> = Vec::new();
     if projection.star {
         if variables.is_empty() && projection.items.is_empty() {
             return Err(QueryError::runtime("`*` needs variables in scope"));
@@ -2289,40 +2430,42 @@ fn project(
             )));
         }
     }
-    let aggregated = items.iter().any(|(expr, _)| expr.has_aggregate());
+    Ok((items, columns))
+}
 
+/// Evaluates a RETURN or WITH: grouping when there are aggregates, then
+/// DISTINCT, ORDER BY, SKIP and LIMIT.
+fn project(
+    ctx: &Context,
+    rows: Vec<Row>,
+    projection: &Projection,
+    variables: &[String],
+) -> Result<(Vec<String>, Vec<Vec<Value>>), QueryError> {
+    project_folded(ctx, rows, projection, variables, None)
+}
+
+/// [`project`], with the groups already folded while the rows were matched
+/// (`folded`), or folded here from `rows`.
+fn project_folded(
+    ctx: &Context,
+    rows: Vec<Row>,
+    projection: &Projection,
+    variables: &[String],
+    folded: Option<Vec<(Vec<Value>, Row)>>,
+) -> Result<(Vec<String>, Vec<Vec<Value>>), QueryError> {
+    let (items, columns) = projection_items(projection, variables)?;
     // Each output row keeps a row of variables (plus the aliases) for ORDER BY.
     let mut output: Vec<(Vec<Value>, Row)> = Vec::new();
-    if aggregated {
-        let mut groups: Vec<Vec<Row>> = Vec::new();
-        let mut index: HashMap<String, usize> = HashMap::new();
-        for row in rows {
-            let mut key = String::new();
-            for (expr, _) in items.iter().filter(|(expr, _)| !expr.has_aggregate()) {
-                key.push_str(&eval(ctx, expr, Scope::Row(&row))?.key());
-                key.push('\u{1}');
-            }
-            match index.get(&key) {
-                Some(&at) => groups[at].push(row),
-                None => {
-                    index.insert(key, groups.len());
-                    groups.push(vec![row]);
-                }
-            }
+    if let Some(folded) = folded {
+        output = folded;
+    } else if let Some(spec) = Spec::new(&items) {
+        let mut groups = Groups::default();
+        let mut rows = rows.into_iter().peekable();
+        while rows.peek().is_some() {
+            let batch: Vec<Row> = rows.by_ref().take(crate::aggregate::BATCH).collect();
+            groups.fold(&spec, spec.columns(ctx, batch)?)?;
         }
-        let grouped = items.iter().any(|(expr, _)| !expr.has_aggregate());
-        if groups.is_empty() && !grouped {
-            // Aggregates over nothing still give one row: count(*) = 0.
-            groups.push(Vec::new());
-        }
-        for group in groups {
-            let values = items
-                .iter()
-                .map(|(expr, _)| eval(ctx, expr, Scope::Group(&group)))
-                .collect::<Result<Vec<_>, _>>()?;
-            let source = group.into_iter().next().unwrap_or_default();
-            output.push((values, source));
-        }
+        output = groups.finish(&spec, ctx)?;
     } else {
         for row in rows {
             let values = items

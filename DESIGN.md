@@ -383,9 +383,10 @@ without a current user. They remain possible for embedded use.
     extraction and reconciliation of entities, automatic invalidation of
     contradicting facts, hierarchical community summaries, continuous
     ingestion and events.
-12. **Compatibility and speed** (planned, in three steps): wider Cypher
-    and tool compatibility, query optimization under concurrency,
-    vectorized storage and execution.
+12. **Compatibility and speed** (in progress, in five steps): wider
+    Cypher and tool compatibility, query optimization under concurrency,
+    batched execution, batched and parallel traversal, compact storage and
+    vector quantization.
 13. **Integrations**: Grafito first, Python bindings, read replicas.
 
 ### Phase 8 plan
@@ -1492,13 +1493,103 @@ As built:
   second, 16 readers 9 168 (8.5 ms p99 at most), and 7 960 with a busy
   writer committing 10 500 nodes a second meanwhile.
 
-**12.3 Vectorized storage and execution.**
+**12.3 Batched execution** (done).
 
 - Execution in batches of rows with column vectors instead of one row at
   a time, for scans, filters and aggregates.
+
+(Vector quantization and compressed postings and adjacency lists, first
+planned here, moved to 12.5: the adjacency format is better designed with
+12.4's batched traversal, which is what reads it.)
+
+As built:
+
+- `crates/grafeno-query/src/aggregate.rs`. A `MATCH` followed by a
+  (non-optional) `RETURN` or `WITH` with aggregates no longer hands its
+  rows on: `match_pattern_into` emits them in batches of up to 1 024 to a
+  consumer, and the runner folds each batch into the groups. A batch is
+  first turned into columns (each row's group key, and one vector per
+  aggregate argument) by `Spec::columns`, which reads only the rows, so a
+  parallel scan computes them on its worker threads; `Groups::fold` then
+  folds the columns in row order. Every other aggregation (after `UNWIND`,
+  `WITH`, a procedure) folds its held rows the same way, so there is one
+  code path; `Scope::Group` is gone, replaced by `Scope::Folded` (a group's
+  first row and its folded aggregates).
+- Accumulators: a counter for `count` (with a set of keys for `DISTINCT`),
+  running totals for `sum` and `avg` that keep the row-at-a-time results
+  exactly (integers checked as they add, so an overflow on the way is still
+  an error; floats added in row order; durations apart), the best value for
+  `min` and `max` (the first of equal minimums and the last of equal
+  maximums, as `min_by` and `max_by` gave), and the values themselves only
+  for `collect`, `median`, percentiles, `stdev`, `variance` and `mode`, which
+  then reduce as before (`eval::reduce`). Groups keep the order they first
+  appeared in.
+- `parallel::map_chunks` hands each chunk's result on in chunk order as
+  soon as the chunks before it are done (an ordered delivery under a lock)
+  instead of joining everything at the end, so a parallel scan feeds the
+  fold while it runs, and the results (floating-point sums included) equal
+  one thread's. A fold holds at most a batch; `max_rows` still counts every
+  row a match returns whole (the collecting path checks the running total).
+- Filters still run row by row, inside the match; scans and filters gain
+  from building no row maps for the aggregation and from not holding them.
+  Expansion is still one anchor at a time: that is 12.4.
+- Tests: `grafeno-query/tests/batch.rs` (every aggregate against values
+  worked out by hand, `DISTINCT`, nested aggregates, ties of `min` and
+  `max`, empty groups, overflow and type errors, durations, `WITH … WHERE`,
+  `*`, `ORDER BY` an aggregate, PROFILE rows, 90 000 rows counted under a
+  `max_rows` of 2 000, parallel folds equal to serial ones).
+- Measured (`examples/batch_bench.rs`, 200 000 people, against 12.2 in the
+  same session, best of two runs each): counting a label 291 → 204 ms;
+  grouping by a property 609 → 233 ms; a filter and four aggregates 479 ->
+  162 ms; one hop grouped by the far end 989 → 650 ms; `collect` per group
+  54 → 23 ms; two hops counting 1 990 000 rows 6 309 → 4 825 ms, and with
+  the standard limits it now completes instead of failing on `max_rows`.
+
+**12.4 Batched and parallel traversal.**
+
+Researched with 12.3, not built. Today a match grows from one anchor at a
+time: each candidate expands step by step (its partial matches breadth
+first, but alone), so 200 000 people who work at 1 000 companies read
+those companies' adjacency 200 000 times, decode each company again for
+every person, and jump around the adjacency B-tree in id order of the
+people rather than of the nodes read. The plan, in two parts:
+
+- **Batched traversal with columnar frontiers.** Take the candidates of a
+  start in batches (a thousand or so) and expand the whole batch one step
+  at a time, level by level, as a breadth-first search from many sources
+  does. The partial matches of a batch are columns (the node at each
+  position, the edges of each step, the input row they came from), not
+  one row map each. At each step: collect the distinct nodes the frontier
+  stands on, sort them by id (adjacency keys are `(ns, node, label,
+  edge)`, so reads become a forward walk through the B-tree), read each
+  one's adjacency once, filter edges by label, direction and time once per
+  node, and join the result back to the partial matches that stand there
+  (a hash join from node id to its edges). Targets are decoded once per
+  batch, and their labels and properties checked once, however many
+  partial matches reach them. Rows are built only at the end, or never:
+  12.3's folding consumes the columns directly. Variable-length steps and
+  `shortestPath` become level-synchronous searches from a batch of sources
+  with a visited bitmap per source (64 sources per machine word, as
+  multi-source BFS does), instead of one search per start.
+- **Parallel traversal.** When a level's frontier is large enough (the
+  same kind of threshold as 12.2's parallel scans, measured), split its
+  distinct nodes across the shared threads; each thread reads and filters
+  its share and produces its part of the next frontier, and the parts are
+  concatenated in frontier order, so the rows and their order stay those
+  of one thread, as in 12.2. Searches from many sources split by source
+  batch. All threads share the snapshot and the query's budget.
+- Measures: one and two hops grouped by the far end, friends of friends,
+  variable-length reach and shortest paths from many sources, against
+  12.3; results equal to the row-at-a-time matcher (kept for patterns the
+  batched one does not cover, such as path variables at first).
+
+**12.5 Compact storage and vector quantization.**
+
 - Vector quantization (int8, with exact rescoring of the best
-  candidates), compressed postings and adjacency lists; memory and speed
-  compared with 10.6's numbers.
+  candidates), compressed postings and adjacency lists (delta-encoded ids
+  in blocks per node, read whole by 12.4's traversal); memory and speed
+  compared with 10.6's numbers. A new layout version, with its upgrade and
+  fixture.
 
 ## Measurements and test environments
 
@@ -1584,6 +1675,7 @@ spinning disk, on ARM, or for days at a time.
 | Extraction of 20 000 memories naming 5 000 entities | 3 200 texts/s; 99.4% of mentions linked right, none wrong; 0.06 s when nothing changed | E1-mem | `extract_*.csv` |
 | Queries a planner without statistics got wrong (200 000 people) | 355 ms → 11 ms, 1.8 s → 2.7 ms, 2.6 s → 1.8 ms; a scan 4.4 times faster on 16 threads | E1-mem | `planner_plans.csv`, `parallel_scan.csv` |
 | Read queries with 16 readers and a busy writer | 9 200 a second alone, 8 000 with 10 500 writes a second; p99 under 9 ms | E1-mem | `read_concurrency.csv` |
+| Aggregates over 200 000 rows, folded as they come (12.3) | 2.3 to 2.9 times faster grouped; 2 M rows counted within the standard limits (failed before) | E1-mem | `batch_aggregation.csv` |
 
 ### Guarantees and the tests that hold them
 
@@ -1612,6 +1704,7 @@ real binary. The ones that carry each guarantee:
 | Isolation between principals | `grafeno-server/tests/access.rs` | a matrix of keys, grants and endpoints: no read or write outside a key's grants, `own_only` keys change only their own records |
 | GQ follows Cypher | `grafeno-query/tests/cypher.rs`, `queries.rs`, `statistics.rs`, `indexes.rs`, `algorithms.rs` | clauses, functions, aggregates, indexes, planner choices and algorithms on known graphs |
 | The planner estimates from the data, and parallel scans change nothing | `grafeno-query/tests/planner.rs` | statistics against known distributions and degrees; starts chosen by value distribution, parameters and pattern cost; join order; statistics rebuilt after drift and index changes; a cached statement after its index is dropped; parallel rows and order equal one thread's, and limits hold across threads |
+| Folded aggregates equal row-at-a-time ones and hold no rows | `grafeno-query/tests/batch.rs` | every aggregate with DISTINCT, nesting, ties, empty groups, overflow and duration sums; 90 000 rows counted under a `max_rows` of 2 000; parallel folds equal to one thread's |
 | Costly queries stop | `grafeno-query/tests/adversarial.rs` | 32 hostile queries within their limits; nesting just under the limit runs on a 2 MiB stack; `max_cost` refuses; procedure rows count against `max_memory` |
 | Nothing a client sends crashes the parser | `grafeno-query/tests/fuzz.rs` | proptest: random tokens, valid queries with random edits, arbitrary text, through the lexer, parser, planner, `EXPLAIN` and executor |
 | The API keeps its contract | `grafeno-server/tests/http.rs`, `mcp.rs`, `shell.rs`, `clients/typescript/test` | every endpoint and MCP tool, limits, conflicts (409 with details), metrics, the CLI shell, and the client against the real binary |
@@ -1633,6 +1726,7 @@ cargo run --release -p grafeno --example constraint_bench -- 10000 50000
 cargo run --release -p grafeno-memory --example community_bench -- 1000 50
 cargo run --release -p grafeno --example interchange_bench -- 100000
 cargo run --release -p grafeno-query --example planner_bench -- 200000
+cargo run --release -p grafeno-query --example batch_bench -- 200000
 cargo run --release -p grafeno --example changes_bench -- 100000
 cargo run --release -p grafeno-server --example events_bench -- 100000
 cargo test --release -p grafeno-query --test adversarial -- --nocapture
@@ -1651,8 +1745,10 @@ docker run --rm --memory 512m --memory-swap 512m -e CACHE_MB=128 -e PROJECTION_C
 
 ### What the measurements leave open
 
-- Counting every edge of 10 M in GQ takes longer than the 30 s limit:
-  aggregates do not stream yet (12.3).
+- Counting every edge of 10 M in GQ took longer than the 30 s limit.
+  Since 12.3 aggregates fold as rows come and hold none, but each edge is
+  still matched one at a time; this was not measured again in E2 (12.4's
+  batched traversal is the lever).
 - Vector inserts slow down as the index grows: each 100 000 took 96 s at
   first and 809 s at the millionth (E2); a vector cache that keeps the
   most used entries, larger transactions and quantization (12.3) are the

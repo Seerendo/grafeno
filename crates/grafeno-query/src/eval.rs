@@ -1,7 +1,7 @@
 //! Expression evaluation: operators, pseudo-properties, functions and
 //! aggregates.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use grafeno::{
@@ -116,19 +116,29 @@ impl Context<'_> {
     }
 }
 
-/// Where variables come from: one row, or a group of rows (for aggregates,
-/// where plain variables read the group's first row).
+/// Where variables come from: one row, or a group of rows already folded
+/// (`aggregate.rs`): its first row, the value of each aggregate in it, and
+/// whether the group is empty.
 #[derive(Clone, Copy)]
 pub(crate) enum Scope<'a> {
     Row(&'a Row),
-    Group(&'a [Row]),
+    Folded(&'a Row, &'a [(Expr, Value)], bool),
+}
+
+/// The folded value of an aggregate expression.
+fn folded(values: &[(Expr, Value)], expr: &Expr) -> Result<Value, QueryError> {
+    values
+        .iter()
+        .find(|(aggregate, _)| aggregate == expr)
+        .map(|(_, value)| value.clone())
+        .ok_or_else(|| error("an aggregate was not folded"))
 }
 
 impl Scope<'_> {
     fn var(&self, name: &str) -> Option<&Value> {
         match self {
             Scope::Row(row) => row.get(name),
-            Scope::Group(rows) => rows.first().and_then(|row| row.get(name)),
+            Scope::Folded(row, _, _) => row.get(name),
         }
     }
 
@@ -136,7 +146,7 @@ impl Scope<'_> {
     fn row(&self) -> Row {
         match self {
             Scope::Row(row) => (*row).clone(),
-            Scope::Group(rows) => rows.first().cloned().unwrap_or_default(),
+            Scope::Folded(row, _, _) => (*row).clone(),
         }
     }
 }
@@ -307,7 +317,7 @@ pub(crate) fn eval(ctx: &Context, expr: &Expr, scope: Scope) -> Result<Value, Qu
             .ok_or_else(|| error(format!("missing parameter ${name}"))),
         Expr::Var(name) => match scope.var(name) {
             Some(value) => Ok(value.clone()),
-            None if matches!(scope, Scope::Group(rows) if rows.is_empty()) => Ok(Value::Null),
+            None if matches!(scope, Scope::Folded(_, _, true)) => Ok(Value::Null),
             None => Err(error(format!("unknown variable `{name}`"))),
         },
         Expr::Property(target, key) => property(ctx, &eval(ctx, target, scope)?, key),
@@ -431,7 +441,7 @@ pub(crate) fn eval(ctx: &Context, expr: &Expr, scope: Scope) -> Result<Value, Qu
             ))),
         },
         Expr::CountStar => match scope {
-            Scope::Group(rows) => Ok(Value::Int(rows.len() as i64)),
+            Scope::Folded(_, values, _) => folded(values, expr),
             Scope::Row(_) => Err(error("count(*) is an aggregate: use it in RETURN or WITH")),
         },
         Expr::Slice(target, from, to) => {
@@ -651,11 +661,12 @@ pub(crate) fn eval(ctx: &Context, expr: &Expr, scope: Scope) -> Result<Value, Qu
             }
             Ok(Value::Map(map))
         }
-        Expr::Call {
-            name,
-            distinct,
-            args,
-        } if AGGREGATES.contains(&name.as_str()) => aggregate(ctx, name, *distinct, args, scope),
+        Expr::Call { name, .. } if AGGREGATES.contains(&name.as_str()) => match scope {
+            Scope::Folded(_, values, _) => folded(values, expr),
+            Scope::Row(_) => Err(error(format!(
+                "{name}() is an aggregate: use it in RETURN or WITH"
+            ))),
+        },
         Expr::Call { name, args, .. } => {
             let values = args
                 .iter()
@@ -670,7 +681,7 @@ pub(crate) fn eval(ctx: &Context, expr: &Expr, scope: Scope) -> Result<Value, Qu
     }
 }
 
-fn number(value: &Value) -> Option<f64> {
+pub(crate) fn number(value: &Value) -> Option<f64> {
     match value {
         Value::Int(i) => Some(*i as f64),
         Value::Float(f) => Some(*f),
@@ -895,52 +906,20 @@ fn variance(values: &[f64], ddof: usize) -> Option<f64> {
     Some(squares / (values.len() - ddof) as f64)
 }
 
-fn aggregate(
-    ctx: &Context,
-    name: &str,
-    distinct: bool,
-    args: &[Expr],
-    scope: Scope,
-) -> Result<Value, QueryError> {
-    let Scope::Group(rows) = scope else {
-        return Err(error(format!(
-            "{name}() is an aggregate: use it in RETURN or WITH"
-        )));
-    };
-    let (arg, percentile) = match (name, args) {
-        ("percentilecont" | "percentiledisc", [arg, p]) => {
-            let p = eval(
-                ctx,
-                p,
-                Scope::Row(&rows.first().cloned().unwrap_or_default()),
-            )?;
-            match number(&p) {
-                Some(p) if (0.0..=1.0).contains(&p) => (arg, p),
-                _ => {
-                    return Err(error(format!(
-                        "{name}() needs a percentile between 0 and 1, got {}",
-                        p.to_json()
-                    )));
-                }
-            }
-        }
-        ("percentilecont" | "percentiledisc", _) => {
-            return Err(error(format!(
-                "{name}() takes a value and a percentile (0 to 1)"
-            )));
-        }
-        (_, [arg]) => (arg, 0.0),
-        _ => return Err(error(format!("{name}() takes one argument"))),
-    };
-    let mut values = Vec::new();
-    let mut seen = HashSet::new();
-    for row in rows {
-        let value = eval(ctx, arg, Scope::Row(row))?;
-        if value.is_null() || (distinct && !seen.insert(value.key())) {
-            continue;
-        }
-        values.push(value);
+/// The percentile argument of `percentileCont` and `percentileDisc`.
+pub(crate) fn percentile_of(name: &str, value: &Value) -> Result<f64, QueryError> {
+    match number(value) {
+        Some(p) if (0.0..=1.0).contains(&p) => Ok(p),
+        _ => Err(error(format!(
+            "{name}() needs a percentile between 0 and 1, got {}",
+            value.to_json()
+        ))),
     }
+}
+
+/// An aggregate over its values (nulls and, with DISTINCT, repeats already
+/// left out), in the order they came.
+pub(crate) fn reduce(name: &str, values: Vec<Value>, percentile: f64) -> Result<Value, QueryError> {
     Ok(match name {
         "count" => Value::Int(values.len() as i64),
         "collect" => Value::List(values),

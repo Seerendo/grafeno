@@ -1,0 +1,7 @@
+query,before_ms,after_ms,before_standard_limits,after_standard_limits
+count a label (200 000 people),290.8,204.3,ok,ok
+"group by a property (200 groups, count and avg)",609.3,233.2,ok,ok
+"filter, then four aggregates",478.9,162.4,ok,ok
+"one hop, grouped by the far end (1 000 companies)",989.0,650.2,ok,ok
+"collect per group (20 000 people)",54.0,23.2,ok,ok
+"two hops, 1 990 000 rows counted",6309.1,4824.6,fails (max_rows),ok

@@ -567,6 +567,27 @@ differences between builds are within the runs' noise. Reads scale about
 8 times from 1 to 16 threads (8 cores, 16 hardware threads), and a busy
 writer costs them 5 to 15%; the writer slows as readers take the CPU.
 
+## Batched aggregation (`crates/grafeno-query/examples/batch_bench.rs`)
+
+200 000 `:Person` nodes (200 cities, ages 0 to 89), 1 000 companies, each
+person working at one; in memory, release build, 2026-11-05. "Before" is
+12.2 built in the same session; best of two runs each, alternating.
+
+| Query | Before 12.3 | After |
+| --- | --- | --- |
+| `MATCH (p:Person) RETURN count(*)` | 290.8 ms | 204.3 ms |
+| `… RETURN p.city, count(*), avg(p.age)` (200 groups) | 609.3 ms | 233.2 ms |
+| `… WHERE p.age > 30 RETURN p.status, sum, min, max, count` | 478.9 ms | 162.4 ms |
+| `MATCH (c:Company)<-[:works_at]-(p:Person) RETURN c.name, count(p)` | 989.0 ms | 650.2 ms |
+| `… WHERE p.uid < 20000 RETURN p.city, collect(p.uid)` | 54.0 ms | 23.2 ms |
+| two hops from 10 000 people, 1 990 000 rows counted | 6 309 ms; fails with the standard limits (`max_rows`) | 4 825 ms; completes with them |
+
+Before, every row of the match was kept as a map of variables, then
+grouped by a string key into lists of rows, and each aggregate walked its
+group's rows again. Now rows fold into one accumulator per group as the
+match makes them. The two-hop count gains least: its time is the
+expansion, one anchor at a time, which 12.4 batches.
+
 ## Remaining limits
 
 - **Vector search reads each visited vector from redb** (about 0.4 µs per

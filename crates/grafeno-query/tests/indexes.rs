@@ -259,8 +259,10 @@ fn limits_stop_runaway_queries() {
         "{error}"
     );
 
+    // Rows held at once: a cartesian product returned whole. (Counted, it
+    // folds as it goes and holds no rows: 12.3.)
     let error = run_with(
-        "MATCH (a:Person), (b:Person) RETURN count(*)",
+        "MATCH (a:Person), (b:Person) RETURN a.name, b.name",
         Limits {
             max_rows: Some(10_000),
             ..Limits::none()

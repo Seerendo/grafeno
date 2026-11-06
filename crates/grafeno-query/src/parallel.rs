@@ -4,8 +4,9 @@
 //! index range that holds many of them) hands chunks of the candidates to
 //! worker threads, which share the snapshot and the query's budget (its
 //! limits count every thread's reads, and time out or cancel them all).
-//! Each chunk's rows come back in chunk order, so the rows are the same,
-//! in the same order, as on one thread.
+//! Each chunk's rows are handed on in chunk order, as soon as the chunks
+//! before it are done, so the rows are the same, in the same order, as on
+//! one thread, and a batched aggregation folds them while the scan runs.
 //!
 //! Threads are shared by every query of the process: at most one per CPU
 //! (or [`set_parallelism`]) work at once, so many concurrent queries do
@@ -14,13 +15,14 @@
 //! again.
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use grafeno::NodeId;
 
 use crate::QueryError;
-use crate::eval::{Context, Row};
+use crate::eval::Context;
 
 /// Starts with fewer candidates than this run on one thread.
 pub const MIN_CANDIDATES: usize = 4096;
@@ -95,15 +97,36 @@ impl Drop for WorkerMark {
     }
 }
 
-/// The rows of one chunk, by its position.
-type ChunkRows = (usize, Result<Vec<Row>, QueryError>);
+/// Chunks done but not yet handed over, waiting for the ones before them.
+struct Delivery<'t, T> {
+    next: usize,
+    ready: BTreeMap<usize, T>,
+    take: &'t mut (dyn FnMut(T) -> Result<(), QueryError> + Send),
+    /// The first error, by chunk position.
+    error: Option<(usize, QueryError)>,
+}
+
+impl<T> Delivery<'_, T> {
+    fn fail(&mut self, at: usize, error: QueryError) {
+        if self.error.as_ref().is_none_or(|(first, _)| at < *first) {
+            self.error = Some((at, error));
+        }
+    }
+}
 
 /// Runs `work` on chunks of `ids` on this thread and the workers it can
-/// get, and joins the rows in chunk order. The first error (in chunk
-/// order) stops the others.
-pub(crate) fn map_chunks<F>(ctx: &Context, ids: &[NodeId], work: F) -> Result<Vec<Row>, QueryError>
+/// get, and hands each chunk's result to `take` in chunk order, as soon as
+/// the chunks before it are done (so results do not pile up). The first
+/// error, in chunk order, stops the rest.
+pub(crate) fn map_chunks<T, F>(
+    ctx: &Context,
+    ids: &[NodeId],
+    work: F,
+    take: &mut (dyn FnMut(T) -> Result<(), QueryError> + Send),
+) -> Result<(), QueryError>
 where
-    F: Fn(&Context, &[NodeId]) -> Result<Vec<Row>, QueryError> + Sync,
+    T: Send,
+    F: Fn(&Context, &[NodeId]) -> Result<T, QueryError> + Sync,
 {
     let wanted = (ids.len() / MIN_CHUNK).saturating_sub(1);
     let reserved = Reserved(if ids.len() >= MIN_CANDIDATES {
@@ -113,7 +136,10 @@ where
     });
     let _mark = WorkerMark::new();
     if reserved.0 == 0 {
-        return work(ctx, ids);
+        for chunk in ids.chunks(MIN_CHUNK) {
+            take(work(ctx, chunk)?)?;
+        }
+        return Ok(());
     }
     let threads = reserved.0 + 1;
     // Several chunks per thread, so a slow chunk does not hold the rest.
@@ -121,7 +147,12 @@ where
     let chunks: Vec<&[NodeId]> = ids.chunks(size).collect();
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
-    let results: Mutex<Vec<ChunkRows>> = Mutex::new(Vec::new());
+    let delivery = Mutex::new(Delivery {
+        next: 0,
+        ready: BTreeMap::new(),
+        take,
+        error: None,
+    });
     let run = |ctx: &Context| {
         loop {
             if failed.load(Ordering::Relaxed) {
@@ -132,13 +163,29 @@ where
                 break;
             };
             let result = work(ctx, chunk);
-            if result.is_err() {
-                failed.store(true, Ordering::Relaxed);
+            let mut delivery = delivery.lock().unwrap_or_else(|e| e.into_inner());
+            match result {
+                Ok(value) => {
+                    delivery.ready.insert(index, value);
+                }
+                Err(error) => {
+                    delivery.fail(index, error);
+                    failed.store(true, Ordering::Relaxed);
+                    continue;
+                }
             }
-            results
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push((index, result));
+            // Hand over every chunk that is next in line.
+            while delivery.error.is_none() {
+                let at = delivery.next;
+                let Some(value) = delivery.ready.remove(&at) else {
+                    break;
+                };
+                delivery.next += 1;
+                if let Err(error) = (delivery.take)(value) {
+                    delivery.fail(at, error);
+                    failed.store(true, Ordering::Relaxed);
+                }
+            }
         }
     };
     let (read, ns, params, edges, info, budget) = (
@@ -162,11 +209,9 @@ where
         }
         run(ctx);
     });
-    let mut results = results.into_inner().unwrap_or_else(|e| e.into_inner());
-    results.sort_by_key(|(index, _)| *index);
-    let mut rows = Vec::new();
-    for (_, result) in results {
-        rows.extend(result?);
+    let delivery = delivery.into_inner().unwrap_or_else(|e| e.into_inner());
+    match delivery.error {
+        Some((_, error)) => Err(error),
+        None => Ok(()),
     }
-    Ok(rows)
 }

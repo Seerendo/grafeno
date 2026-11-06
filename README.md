@@ -160,6 +160,11 @@ measured speed, memory and limits, with charts, in
   (common values and buckets per index, edge degrees by direction) kept in
   memory and rebuilt as data drifts; starts and pattern order by estimated
   cost; parsed statements cached; large read scans split across threads.
+- **Phase 12.3, batched execution:** a match feeds its aggregates in
+  batches turned into columns, folding into one accumulator per group
+  instead of holding rows (2.3 to 2.9 times faster grouped; millions of
+  matches counted within the limits). Next: batched and parallel traversal
+  (12.4), compact storage and int8 vectors (12.5).
 
 ## Installing
 

@@ -671,6 +671,15 @@ DROP CONSTRAINT Person_email_unique IF EXISTS;
   free runs on its own.
 - `MATCH … RETURN … LIMIT n` without `ORDER BY`, `DISTINCT` or aggregates
   stops after the rows it needs.
+- A `MATCH` followed by a `RETURN` or `WITH` with aggregates folds its
+  rows into the groups as it finds them, a batch of up to 1 024 at a time,
+  instead of holding them all: `count`, `sum`, `avg`, `min` and `max` keep
+  one value per group, and only `collect`, `median`, percentiles, `stdev`,
+  `variance` and `mode` keep the values they need. Counting millions of
+  matches stays within `max_rows`; returning them whole does not. A
+  parallel scan computes each batch's group keys and aggregate arguments
+  on its own thread; the results, group order and floating-point sums
+  included, are the same as on one thread.
 - `EXPLAIN` shows where each pattern starts and how many nodes that is
   estimated to find (`index Person_age: … < age, ~420 nodes`, `scan of
   :Person, 2000 nodes`); `PROFILE` adds the records each step read.
@@ -683,7 +692,7 @@ cannot take the service down. By default (`[query]` in `grafeno.toml`):
 | --- | --- | --- |
 | `timeout_secs` | 30 | wall time, checked while reading and inside loops that only compute (`reduce`, comprehensions, `UNWIND`) |
 | `max_reads` | 50 000 000 | nodes, edges and index entries read |
-| `max_rows` | 1 000 000 | rows held at once, between clauses and inside a match, an `UNWIND`, a sort or a group |
+| `max_rows` | 1 000 000 | rows held at once, between clauses and inside a match, an `UNWIND` or a sort (rows an aggregate folds are not held) |
 | `max_memory_mb` | 512 | one value the query builds (a string, list or map) and, estimated from a sample, the rows held at once |
 | `max_cost` | off | the `EXPLAIN` estimate: a statement above it is refused before it runs |
 

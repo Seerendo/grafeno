@@ -560,6 +560,14 @@ def main():
           'concurrent readers', 'queries per second', logx=True, logy=False,
           note='The busy writer commits 10 nodes per transaction as fast as it can. Data: docs/data/read_concurrency.csv')
 
+    # Batched aggregation.
+    rows = read('batch_aggregation.csv')
+    hbars('batch-aggregation', 'Aggregates folded as rows come, against rows held',
+          'Milliseconds, log scale; 200 000 people, 1 000 companies; best of two runs each. E1-mem.',
+          [(r['query'], [num(r['before_ms']), num(r['after_ms'])], None) for r in rows],
+          ' ms', log=True, series=['before 12.3', 'after 12.3'],
+          note='With the standard limits, the two-hop count failed before 12.3 (over max_rows). Data: docs/data/batch_aggregation.csv')
+
     print('charts written to', OUT)
 
 

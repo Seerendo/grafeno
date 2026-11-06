@@ -38,6 +38,7 @@
 //!
 //! The full reference is in `docs/query-language.md`.
 
+mod aggregate;
 mod algorithms;
 mod ast;
 mod cache;
