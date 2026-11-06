@@ -1,0 +1,12 @@
+[package]
+name = "grafeno-raft"
+description = "Raft consensus for Grafeno, as a deterministic state machine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

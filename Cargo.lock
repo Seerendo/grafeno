@@ -1788,6 +1788,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "grafeno-raft"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "grafeno-server"
 version = "0.1.0"
 dependencies = [
