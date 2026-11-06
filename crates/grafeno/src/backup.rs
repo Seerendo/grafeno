@@ -48,6 +48,50 @@ fn copy<K: redb::Key + 'static, V: redb::Value + 'static>(
     Ok(entries)
 }
 
+/// Replaces every table of `to` with the same table of `from` (a backup of
+/// this layout), in one transaction.
+pub(crate) fn restore_into(from: &ReadTransaction, to: &WriteTransaction) -> Result<u64> {
+    let mut entries = 0;
+    macro_rules! replace {
+        ($($table:expr),* $(,)?) => {$(
+            to.delete_table($table).map_err(storage)?;
+            entries += copy(from, to, $table)?;
+        )*};
+    }
+    replace!(
+        META,
+        NODES,
+        EDGES,
+        ADJ_OUT,
+        ADJ_IN,
+        NODE_LABELS,
+        TEXTS,
+        TEXT_LENGTHS,
+        POSTINGS,
+        TEXT_STATS,
+        VECTORS,
+        VECTORS_Q8,
+        HNSW_LINKS,
+        VECTOR_META,
+        NS_COUNTS,
+        LABEL_COUNTS,
+        EDGE_LABEL_COUNTS,
+        NAMES,
+        MEMORY,
+        INDEXES,
+        INDEX_ENTRIES,
+        NAMESPACES,
+        PRINCIPALS,
+        MERGES,
+        MATCH_RULES,
+        STATE,
+        CONSTRAINTS,
+        CHANGES,
+        crate::replication::REPLICATION_LOG,
+    );
+    Ok(entries)
+}
+
 impl ReadTx {
     /// Writes a copy of the whole database, as this snapshot sees it, to a
     /// new file at `path` (which must not exist). Writers are not blocked;

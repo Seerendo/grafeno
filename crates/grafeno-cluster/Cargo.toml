@@ -1,0 +1,13 @@
+[package]
+name = "grafeno-cluster"
+description = "Grafeno servers kept in sync by Raft"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+grafeno.workspace = true
+grafeno-raft.workspace = true
+redb.workspace = true
+serde.workspace = true
+serde_json.workspace = true

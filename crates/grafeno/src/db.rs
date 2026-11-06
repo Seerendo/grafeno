@@ -412,6 +412,59 @@ impl Grafeno {
         Ok(())
     }
 
+    /// Replaces everything in this database with the contents of the backup
+    /// at `path` (written by [`ReadTx::backup`] with this layout version), in
+    /// one transaction: readers see the old data or the new, never a mix.
+    /// For a cluster member that receives a snapshot. Returns the entries
+    /// copied.
+    pub fn restore_backup(&self, path: impl AsRef<FsPath>) -> Result<u64> {
+        let source = Database::open(path.as_ref()).map_err(storage)?;
+        let from = source.begin_read().map_err(storage)?;
+        let version = from
+            .open_table(META)
+            .map_err(storage)?
+            .get(SCHEMA_KEY)
+            .map_err(storage)?
+            .map_or(0, |guard| guard.value());
+        if version != SCHEMA_VERSION {
+            return Err(Error::Invalid(format!(
+                "the backup has layout version {version}, this Grafeno {SCHEMA_VERSION}"
+            )));
+        }
+        let tx = self.db.begin_write().map_err(storage)?;
+        let entries = crate::backup::restore_into(&from, &tx)?;
+        let replication = tx
+            .open_table(META)
+            .map_err(storage)?
+            .get(crate::replication::ENABLED)
+            .map_err(storage)?
+            .is_some_and(|guard| guard.value() == 1);
+        self.shared.committing(|| tx.commit().map_err(storage))?;
+        self.shared
+            .replication
+            .store(replication, Ordering::Relaxed);
+        Ok(entries)
+    }
+
+    /// Runs `f` in a write transaction and discards it, returning its value
+    /// and what it would have done as a replication log entry (`None` when
+    /// it wrote nothing). A cluster leader proposes the entry; every member,
+    /// the leader included, applies it once it is committed.
+    pub fn dry_run<T>(
+        &self,
+        f: impl FnOnce(&mut WriteTx) -> Result<T>,
+    ) -> Result<(T, Option<crate::replication::Entry>)> {
+        let mut tx = self.begin_write()?;
+        tx.capture = Some(crate::replication::Capture::default());
+        let outcome = f(&mut tx);
+        let result = match outcome {
+            Ok(value) => tx.build_entry().map(|entry| (value, entry)),
+            Err(error) => Err(error),
+        };
+        tx.abort()?;
+        result
+    }
+
     /// Applies log entries of another database in order, each in its own
     /// transaction; returns how many were applied (those already applied
     /// are skipped).

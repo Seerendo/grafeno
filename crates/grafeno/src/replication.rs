@@ -363,9 +363,8 @@ impl WriteTx {
         })
     }
 
-    /// Appends what this transaction did to the log, as the entry after
-    /// the last one, and returns the commit clock to stamp its changes with.
-    pub(crate) fn log_entry(&mut self) -> Result<Option<Timestamp>> {
+    /// What this transaction did, as a log entry (`None`: nothing).
+    pub(crate) fn build_entry(&mut self) -> Result<Option<Entry>> {
         let Some(capture) = self.capture.take() else {
             return Ok(None);
         };
@@ -387,14 +386,22 @@ impl WriteTx {
                 ops.push(self.after_image(&Touch::Namespace(ns))?);
             }
         }
-        let at = Timestamp::now();
-        let entry = Entry {
+        Ok(Some(Entry {
             format: ENTRY_FORMAT,
             layout: SCHEMA_VERSION,
-            at,
+            at: Timestamp::now(),
             ops,
             changes: self.pending_changes.entries().to_vec(),
+        }))
+    }
+
+    /// Appends what this transaction did to the log, as the entry after
+    /// the last one, and returns the commit clock to stamp its changes with.
+    pub(crate) fn log_entry(&mut self) -> Result<Option<Timestamp>> {
+        let Some(entry) = self.build_entry()? else {
+            return Ok(None);
         };
+        let at = entry.at;
         let mut meta = self.tx.open_table(META).map_err(storage)?;
         let index = meta_get(&meta, LAST)? + 1;
         if meta_get(&meta, FIRST)? == 0 {
