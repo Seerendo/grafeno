@@ -24,6 +24,21 @@ const ranked = await vault.algorithm("pageRank", { settings: { labels: "Person" 
 await vault.algorithm("louvain", { write: "community" });
 ```
 
+Users sign in with a password; the client renews the session by itself
+and tells the application the new tokens to keep:
+
+```ts
+const client = new Grafeno({ url, onSession: (tokens) => save(tokens) });
+await client.signIn("ana", password);
+// Later, from kept tokens:
+const again = new Grafeno({ url, session: load(), onSession: save });
+await again.signOut();
+```
+
+`createKey({ name, scope: { read_only: true } })` makes a key of the
+signed-in account; `accounts()`, `createAccount()`, `changeAccount()`
+and `rotateKey()` manage the rest.
+
 For a cluster, pass several members: the client uses one, moves to the
 next when it does not answer, and reads its own writes on any of them (it
 sends the last `position` it saw). Reads can ask for more consistency, and

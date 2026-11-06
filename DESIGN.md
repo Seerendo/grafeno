@@ -397,7 +397,7 @@ without a current user. They remain possible for embedded use.
     Raft; a leader elected among them coordinates writes, the others take
     over when it fails, and reads and large queries spread over all of
     them.
-14. **Users, roles and permissions** (planned, in six steps; see below):
+14. **Users, roles and permissions** (in progress, 14.1 done; six steps; see below):
     a complete role-based access control, as most databases have: users who
     sign in, roles and privileges granted with `GRANT` and `REVOKE`, rights
     down to labels, properties and records, and an audit log.
@@ -2340,7 +2340,7 @@ written through the log and enforced the same on every member. Each step
 ends with tests (the 10.1 leak matrix grows with each privilege), a
 measurement where it costs something, documentation and its own commit.
 
-**14.1 Accounts and sign-in.**
+**14.1 Accounts and sign-in** (done).
 
 - Accounts of two kinds: *users* (people: a name, a password, sessions)
   and *service accounts* (agents and applications: API keys only). Both can
@@ -2362,6 +2362,85 @@ measurement where it costs something, documentation and its own commit.
 - Done when: sign-in, refresh, expiry, revocation, lockout and key scopes
   are tested over HTTP, the shell and the Studio, and the 10.1 matrix passes
   with users, service accounts and scoped keys.
+
+As built (`grafeno/src/access.rs`, `grafeno-server/src/auth.rs`,
+`accounts.rs`, `users.rs`, the shell, the TypeScript client, the Studio):
+
+- Accounts (`Account`): a name, a kind (`user` or `service`), an Argon2id
+  password hash for users, grants per namespace pattern (read, write,
+  admin), `superuser`, `own_only`, `disabled`. Keys (`ApiKey`) belong to
+  an account: a SHA-256 of the secret, an optional expiry, an optional
+  scope (namespace patterns and/or read only, which only narrows the
+  account's rights), and when they were rotated. Sessions (`Session`): an
+  access token and a refresh token, each stored as a SHA-256, with their
+  expiries and where they signed in from. Tokens carry their session's id
+  (`gfs_<id>.<secret>`, `gfr_<id>.<secret>`), so a request finds its
+  session without an index.
+- Layout 15: `accounts`, `api_keys` and `sessions` replace `principals`;
+  each principal becomes a service account with its grants, owner flag
+  (as `superuser`) and `own_only`, and a key of the same name and secret,
+  so existing secrets keep working and `recorded_by` keeps its names.
+  Fixture `layout-v14` (with an owner key and an own-only key) checks the
+  upgrade, and every older fixture upgrades through it. All three are
+  replicated state: they travel as entry format 3, and an entry of a
+  member before 14.1 that carries a principal is applied as an account
+  and a key.
+- Passwords: Argon2id with OWASP's parameters (19 MiB, 2 passes, 1 lane),
+  measured at 19 ms a check on the laptop of the measurements: 53 sign-ins
+  a second on one core, 141 on 16 threads (memory bound). A wrong name
+  costs a check too. The policy: 10 to 128 characters, not containing the
+  account's name, not one of the commonest passwords, not one repeated
+  character. Five failures in 15 minutes lock an account, twenty refuse an
+  address (`[auth]` sets them); the counts live in each member's memory.
+- Sign-in over HTTP: `POST /v1/auth/signin` gives a 15-minute access token
+  and a 30-day refresh token (`[auth]`); `/v1/auth/refresh` replaces both,
+  and a refresh token used a second time ends the session (one of the two
+  users stole it); `/v1/auth/signout`, `GET /v1/auth/sessions` (a
+  superuser's: anyone's), `DELETE /v1/auth/sessions/{id}`,
+  `/v1/auth/password` (asks the current password, ends the other
+  sessions). Disabling an account or setting its password ends its
+  sessions; a disabled account's keys stop working.
+- Accounts are managed by superusers (`/v1/accounts`, `grafeno users`);
+  any account lists, makes (scoped or not), rotates and revokes its own
+  keys (`/v1/keys`, `/v1/keys/{name}/rotate`); a key made the 10.1 way
+  (`grants`, `owner`) makes a service account of its name.
+- Bootstrapping: `grafeno users create NAME --superuser` (on the file or
+  through the server), or, on an open server, the first sign-up
+  (`/v1/auth/setup`, or the Studio's "Create the first account") makes a
+  superuser and closes the server. The static token stays as a
+  break-glass credential when it is configured.
+- Clients: the shell signs in with `--user` (a prompt, or
+  `--password-stdin`) and renews the session when it expires; the
+  TypeScript client has `signIn`, `refreshSession` (also done by itself),
+  `signOut`, sessions, password, accounts, `rotateKey`, and takes kept
+  tokens with `onSession` to keep new ones; Grafeno Studio (and so the
+  desktop app) has a sign-in screen, a first-account screen on an open
+  server, keeps and renews the session, and signs out on the server. MCP
+  keeps using the database directly.
+- In a cluster: keys and sessions written on the leader reach the other
+  members through the log; a member that does not find one yet looks
+  again for a second. This fixed a bug of 13.2 to 13.6: a key made
+  through the leader did not work on followers until they restarted, as
+  only the member that served the request reloaded its keys.
+- Tests: `grafeno-server/tests/accounts.rs` (the first account of an open
+  server; sign-in, refresh, replaced tokens, expiry, a refresh token used
+  twice, sessions listed and ended, sign-out; lockouts per account and
+  per address; the password policy and changes; disabled accounts;
+  service accounts without passwords; keys scoped to namespaces or to
+  reading, scopes that cannot widen rights, rotation, users' own keys,
+  expiry), `access.rs` (the 10.1 matrix with service accounts),
+  `shell.rs` (`grafeno users` and the shell signing in), `cluster.rs` (a
+  key made through the leader used on followers; a session made on one
+  follower used on the other and refreshed on the leader),
+  `grafeno/tests/upgrade.rs` (layout 15 from every layout),
+  `replication.rs` (accounts, keys and sessions replayed), the TypeScript
+  client's `accounts.test.ts`, and the Studio's screens checked in a
+  browser.
+- Not built in this step: roles beyond the three levels (14.2), managing
+  access in GQ (14.3), finer enforcement (14.4), the audit log (14.5),
+  external identities (14.6), lockout counts shared across members, and a
+  prompt in the Studio of an open server to protect it (its first-account
+  screen shows when it is not connected).
 
 **14.2 Roles and privileges.**
 
@@ -2708,6 +2787,7 @@ spinning disk, on ARM, or for days at a time.
 | Vector search, 1 M vectors in 512 MiB, int8 copies (12.5) | 3.5 to 4.2 ms (4.9 to 5.2 ms before), same resident memory | E2 | `vector_search_int8.csv` |
 | Replication log (13.1) | writes at 80% of the speed with the log on; 568 bytes per record; a replica applies 22 300 records/s | E1-mem | `replication_log.csv` |
 | Raft cluster of three (13.2) | 137 sequential writes/s (618 on one server), p50 7.2 ms; a leader replaced in 0.5 to 0.8 s | E1-disk | `cluster.csv` |
+| Passwords (14.1) | Argon2id at 19 ms a check: 53 sign-ins/s on one core, 141 on 16 threads | E1-mem | `auth.csv` |
 | Runbooks on a compose cluster (13.6) | rolling upgrade 13.5 → 13.6, a member lost, a majority lost, a disk replaced: 15 971 operations, all linearizable | E1-disk | `drill.csv` |
 | Several Raft groups (13.5) | 109, 153 and 181 writes/s with 1, 2 and 3 groups; 20 000 nodes moved under writes in 11 s with a 39 ms pause, no write lost or doubled | E1-disk | `groups.csv`, `namespace_move.csv` |
 | Reads split across members (13.4) | 200 000 people, 3 threads a member: scans 2.1, aggregates 2.9, top-20 3.0, two hops 1.4 times faster with 5 members | E1-disk | `split.csv` |
@@ -2749,6 +2829,7 @@ real binary. The ones that carry each guarantee:
 | A read split across members returns one server's rows | `grafeno-query/tests/common/mod.rs` (used by `conformance.rs`, `planner.rs`, `cypher.rs`, `queries.rs`, `traversal.rs`, `batch.rs`), `grafeno-server/tests/split.rs`, `aggregate.rs` tests | every read of those suites that can be split, whole against 2, 3 and 5 parts through JSON, row order included; exact sums independent of order; three processes, with a member down |
 | A namespace moves between groups without losing or doubling a write | `grafeno/tests/replication.rs` (copy, catch-up, fence), `grafeno-server/tests/groups.rs` | a namespace copied and caught up equals the source, change log numbers included; a fenced namespace refuses writes; three processes with two more groups, writes routed through any member, a move under three writers retrying busy answers, every acknowledged write found once on every member |
 | A cluster restarts, rejoins and upgrades without anomalies | `grafeno-cluster/tests/operations.rs`, `packaging/compose/drill.sh` | a new cluster from a follower's backup, a member joining from an older backup without a snapshot, a restart; the leader refusing an entry format a voter cannot read; on the compose, every runbook under load checked for linearizability |
+| Accounts sign in, and keys and sessions do only what they may | `grafeno-server/tests/accounts.rs`, `access.rs`, `shell.rs`, `cluster.rs`, `clients/typescript/test/accounts.test.ts` | sign-in, refresh, expiry, revocation, lockouts, the password policy, disabled accounts, scoped, expired and rotated keys over HTTP, the shell and the client; in a cluster, keys and sessions on every member |
 | Costly queries stop | `grafeno-query/tests/adversarial.rs` | 32 hostile queries within their limits; nesting just under the limit runs on a 2 MiB stack; `max_cost` refuses; procedure rows count against `max_memory` |
 | Nothing a client sends crashes the parser | `grafeno-query/tests/fuzz.rs` | proptest: random tokens, valid queries with random edits, arbitrary text, through the lexer, parser, planner, `EXPLAIN` and executor |
 | The API keeps its contract | `grafeno-server/tests/http.rs`, `mcp.rs`, `shell.rs`, `clients/typescript/test` | every endpoint and MCP tool, limits, conflicts (409 with details), metrics, the CLI shell, and the client against the real binary |
@@ -2780,6 +2861,7 @@ FAULT_SECONDS=30 cargo test --release -p grafeno-cluster --test linearizable -- 
 cargo run --release -p grafeno-server --example split_bench -- 200000 3 5   # build grafeno first
 cargo run --release -p grafeno-server --example groups_bench -- 10 8 20000
 OLD_IMAGE=grafeno:13.5 NEW_IMAGE=grafeno:13.6 packaging/compose/drill.sh   # images built from each commit
+cargo run --release -p grafeno-server --example auth_bench -- 60
 FAULT_SECONDS=40 cargo test --release -p grafeno-server --test faults -- --nocapture
 cargo run --release -p grafeno --example changes_bench -- 100000
 cargo run --release -p grafeno-server --example events_bench -- 100000

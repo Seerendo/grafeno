@@ -681,6 +681,21 @@ entry is the lever (not built yet). With the leader cut off, another
 member is elected and commits a write in 510 to 831 ms (median 595, five
 runs) with 50 ms ticks (election timeouts of 0.5 to 1 s).
 
+## Passwords (`crates/grafeno-server/examples/auth_bench.rs`)
+
+Argon2id with the server's parameters (19 MiB, 2 passes, 1 lane),
+2026-11-06:
+
+| | |
+| --- | --- |
+| a hash (making or changing a password) | 18.3 ms |
+| a check (signing in) | 18.9 ms |
+| sign-ins a second, one core | 53 |
+| sign-ins a second, 16 threads | 141 |
+
+Checks are bound by memory more than by cores, which is what makes them
+slow to guess offline; sessions and keys (SHA-256) cost a lookup.
+
 ## Cluster runbooks under load (`packaging/compose/drill.sh`)
 
 Three members in Docker on this laptop, two Raft groups, three clients of

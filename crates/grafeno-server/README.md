@@ -137,11 +137,14 @@ whenever the port is reachable by anything but the application.
 
 ## Access
 
-Every request under `/v1` carries `Authorization: Bearer <secret>`, where
-the secret is either the server's **token** (`grafeno.toml`, `--token`),
-which may do everything, or an **API key**. A key has a name and grants:
-a role on a namespace (`vault`), on every namespace starting with a prefix
-(`team-*`), or on all (`*`). Roles add up:
+Callers are **accounts**: **users**, who sign in with a password and get a
+session, and **service accounts**, which use API keys (14.1). Every
+request under `/v1` carries `Authorization: Bearer <secret>`: a session's
+access token (`gfs_…`), an API key (`gfk_…`), or the server's **token**
+(`grafeno.toml`, `--token`), a break-glass credential that may do
+everything. An account has grants: a role on a namespace (`vault`), on
+every namespace starting with a prefix (`team-*`), or on all (`*`). Roles
+add up:
 
 | Role | May |
 | --- | --- |
@@ -149,10 +152,11 @@ a role on a namespace (`vault`), on every namespace starting with a prefix
 | `write` | also create and change nodes and facts, merge, archive, touch |
 | `admin` | also indexes and constraints, rebuild, describe and drop the namespace, create it |
 
-A key may also be an **owner** (everything, including managing keys) and
-may be limited to **its own records**: then it changes or deletes only
+An account may also be a **superuser** (everything, including managing
+accounts; `owner` in older answers) and may be limited to **its own
+records**: then it changes or deletes only
 nodes and facts it recorded (others' are `403 forbidden`, in GQ too).
-Every write by a key records its name: `recorded_by` on nodes and edges,
+Every write records its account's name: `recorded_by` on nodes and edges,
 `n.@recorded_by` in GQ. A key sees only the namespaces it may read: in
 `/v1/namespaces`, `SHOW NAMESPACES` and exports.
 
@@ -170,11 +174,37 @@ grafeno keys revoke research-agent --config grafeno.toml
 
 With `--config`, the commands go through the running server (its address
 and token); with `--db`, they open a database file whose server is
-stopped. The secret is printed once; only its SHA-256 is stored. Keys are
-also managed from the Studio (Administration) and over HTTP
-(`/v1/keys`, owners only). A server with neither a token nor keys is open
-to anyone who reaches it; its first key must then be an owner, and from
-then on every request needs a key.
+stopped. The secret is printed once; only its SHA-256 is stored. A key
+made with grants this way is a service account of its name holding it.
+`grafeno users create|list|password|disable|enable|delete` manage
+accounts (`--superuser`, `--service`, `--grant`). A server with neither a
+token nor accounts is open to anyone who reaches it; its first account
+(`grafeno users create … --superuser`, or the first sign-up) must be a
+superuser, and from then on every request needs a credential.
+
+### Accounts and sign-in (14.1)
+
+| Method | Path | Body | Returns |
+| --- | --- | --- | --- |
+| `GET` | `/v1/auth/status` | | `{open, setup, password_sign_in}` (anyone) |
+| `POST` | `/v1/auth/setup` | `{name, password}` | on an open server with no accounts: the first, a superuser, signed in (201) |
+| `POST` | `/v1/auth/signin` | `{name, password}` | `{access_token, expires_in, refresh_token, refresh_expires_in, session, account}`; 401 when wrong, 429 when locked |
+| `POST` | `/v1/auth/refresh` | `{refresh_token}` | new tokens, both replaced; a refresh token used twice ends the session |
+| `POST` | `/v1/auth/signout` | | ends the caller's session |
+| `GET` | `/v1/auth/sessions` | `?account=` (superusers; `*` for all) | the sessions, `current` marking the caller's |
+| `DELETE` | `/v1/auth/sessions/{id}` | | ends one of the caller's (a superuser: anyone's) |
+| `POST` | `/v1/auth/password` | `{current_password, new_password}` | changes it; the other sessions end |
+| `GET`, `POST` | `/v1/accounts` | `{name, kind: user\|service, password?, grants, superuser, own_only, description}` | superusers |
+| `GET`, `PATCH`, `DELETE` | `/v1/accounts/{name}` | `{password?, grants?, superuser?, own_only?, disabled?, description?}` | superusers; disabling or a new password ends its sessions |
+| `GET`, `POST` | `/v1/keys` | `{name, account?, scope?: {namespaces, read_only}, expires_in_days?, description?}` | an account's own keys (superusers: all); the secret once |
+| `POST` | `/v1/keys/{name}/rotate` | | a new secret, once; the old one stops working |
+| `DELETE` | `/v1/keys/{name}` | | revokes it |
+
+An expired access token answers 401 `session_expired` (refresh it); an
+expired key `key_expired`; a disabled account `account_disabled`.
+`/v1/whoami` names the account, how it came (`via: {kind, name}`) and a
+key's `scope`. Sessions last 15 minutes (access) and 30 days (refresh) by
+default (`[auth]` in `grafeno.toml`).
 
 ## HTTP API
 

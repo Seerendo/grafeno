@@ -206,7 +206,14 @@ measured speed, memory and limits, with charts, in
   (a member lost, a majority lost, a disk replaced, an upgrade), each run
   under load with a linearizability checker watching.
 
-Next, phase 14: users, roles and permissions (sign-in, roles you
+- **Phase 14.1, accounts and sign-in:** users sign in with a password
+  (Argon2id, a password policy, lockouts) and get sessions that renew
+  and can be ended; service accounts hold API keys, which can expire, be
+  rotated and be scoped to some namespaces or to reading; the Studio, the
+  shell and the TypeScript client sign in. Existing keys became service
+  accounts on their own.
+
+Next, the rest of phase 14: users, roles and permissions (sign-in, roles you
 define, `GRANT` and `REVOKE`, rights down to labels, properties and
 records, an audit log); phase 15: the engine and the interface apart (the
 engine installs natively like a database server, from a `curl` one-liner,

@@ -244,6 +244,37 @@ encrypted (keep them on a private network); imports go into a single server
 before it starts a cluster. Webhooks and background work (extraction,
 summaries) run on the leader, and a new leader resumes them.
 
+## Accounts
+
+A new server is open to anyone who reaches it (fine on your own
+machine) until it has accounts, or a token in `grafeno.toml`. Make the
+first account, a superuser, with the server stopped or through it:
+
+```bash
+grafeno users create admin --superuser --config /etc/grafeno/grafeno.toml
+```
+
+(On an open server, Grafeno Studio also offers to create it.) Then make
+the people who sign in, with grants per namespace, and service accounts
+for agents and applications, which use API keys:
+
+```bash
+grafeno users create ana --grant notes:write --config /etc/grafeno/grafeno.toml
+```
+
+```bash
+grafeno users create indexer --service --grant "team-*:write" --config /etc/grafeno/grafeno.toml
+```
+
+Users sign in from the Studio, the shell (`grafeno shell --url … --user
+ana`) or the API (`POST /v1/auth/signin`), and can make their own API
+keys, scoped down to some namespaces or to reading. `grafeno users
+password`, `disable`, `enable` and `delete` manage them. Keys from before
+14.1 kept working: each became a service account of its name. The token
+in `grafeno.toml`, when set, still does everything: keep it for
+emergencies. `[auth]` (below) sets how long sessions last and when
+failed sign-ins lock an account.
+
 ## Backups
 
 A backup is a consistent copy of the whole database file (every
@@ -325,6 +356,13 @@ vector_cache_mb = 128       # vectors decoded while inserting embeddings
 enabled = true
 max_entries = 1000000       # per namespace; 0 for no limit
 max_age_days = 7            # 0 for no limit
+
+[auth]                      # accounts and sign-in
+session_minutes = 15        # an access token's life (sessions renew it)
+refresh_days = 30           # a session's life
+lockout_attempts = 5        # failed sign-ins that lock an account for a while
+address_attempts = 20       # failed sign-ins that refuse an address for a while
+lockout_minutes = 15
 
 [background]                # work that follows the change log
 extract = ["notes"]         # link what new and changed texts mention
