@@ -400,11 +400,12 @@ without a current user. They remain possible for embedded use.
     a complete role-based access control, as most databases have: users who
     sign in, roles and privileges granted with `GRANT` and `REVOKE`, rights
     down to labels, properties and records, and an audit log.
-15. **Engine and interface apart** (planned, in four steps; see below):
+15. **Engine and interface apart** (planned, in five steps; see below):
     the engine's installers install only the engine (Windows `.exe`, Linux
-    `.deb` and `.rpm`), and the interface becomes a separate desktop
-    product with installers of its own, talking to engines only through
-    their public API.
+    `.deb`, `.rpm` and a `curl` one-liner), as a professional installation
+    in the way PostgreSQL's is, with no Docker needed; and the interface
+    becomes a separate desktop product with installers of its own, talking
+    to engines only through their public API.
 16. **Integrations**: Grafito first, Python bindings.
 
 ### Phase 8 plan
@@ -2029,10 +2030,12 @@ interface, and installing the desktop app brings a whole engine.
 releases:
 
 - **Grafeno**, the engine: the `grafeno` binary (server, HTTP API, MCP,
-  shell, administration commands) and nothing else, for servers, containers
-  and machines without a screen. Windows setup `.exe` (with the service),
-  Linux `.deb` and `.rpm` (with the systemd unit), plus the `.tar.gz`,
-  `install.sh` and the Docker image.
+  shell, administration commands) and nothing else, for servers and
+  machines without a screen. Installed natively, as a database server is
+  (PostgreSQL is the model): Windows setup `.exe` (with the service), Linux
+  `.deb` and `.rpm` from signed package repositories (with the systemd
+  unit), a `curl … | sh` one-liner, and a `.tar.gz` for offline machines.
+  Docker stays available and is never required.
 - **Grafeno Desktop**, the interface: the Studio as a desktop application,
   Windows `.exe` (and `.msi`), Linux `.deb`, `.rpm` (and `.AppImage`). It
   contains no engine: it talks to engines (on the same machine or others,
@@ -2059,7 +2062,64 @@ documentation and its own commit.
   and installing its packages on a clean Windows and in clean Debian and
   Fedora containers brings no graphical files or dependencies.
 
-**15.2 The public API as the only contract.**
+**15.2 A professional installation of the engine.**
+
+Today: `install.sh` (`curl -fsSL …/install.sh | sh`) downloads a release
+archive, checks its SHA-256 and installs the binary, and with `--service`
+creates the `grafeno` user, `/etc/grafeno/grafeno.toml` and the systemd
+service; the `.deb` and `.rpm` do the same from a downloaded file; the
+Windows setup (Inno Setup) installs the binary, the configuration and the
+service. Missing, next to how PostgreSQL installs: package repositories, a
+setup step that initializes an instance, several instances on one machine,
+upgrades that protect the data, a guided Windows setup, and signatures.
+
+- Linux, from the package manager: signed APT and DNF/YUM repositories
+  (`apt install grafeno`, `dnf install grafeno`), so updates come with the
+  system's; packages for x86_64 and aarch64, for current Debian, Ubuntu,
+  Fedora, RHEL and their derivatives, with SELinux and AppArmor policies
+  where the distribution expects them.
+- The one-liner, kept and widened: `curl -fsSL https://… | sh` detects the
+  distribution and architecture, and either adds the repository and
+  installs the package (the default where one exists) or installs the
+  binary from the archive, verifying its checksum and signature. Options
+  for a version, a prefix, installing without root (into the user's home,
+  with a systemd user service), and unattended use (all choices as flags or
+  environment variables).
+- Initializing an instance, apart from installing the program, as `initdb`
+  and `postgresql-setup` are: `grafeno setup` creates the data directory
+  with its permissions, writes `/etc/grafeno/<instance>.toml` (address,
+  port, durability, memory, TLS), creates the first administrator (a
+  password, with phase 14) and enables and starts the service. Interactive
+  by default; every answer as a flag or an answers file for automation.
+- Several instances on one machine (as PostgreSQL clusters): a templated
+  unit (`grafeno@<name>.service`), each instance with its own data
+  directory, configuration, port and logs; `grafeno instances` lists them.
+- Upgrades that protect the data: the package's upgrade backs up each
+  instance (14's `backup`) before a new version opens it and upgrades its
+  layout, keeps the backup until the first clean start, and can roll back
+  to the previous version with it. Removing the package keeps the data;
+  purging (`apt purge`, an explicit `--purge`) removes it.
+- Windows, a guided setup as PostgreSQL's installers have: install folder,
+  data folder, port and address, the account the service runs as, the first
+  administrator's password, a firewall rule, `grafeno` on the `PATH`; the
+  same answers as parameters for a silent install (`/VERYSILENT /DATADIR=…
+  /PORT=…`); upgrades in place that keep data and settings; uninstalling
+  keeps the data unless asked; a `winget` package.
+- Operations a server administrator expects: logs in journald and the Event
+  Log (and a file where configured), log rotation, `grafeno doctor` (checks
+  permissions, ports, the service, free disk space and the layout version),
+  and the paths of everything documented in one table.
+- Trust: release archives and packages signed (the repository keys and a
+  `minisign` key published), the Windows setup and binary signed with a
+  code-signing certificate where one exists, checksums published with
+  every release.
+- Done when: in clean machines (Debian, Ubuntu, Fedora, RHEL-compatible, on
+  x86_64 and aarch64, and Windows 10 and 11), with no Docker, the one-liner,
+  the repositories, the packages and the Windows setup each install,
+  initialize, upgrade (with the backup taken) and remove the engine,
+  interactively and unattended, and `grafeno doctor` passes after each.
+
+**15.3 The public API as the only contract.**
 
 - Everything the interface does goes through the documented HTTP API:
   whatever it reaches today in-process or through app-only commands
@@ -2076,7 +2136,7 @@ documentation and its own commit.
 - Done when: the interface has no call outside the public API, and the
   contract tests pass against the current engine and the previous release.
 
-**15.3 The desktop application without an engine.**
+**15.4 The desktop application without an engine.**
 
 - Grafeno Desktop stops linking the engine crates. Its sources (the Studio
   and the native shell) live in one place, `apps/desktop`, with no build
@@ -2099,7 +2159,7 @@ documentation and its own commit.
   an installed engine, connects to a remote server and to a cluster, and
   passes its end-to-end tests against the engine binary.
 
-**15.4 Two products, two releases.**
+**15.5 Two products, two releases.**
 
 - Separate versions and change logs; separate release workflows, started by
   their own tags (`engine-v…`, `desktop-v…`), each building its installers
@@ -2109,8 +2169,9 @@ documentation and its own commit.
   the engine package brings no graphical files; the desktop package
   installs no service and no engine; installing, upgrading and removing
   either leaves the other untouched, and data stays where it was.
-- Documentation split: `docs/install.md` for the engine; the desktop app's
-  own guide, with the engine versions it supports.
+- Documentation split: `docs/install.md` for the engine (every way of
+  installing it, initializing instances, upgrading, the paths); the desktop
+  app's own guide, with the engine versions it supports.
 - Done when: a tagged release of each product builds and passes its install
   tests on its own.
 
@@ -2319,5 +2380,8 @@ docker run --rm --memory 512m --memory-swap 512m -e CACHE_MB=128 -e PROJECTION_C
   the built-in roles.
 - Phase 15: Tauri or Electron for Grafeno Desktop; whether the interface is
   also published as static files for a web server of one's own (never
-  served by the engine); and whether the desktop app may download an engine
-  when none is installed or only points to its installer.
+  served by the engine); whether the desktop app may download an engine
+  when none is installed or only points to its installer; where the package
+  repositories are hosted (GitHub Pages, a bucket, a service such as
+  Cloudsmith or packagecloud) and who holds the signing keys; and a macOS
+  build, not planned yet.

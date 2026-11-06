@@ -178,8 +178,10 @@ replicated log with Raft, failover, reads and large queries spread over
 the servers); phase 14: users, roles and permissions (sign-in, roles you
 define, `GRANT` and `REVOKE`, rights down to labels, properties and
 records, an audit log); phase 15: the engine and the interface apart (the
-engine's installers install only the engine, and Grafeno Desktop becomes a
-separate product that talks to engines through their API); then
+engine installs natively like a database server, from a `curl` one-liner,
+signed APT and DNF repositories or a guided Windows setup, with no Docker
+needed; Grafeno Desktop becomes a separate product that talks to engines
+through their API); then
 integrations (Grafito, Python bindings). The plan is in
 [DESIGN.md](DESIGN.md).
 
