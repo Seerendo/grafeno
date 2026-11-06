@@ -2,6 +2,8 @@
 //! openCypher TCK, written by hand (not the official TCK's files). Every
 //! scenario runs on a new database; all failures are listed together.
 
+mod common;
+
 use grafeno::Grafeno;
 use grafeno_query::{Params, execute};
 use serde_json::Value as Json;
@@ -107,6 +109,8 @@ fn run(scenario: &Scenario) -> Result<(), String> {
         execute(&db, NS, given, &params).map_err(|e| format!("given {given:?}: {e}"))?;
     }
     let result = execute(&db, NS, &scenario.when, &params);
+    // Split across members, a read gives the same rows (13.4).
+    common::check_split(&db, NS, &scenario.when, &params);
     let expect = scenario
         .expect
         .as_ref()
@@ -159,9 +163,10 @@ fn every_scenario_holds() {
         })
         .collect();
     println!(
-        "{} of {} scenarios hold",
+        "{} of {} scenarios hold; {} split in 2, 3 and 5 parts",
         all.len() - failures.len(),
-        all.len()
+        all.len(),
+        common::SPLIT.load(std::sync::atomic::Ordering::Relaxed)
     );
     assert!(
         failures.is_empty(),

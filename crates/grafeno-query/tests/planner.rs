@@ -2,6 +2,8 @@
 //! degrees by direction), cost-based starts, the order of the patterns of
 //! a MATCH, the statement cache and parallel scans.
 
+mod common;
+
 use grafeno::{Grafeno, IndexRange};
 use grafeno_query::{
     Limits, Params, QueryResult, Value, execute, execute_read_with, execute_with, set_parallelism,
@@ -12,7 +14,11 @@ use serde_json::{Value as Json, json};
 const NS: &str = "p";
 
 fn run(db: &Grafeno, query: &str) -> QueryResult {
-    execute(db, NS, query, &Params::new()).unwrap_or_else(|e| panic!("{query}\n→ {e}"))
+    let result =
+        execute(db, NS, query, &Params::new()).unwrap_or_else(|e| panic!("{query}\n→ {e}"));
+    // Split across members, a read gives the same rows (13.4).
+    common::check_split(db, NS, query, &Params::new());
+    result
 }
 
 fn rows(db: &Grafeno, query: &str) -> Json {
@@ -279,6 +285,10 @@ fn parallel_scans_return_what_one_thread_does() {
     }
     set_parallelism(4);
     for (query, one) in queries.iter().zip(&serial) {
+        assert!(
+            common::check_split(&db, NS, query, &Params::new()),
+            "{query}"
+        );
         let many = execute_read_with(&read, NS, query, &Params::new(), &Limits::none()).unwrap();
         assert_eq!(many.rows, one.rows, "{query}");
         assert!(!many.rows.is_empty(), "{query}");
@@ -291,4 +301,59 @@ fn parallel_scans_return_what_one_thread_does() {
     let error = execute_with(&db, NS, queries[0], &Params::new(), &limited).unwrap_err();
     assert!(error.limit, "{error}");
     set_parallelism(0);
+}
+
+#[test]
+fn split_queries_return_what_one_server_does() {
+    // Every planner query above, and these, split in 2, 3 and 5 parts.
+    let db = skewed();
+    let queries = [
+        "MATCH (p:Person) RETURN p.city, count(*), sum(p.age), avg(p.age), min(p.uid), max(p.uid)",
+        "MATCH (p:Person)-[:works_at]->(c) RETURN c.name, collect(p.uid)[0..3], count(DISTINCT p.city)",
+        "MATCH (p:Person) WHERE p.age > 40 RETURN p.uid ORDER BY p.age DESC, p.uid LIMIT 7",
+        "MATCH (p:Person) RETURN DISTINCT p.city ORDER BY p.city",
+        "MATCH (p:Person) RETURN p.uid SKIP 10 LIMIT 5",
+        "MATCH (p:Person) WITH p, p.age * 2 AS twice WHERE twice > 50 UNWIND [1, 2] AS k RETURN k, count(*), sum(twice)",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:owns]->(c) RETURN count(c), count(*)",
+        "MATCH (p:Person) RETURN stdev(p.age), percentileCont(p.age, 0.9), sum(DISTINCT p.age), sum(p.age * 0.1)",
+        "MATCH (n) RETURN labels(n)[0] AS label, count(*) ORDER BY label",
+        "MATCH (p:Person {status: 'blocked'})-[:works_at]->(c) RETURN p.uid, c.name ORDER BY p.uid",
+    ];
+    for query in queries {
+        assert!(
+            common::check_split(&db, NS, query, &Params::new()),
+            "{query}"
+        );
+    }
+    // Parts large enough to scan on several threads themselves.
+    let big = Grafeno::in_memory().unwrap();
+    run(
+        &big,
+        "UNWIND range(1, 10000) AS i CREATE (:N {i: i, g: i % 7, f: i * 0.1})",
+    );
+    set_parallelism(4);
+    for query in [
+        "MATCH (n:N) RETURN n.g, count(*), sum(n.f), collect(n.i)[0..5] ORDER BY n.g",
+        "MATCH (n:N) WHERE n.i % 3 = 0 RETURN n.i, n.f",
+        "MATCH (n:N) RETURN n.i ORDER BY n.g DESC LIMIT 20",
+    ] {
+        assert!(
+            common::check_split(&big, NS, query, &Params::new()),
+            "{query}"
+        );
+    }
+    set_parallelism(0);
+    // Not split: writes, unions, aggregating WITHs, randomness.
+    for query in [
+        "MATCH (p:Person) SET p.seen = true",
+        "MATCH (p:Person) RETURN p.uid UNION MATCH (c:Company) RETURN c.name AS uid",
+        "MATCH (p:Person) WITH count(*) AS n RETURN n",
+        "MATCH (p:Person) RETURN rand() < 2",
+        "RETURN 1",
+    ] {
+        assert!(
+            !common::check_split(&db, NS, query, &Params::new()),
+            "{query}"
+        );
+    }
 }

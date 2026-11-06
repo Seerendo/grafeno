@@ -1,0 +1,21 @@
+query,setup,members,threads_per_member,median_ms,speedup_vs_one_server_3_threads
+scan,one server,1,3,232.5,1.00
+scan,split,3,3,128.6,1.81
+scan,split,5,3,111.6,2.08
+scan,one server,1,9,114.5,2.03
+scan,one server,1,15,144.9,1.60
+aggregate,one server,1,3,412.4,1.00
+aggregate,split,3,3,176.0,2.34
+aggregate,split,5,3,140.9,2.93
+aggregate,one server,1,9,254.6,1.62
+aggregate,one server,1,15,321.3,1.28
+two hops,one server,1,3,2537.6,1.00
+two hops,split,3,3,1827.7,1.39
+two hops,split,5,3,1774.8,1.43
+two hops,one server,1,9,1364.1,1.86
+two hops,one server,1,15,1380.9,1.84
+top 20,one server,1,3,745.2,1.00
+top 20,split,3,3,337.1,2.21
+top 20,split,5,3,249.6,2.99
+top 20,one server,1,9,545.5,1.37
+top 20,one server,1,15,547.2,1.36

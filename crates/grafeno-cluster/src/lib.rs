@@ -27,14 +27,14 @@ mod storage;
 pub mod check;
 pub mod memory;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use grafeno::{Grafeno, Timestamp, WriteTx};
+use grafeno::{Grafeno, ReadTx, Timestamp, WriteTx};
 use grafeno_raft::{Envelope, Index, Message, NodeId, Payload, Raft, Role, SnapshotMeta, Term};
 use serde::Serialize;
 
@@ -56,6 +56,9 @@ pub enum Error {
     ChangeInProgress,
     /// The member is stopped.
     Stopped,
+    /// The member no longer holds a snapshot at this position (it has
+    /// moved on for longer than snapshots are kept).
+    NotHeld(Index),
     Storage(String),
     Engine(grafeno::Error),
 }
@@ -69,6 +72,12 @@ impl std::fmt::Display for Error {
             Error::Timeout => f.write_str("the cluster did not answer in time"),
             Error::ChangeInProgress => f.write_str("a membership change is under way"),
             Error::Stopped => f.write_str("the member is stopped"),
+            Error::NotHeld(index) => {
+                write!(
+                    f,
+                    "this member no longer holds a snapshot at position {index}"
+                )
+            }
             Error::Storage(message) => write!(f, "raft storage: {message}"),
             Error::Engine(error) => write!(f, "{error}"),
         }
@@ -154,6 +163,32 @@ struct Inner {
     changed: Condvar,
     writes: Mutex<()>,
     options: NodeOptions,
+    /// A snapshot after each applied entry, kept for [`SNAPSHOTS_KEPT`],
+    /// so a query split across members reads every part at one position.
+    snapshots: Mutex<BTreeMap<Index, (Instant, Arc<ReadTx>)>>,
+}
+
+/// How long snapshots of past positions are kept.
+pub const SNAPSHOTS_KEPT: Duration = Duration::from_secs(5);
+/// Snapshots kept at most, however recent.
+const MAX_SNAPSHOTS: usize = 4096;
+
+impl Inner {
+    /// Keeps `read`, a snapshot at `index`, and lets old ones go (the
+    /// latest always stays).
+    fn pin(&self, index: Index, read: ReadTx) {
+        let mut snapshots = lock(&self.snapshots);
+        let now = Instant::now();
+        snapshots
+            .entry(index)
+            .or_insert_with(|| (now, Arc::new(read)));
+        let latest = snapshots.keys().next_back().copied().unwrap_or(index);
+        snapshots
+            .retain(|at, (when, _)| *at == latest || now.duration_since(*when) < SNAPSHOTS_KEPT);
+        while snapshots.len() > MAX_SNAPSHOTS {
+            snapshots.pop_first();
+        }
+    }
 }
 
 /// One member of a cluster.
@@ -202,6 +237,7 @@ impl Node {
             changed: Condvar::new(),
             writes: Mutex::new(()),
             options,
+            snapshots: Mutex::new(BTreeMap::new()),
         });
         let mut driver = Driver {
             inner: inner.clone(),
@@ -325,6 +361,27 @@ impl Node {
         self.wait_for(self.inner.options.write_timeout, |s| s.applied >= index)
             .map(|_| index)
             .ok_or(Error::Timeout)
+    }
+
+    /// The latest snapshot this member holds, and its position.
+    pub fn snapshot(&self) -> Result<(Index, Arc<ReadTx>), Error> {
+        lock(&self.inner.snapshots)
+            .iter()
+            .next_back()
+            .map(|(index, (_, read))| (*index, read.clone()))
+            .ok_or(Error::Stopped)
+    }
+
+    /// A snapshot of the database at exactly `index`: waits up to
+    /// `timeout` for the member to apply it, and fails if the member has
+    /// moved past it for longer than [`SNAPSHOTS_KEPT`].
+    pub fn snapshot_at(&self, index: Index, timeout: Duration) -> Result<Arc<ReadTx>, Error> {
+        self.wait_for(timeout, |s| s.applied >= index)
+            .ok_or(Error::Timeout)?;
+        lock(&self.inner.snapshots)
+            .get(&index)
+            .map(|(_, read)| read.clone())
+            .ok_or(Error::NotHeld(index))
     }
 
     /// Changes the voting members (leader only): the old and new sets
@@ -583,12 +640,15 @@ impl Driver {
 
     /// Shares the current view with callers.
     fn publish(&self) {
-        let applied = self
-            .inner
-            .db
-            .begin_read()
-            .and_then(|read| read.log_position())
+        let read = self.inner.db.begin_read().ok();
+        let applied = read
+            .as_ref()
+            .and_then(|read| read.log_position().ok())
             .map_or(0, |position| position.applied);
+        // Held before the status says it is applied.
+        if let Some(read) = read {
+            self.inner.pin(applied, read);
+        }
         let config = self.raft.config();
         let status = Status {
             id: self.inner.id,

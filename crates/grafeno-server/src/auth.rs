@@ -193,6 +193,7 @@ pub fn need(method: &str, path: &str) -> Need {
                     | ["recall"]
                     | ["context"]
                     | ["query"]
+                    | ["query", "part"]
                     | ["algo", ..]
                     | ["match"]
             );

@@ -3,6 +3,8 @@
 //! turned into columns; the results equal row-at-a-time aggregation and no
 //! rows are held.
 
+mod common;
+
 use grafeno::Grafeno;
 use grafeno_query::{
     Limits, Params, QueryResult, execute, execute_read_with, execute_with, set_parallelism,
@@ -12,7 +14,11 @@ use serde_json::{Value as Json, json};
 const NS: &str = "b";
 
 fn run(db: &Grafeno, query: &str) -> QueryResult {
-    execute(db, NS, query, &Params::new()).unwrap_or_else(|e| panic!("{query}\n→ {e}"))
+    let result =
+        execute(db, NS, query, &Params::new()).unwrap_or_else(|e| panic!("{query}\n→ {e}"));
+    // Split across members, a read gives the same rows (13.4).
+    common::check_split(db, NS, query, &Params::new());
+    result
 }
 
 fn rows(db: &Grafeno, query: &str) -> Json {
@@ -119,10 +125,17 @@ fn empty_groups_and_errors_behave_as_before() {
         json!([])
     );
     assert!(fail(&db, "MATCH (p:Person) RETURN sum(p.name)").contains("needs numbers"));
+    // Integers add in 128 bits: a total that fits is not an overflow,
+    // whatever passed on the way (the order of rows must not matter).
     run(
         &db,
         "CREATE (:Big {v: 9223372036854775807}), (:Big {v: 1}), (:Big {v: -5})",
     );
+    assert_eq!(
+        rows(&db, "MATCH (b:Big) RETURN sum(b.v)"),
+        json!([[9223372036854775803i64]])
+    );
+    run(&db, "CREATE (:Big {v: 10})");
     assert!(fail(&db, "MATCH (b:Big) RETURN sum(b.v)").contains("overflow"));
     // Durations add up; mixing them with numbers is an error.
     assert_eq!(

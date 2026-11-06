@@ -26,6 +26,9 @@ use crate::procedures;
 use crate::traverse::{ANCHORS, Caches, Start};
 use crate::value::{Value, equals, sort_order};
 
+#[path = "split.rs"]
+pub(crate) mod split;
+
 /// Variable-length paths (`*`) stop at this many hops.
 pub const MAX_PATH_LENGTH: u32 = 32;
 
@@ -586,6 +589,8 @@ struct Runner<'a> {
     folded: Option<Vec<(Vec<Value>, Row)>>,
     /// Records read when the last PROFILE step ended.
     reads_seen: u64,
+    /// On a part of a split query, its share of the first match.
+    slice: Option<crate::eval::Slice>,
 }
 
 /// The rows flowing between clauses and the variables they bind, in order.
@@ -628,7 +633,34 @@ impl<'a> Runner<'a> {
             budget: Budget::new(limits),
             folded: None,
             reads_seen: 0,
+            slice: None,
         })
+    }
+
+    /// A runner for a read-only part of a split query, planning with the
+    /// coordinator's `info` so that every part makes the same plan.
+    fn with_info(
+        read: &'a ReadTx,
+        ns: &'a str,
+        params: &'a Params,
+        limits: &Limits,
+        info: PlanInfo,
+    ) -> Self {
+        Self {
+            read,
+            tx: None,
+            ns,
+            params,
+            stats: WriteStats::default(),
+            deleted_nodes: HashSet::new(),
+            deleted_edges: HashSet::new(),
+            profile: None,
+            info,
+            budget: Budget::new(limits),
+            folded: None,
+            reads_seen: 0,
+            slice: None,
+        }
     }
 
     fn ctx<'b>(&'b self, edges: &'b EdgeFilter) -> Context<'b> {
@@ -920,7 +952,15 @@ impl<'a> Runner<'a> {
                     for (position, &index) in order.iter().enumerate() {
                         let pattern = &patterns[index];
                         let last = position + 1 == order.len();
+                        // A part of a split query cuts the candidates of
+                        // the first pattern of its first match.
+                        let slice = if position == 0 {
+                            self.slice.as_ref().and_then(crate::eval::Slice::take)
+                        } else {
+                            None
+                        };
                         let matcher = Matcher {
+                            slice,
                             conditions: &conditions,
                             filter: if last { filter.as_ref() } else { None },
                             cap: if last {
@@ -1322,6 +1362,9 @@ struct Matcher<'q> {
     conditions: &'q [&'q Expr],
     filter: Option<&'q Expr>,
     cap: Option<usize>,
+    /// On a part of a split query, its share `(part, parts)` of this
+    /// match's candidates (the query's first pattern only).
+    slice: Option<(usize, usize)>,
 }
 
 /// Candidates are read in pages, so a scan with a LIMIT stops early.
@@ -1406,6 +1449,72 @@ fn match_pattern_into<T: Send>(
         };
         let ops = start.ops(ctx);
         let caches = Caches::new(ops.len());
+        // A part of a split query takes its share of the candidates, in
+        // their order, so the parts' rows put end to end are one server's.
+        if let Some((part, parts)) = matcher.slice {
+            if !out.is_empty() {
+                take((emit.prepare)(ctx, std::mem::take(&mut out))?)?;
+            }
+            let ids = all_candidates(ctx, nodes[anchor], &source, &row)?;
+            let (from, to) = (ids.len() * part / parts, ids.len() * (part + 1) / parts);
+            let ids = &ids[from..to];
+            let anchors_of =
+                |ctx: &Context, ids: &[NodeId]| -> Result<Vec<Arc<Node>>, QueryError> {
+                    let mut anchors = Vec::with_capacity(ids.len());
+                    for id in ids {
+                        let Some(node) = ctx.node(*id)? else {
+                            continue;
+                        };
+                        let node = Arc::new(node);
+                        if node_fits(ctx, &node, nodes[anchor], &row)? {
+                            anchors.push(node);
+                        }
+                    }
+                    Ok(anchors)
+                };
+            if matcher.cap.is_none()
+                && ctx.write.is_none()
+                && ids.len() >= crate::parallel::MIN_CANDIDATES
+                && crate::parallel::available()
+            {
+                crate::parallel::map_chunks(
+                    ctx,
+                    ids,
+                    |ctx, chunk: &[NodeId]| -> Result<T, QueryError> {
+                        let mut rows = Vec::new();
+                        for ids in chunk.chunks(ANCHORS) {
+                            let anchors = anchors_of(ctx, ids)?;
+                            start
+                                .extend_batch(ctx, &row, &ops, anchors, &mut rows, None, &caches)?;
+                        }
+                        ctx.budget.rows(rows.len())?;
+                        (emit.prepare)(ctx, rows)
+                    },
+                    take,
+                )?;
+            } else {
+                let batch = if matcher.cap.is_some() { 1 } else { ANCHORS };
+                for ids in ids.chunks(batch) {
+                    let anchors = anchors_of(ctx, ids)?;
+                    if start.extend_batch(
+                        ctx,
+                        &row,
+                        &ops,
+                        anchors,
+                        &mut out,
+                        matcher.cap,
+                        &caches,
+                    )? {
+                        return take((emit.prepare)(ctx, out)?);
+                    }
+                    if matcher.cap.is_none() && out.len() >= crate::aggregate::BATCH {
+                        take((emit.prepare)(ctx, std::mem::take(&mut out))?)?;
+                    }
+                    ctx.budget.rows(out.len())?;
+                }
+            }
+            continue;
+        }
         if let Some(ids) = parallel_candidates(ctx, &source, &row, matcher)? {
             if !out.is_empty() {
                 take((emit.prepare)(ctx, std::mem::take(&mut out))?)?;
@@ -1506,6 +1615,45 @@ fn parallel_candidates(
         _ => return Ok(None),
     };
     Ok(Some(ids))
+}
+
+/// Every candidate of a start, in the order a serial match visits them
+/// (the parts of a split query cut this list).
+fn all_candidates(
+    ctx: &Context,
+    pattern: &NodePattern,
+    source: &Source,
+    row: &Row,
+) -> Result<Vec<NodeId>, QueryError> {
+    let mut ids = Vec::new();
+    let mut cursor = None;
+    match source {
+        Source::Label { label, .. } => {
+            ids = ctx.read.nodes_with_label(ctx.ns, label)?;
+            ctx.budget.read(ids.len().max(1))?;
+        }
+        Source::Index { name, seek, .. } if seek_ranges(ctx, *seek, row)?.is_some() => {
+            let ranges = seek_ranges(ctx, *seek, row)?.unwrap_or_default();
+            let mut seen = HashSet::new();
+            for range in &ranges {
+                for id in ctx.index_lookup(name, range)? {
+                    if seen.insert(id) {
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+        _ => loop {
+            // Scans, an `@id`: page through as the serial match does.
+            let (page, next) = candidates(ctx, pattern, source, row, cursor)?;
+            ids.extend(page.iter().map(|node| node.id));
+            match next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        },
+    }
+    Ok(ids)
 }
 
 pub(crate) fn all_true(ctx: &Context, conditions: &[&Expr], row: &Row) -> Result<bool, QueryError> {
@@ -2201,43 +2349,73 @@ fn project_folded(
     }
 
     if !projection.order.is_empty() {
-        let mut keyed = Vec::with_capacity(output.len());
-        for (values, mut source) in output {
-            for (column, value) in columns.iter().zip(&values) {
-                source.insert(column.clone(), value.clone());
-            }
-            let mut keys = Vec::with_capacity(projection.order.len());
-            for (expr, _) in &projection.order {
-                // An ORDER BY item that repeats a projected item (aggregates
-                // included) uses its value.
-                let key = match items.iter().position(|(item, _)| item == expr) {
-                    Some(at) => values[at].clone(),
-                    None => eval(ctx, expr, Scope::Row(&source))?,
-                };
-                keys.push(key);
-            }
-            keyed.push((keys, values));
-        }
-        keyed.sort_by(|(a, _), (b, _)| {
-            for ((left, right), (_, descending)) in a.iter().zip(b).zip(&projection.order) {
-                let ordering = sort_order(left, right);
-                let ordering = if *descending {
-                    ordering.reverse()
-                } else {
-                    ordering
-                };
-                if !ordering.is_eq() {
-                    return ordering;
-                }
-            }
-            std::cmp::Ordering::Equal
-        });
+        let mut keyed = order_keys(ctx, output, projection, &items, &columns)?;
+        keyed.sort_by(|(a, _), (b, _)| compare_keys(a, b, &projection.order));
         output = keyed
             .into_iter()
             .map(|(_, values)| (values, Row::new()))
             .collect();
     }
 
+    let (skip, limit) = skip_limit(ctx, projection)?;
+    let rows = output
+        .into_iter()
+        .skip(skip)
+        .take(limit)
+        .map(|(values, _)| values)
+        .collect();
+    Ok((columns, rows))
+}
+
+/// An output row's ORDER BY keys, then its values.
+pub(crate) type Keyed = (Vec<Value>, Vec<Value>);
+
+/// Each output row's ORDER BY keys, with its values.
+fn order_keys(
+    ctx: &Context,
+    output: Vec<(Vec<Value>, Row)>,
+    projection: &Projection,
+    items: &[Item],
+    columns: &[String],
+) -> Result<Vec<Keyed>, QueryError> {
+    let mut keyed = Vec::with_capacity(output.len());
+    for (values, mut source) in output {
+        for (column, value) in columns.iter().zip(&values) {
+            source.insert(column.clone(), value.clone());
+        }
+        let mut keys = Vec::with_capacity(projection.order.len());
+        for (expr, _) in &projection.order {
+            // An ORDER BY item that repeats a projected item (aggregates
+            // included) uses its value.
+            let key = match items.iter().position(|(item, _)| item == expr) {
+                Some(at) => values[at].clone(),
+                None => eval(ctx, expr, Scope::Row(&source))?,
+            };
+            keys.push(key);
+        }
+        keyed.push((keys, values));
+    }
+    Ok(keyed)
+}
+
+/// How two rows' ORDER BY keys compare.
+fn compare_keys(a: &[Value], b: &[Value], order: &[(Expr, bool)]) -> std::cmp::Ordering {
+    for ((left, right), (_, descending)) in a.iter().zip(b).zip(order) {
+        let ordering = sort_order(left, right);
+        let ordering = if *descending {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+        if !ordering.is_eq() {
+            return ordering;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// A projection's SKIP (0 without one) and LIMIT (`usize::MAX`).
+fn skip_limit(ctx: &Context, projection: &Projection) -> Result<(usize, usize), QueryError> {
     let empty = Row::new();
     let count = |expr: &Option<Expr>, what: &str| -> Result<Option<usize>, QueryError> {
         let Some(expr) = expr else { return Ok(None) };
@@ -2249,15 +2427,10 @@ fn project_folded(
             ))),
         }
     };
-    let skip = count(&projection.skip, "SKIP")?.unwrap_or(0);
-    let limit = count(&projection.limit, "LIMIT")?.unwrap_or(usize::MAX);
-    let rows = output
-        .into_iter()
-        .skip(skip)
-        .take(limit)
-        .map(|(values, _)| values)
-        .collect();
-    Ok((columns, rows))
+    Ok((
+        count(&projection.skip, "SKIP")?.unwrap_or(0),
+        count(&projection.limit, "LIMIT")?.unwrap_or(usize::MAX),
+    ))
 }
 
 // ---------------------------------------------------------------- EXPLAIN

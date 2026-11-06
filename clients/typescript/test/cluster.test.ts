@@ -110,6 +110,18 @@ test("a client follows a cluster", async () => {
   }
   const linearizable = await ns.query("MATCH (n:Note) RETURN count(n)", {}, { consistency: "linearizable" });
   assert.equal(linearizable.rows[0][0], 6);
+  // Spread over the members, reads still see the client's writes; a read
+  // can ask to be split across them.
+  const spread = new Grafeno({ url: order, token, spread: true });
+  const sns = spread.namespace("c");
+  for (let i = 0; i < 6; i++) {
+    await sns.query("CREATE (:Note {i: 200})", {}, { idempotencyKey: `spread-${i}` });
+    const seen = await sns.query("MATCH (n:Note {i: 200}) RETURN count(n)");
+    assert.equal(seen.rows[0][0], i + 1);
+  }
+  const split = await sns.query("MATCH (n:Note) RETURN n.i, count(*) ORDER BY n.i", {}, { split: "on" });
+  assert.equal(split.split?.parts, 3);
+  await ns.query("MATCH (n:Note {i: 200}) DELETE n");
   // The member in use dies: the client moves on.
   const used = members.find((member) => member.api === client.url)!;
   used.process!.kill();

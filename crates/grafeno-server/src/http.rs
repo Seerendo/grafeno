@@ -63,6 +63,8 @@ pub struct Writes {
     cluster: Option<Arc<grafeno_cluster::Node>>,
     /// The members' API addresses, for forwarding to the leader.
     apis: std::collections::HashMap<u64, String>,
+    /// Reads from this estimated cost split across members (13.4).
+    split_cost: f64,
 }
 
 impl Writes {
@@ -118,6 +120,22 @@ impl Writes {
     pub fn api_of(&self, id: u64) -> Option<String> {
         self.apis.get(&id).cloned()
     }
+
+    /// Every member with an API address, by id: the parts of a split read.
+    pub fn members(&self) -> Vec<(u64, String)> {
+        let mut members: Vec<(u64, String)> = self
+            .apis
+            .iter()
+            .map(|(id, api)| (*id, api.clone()))
+            .collect();
+        members.sort();
+        members
+    }
+
+    /// The estimated cost from which reads split across members.
+    pub fn split_cost(&self) -> f64 {
+        self.split_cost
+    }
 }
 
 /// Requests served at once under `/v1` by default.
@@ -147,6 +165,7 @@ impl AppState {
                 local: Arc::new(grafeno::Writer::new(db.clone(), options)),
                 cluster: None,
                 apis: Default::default(),
+                split_cost: crate::cluster::DEFAULT_SPLIT_COST,
             }),
             keys: Arc::new(Keyring::load(&db).unwrap_or_default()),
             db,
@@ -165,11 +184,13 @@ impl AppState {
         mut self,
         node: Arc<grafeno_cluster::Node>,
         apis: std::collections::HashMap<u64, String>,
+        split_cost: f64,
     ) -> Self {
         self.writer = Arc::new(Writes {
             local: self.writer.local.clone(),
             cluster: Some(node),
             apis,
+            split_cost,
         });
         self
     }
@@ -307,6 +328,7 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/{ns}/context", post(context_handler))
         .route("/{ns}/batch", post(batch))
         .route("/{ns}/query", post(query))
+        .route("/{ns}/query/part", post(query_part))
         .route("/algorithms", get(algorithms))
         .route("/whoami", get(whoami))
         .route("/keys", get(list_keys).post(create_key))
@@ -1746,8 +1768,47 @@ async fn query(
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned)
     });
-    run_query_keyed(&state, ns, input.query, params, key)
+    let split = crate::cluster::SplitRequest {
+        params: input.params,
+        authorization: headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned),
+        mode: crate::cluster::SplitMode::from_headers(&headers),
+    };
+    let started = std::time::Instant::now();
+    let outcome = run_query_counted(&state, ns, input.query, params, key, Some(split)).await;
+    let limit = match &outcome {
+        Err(error) if error.code == "query_limit" => Some(error.message.as_str()),
+        _ => None,
+    };
+    state.metrics.query(started.elapsed().as_secs_f64(), limit);
+    outcome.map(Json)
+}
+
+/// One part of a read split across cluster members (13.4), asked by the
+/// member that splits it.
+async fn query_part(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Body(input): Body<crate::cluster::PartRequest>,
+) -> ApiResult<Json<Value>> {
+    require(&ns, Role::Read)?;
+    let Some(node) = state.writer.cluster().cloned() else {
+        return Err(ApiError::bad_request("this server is not a cluster member"));
+    };
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _guard = CancelOnDrop(cancel.clone());
+    let caller = auth::current();
+    let limits = grafeno_query::Limits {
+        cancel: Some(cancel),
+        visible: (!caller.is_owner())
+            .then(|| grafeno_query::NamespaceFilter::new(move |ns| caller.may(ns, Role::Read))),
+        ..state.limits.clone()
+    };
+    tokio::task::spawn_blocking(move || crate::cluster::read_part(&node, &ns, &input, &limits))
         .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
         .map(Json)
 }
 
@@ -1772,7 +1833,7 @@ async fn run_query_keyed(
     key: Option<String>,
 ) -> ApiResult<Value> {
     let started = std::time::Instant::now();
-    let outcome = run_query_counted(state, ns, query, params, key).await;
+    let outcome = run_query_counted(state, ns, query, params, key, None).await;
     let limit = match &outcome {
         Err(error) if error.code == "query_limit" => Some(error.message.as_str()),
         _ => None,
@@ -1788,6 +1849,7 @@ async fn run_query_counted(
     query: String,
     params: grafeno_query::Params,
     key: Option<String>,
+    split: Option<crate::cluster::SplitRequest>,
 ) -> ApiResult<Value> {
     let db = state.db.clone();
     // When the client goes away, this handler is dropped: the guard then
@@ -1807,12 +1869,20 @@ async fn run_query_counted(
         ..state.limits.clone()
     };
     if !grafeno_query::is_write(&query)? {
-        let result = tokio::task::spawn_blocking(move || {
-            grafeno_query::execute_read_with(&db.begin_read()?, &ns, &query, &params, &limits)
+        let writer = state.writer.clone();
+        return tokio::task::spawn_blocking(move || -> ApiResult<Value> {
+            // On a cluster: the member's latest snapshot, split across the
+            // members when it pays (13.4).
+            if let (Some(node), Some(split)) = (writer.cluster(), &split) {
+                return crate::cluster::read(&writer, node, &ns, &query, &params, &limits, split);
+            }
+            Ok(
+                grafeno_query::execute_read_with(&db.begin_read()?, &ns, &query, &params, &limits)?
+                    .to_json(),
+            )
         })
         .await
-        .map_err(|error| ApiError::internal(error.to_string()))??;
-        return Ok(result.to_json());
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     }
     // Writes join the next group commit. A failing query must make the
     // writer discard the group's transaction, so its error travels as an

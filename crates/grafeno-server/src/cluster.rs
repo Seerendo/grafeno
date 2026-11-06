@@ -71,6 +71,11 @@ pub struct ClusterConfig {
     pub peers: Vec<Peer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tick_ms: Option<u64>,
+    /// Reads whose estimated cost (as `EXPLAIN` shows it) reaches this are
+    /// split across the members (phase 13.4); [`DEFAULT_SPLIT_COST`] by
+    /// default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_cost: Option<u64>,
 }
 
 /// A message for a peer, with a snapshot's bytes.
@@ -255,6 +260,9 @@ pub fn engine_error(error: grafeno_cluster::Error) -> grafeno::Error {
             grafeno::Error::Conflict("a membership change is under way".into())
         }
         Error::Stopped => grafeno::Error::Storage("the cluster member is stopped".into()),
+        Error::NotHeld(index) => grafeno::Error::Busy(format!(
+            "this member no longer holds a snapshot at position {index}"
+        )),
         Error::Storage(message) => grafeno::Error::Storage(message),
         Error::Engine(error) => error,
     }
@@ -504,4 +512,216 @@ pub async fn route(
         response.headers_mut().insert(POSITION, value);
     }
     response
+}
+
+// ------------------------------------------------------ split reads (13.4)
+
+/// `on` splits a read across the members whenever its shape allows,
+/// `off` never; by default (`auto`) when its estimated cost reaches the
+/// cluster's `split_cost`.
+pub const SPLIT: &str = "x-grafeno-split";
+/// The estimated cost from which reads split by default.
+pub const DEFAULT_SPLIT_COST: f64 = 200_000.0;
+/// How long a member waits to reach the position of a part it is asked
+/// to run.
+const PART_WAIT: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitMode {
+    Auto,
+    On,
+    Off,
+}
+
+impl SplitMode {
+    pub fn from_headers(headers: &HeaderMap) -> Self {
+        match headers
+            .get(SPLIT)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("on") => SplitMode::On,
+            Some("off") => SplitMode::Off,
+            _ => SplitMode::Auto,
+        }
+    }
+}
+
+/// What the member that splits a read needs from the request.
+pub struct SplitRequest {
+    pub params: serde_json::Map<String, serde_json::Value>,
+    /// The caller's `Authorization`, sent on to the other members.
+    pub authorization: Option<String>,
+    pub mode: SplitMode,
+}
+
+/// One part of a split read, asked of a member (`POST /v1/{ns}/query/part`).
+#[derive(Serialize, Deserialize)]
+pub struct PartRequest {
+    pub query: String,
+    #[serde(default)]
+    pub params: serde_json::Map<String, serde_json::Value>,
+    pub plan: grafeno_query::SplitPlan,
+    pub part: usize,
+    pub parts: usize,
+    /// The log position every part reads at.
+    pub position: u64,
+}
+
+/// A path segment, percent-encoded.
+fn encode_segment(segment: &str) -> String {
+    segment
+        .bytes()
+        .map(|b| match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// Asks the member at `api` for a part; `None` if it does not answer it.
+fn remote_part(
+    api: &str,
+    ns: &str,
+    request: &PartRequest,
+    authorization: Option<&str>,
+    timeout: Duration,
+) -> Option<grafeno_query::Partial> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(timeout))
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .build()
+        .into();
+    let url = format!("http://{api}/v1/{}/query/part", encode_segment(ns));
+    let mut call = agent.post(&url).header(FORWARDED, "1");
+    if let Some(authorization) = authorization {
+        call = call.header("authorization", authorization);
+    }
+    let mut response = call.send_json(request).ok()?;
+    if response.status().as_u16() != 200 {
+        return None;
+    }
+    let text = response
+        .body_mut()
+        .with_config()
+        .limit(1 << 30)
+        .read_to_string()
+        .ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Runs a read on a cluster member: on its latest snapshot, or, when the
+/// query can be split and it pays, in one part per member, every part at
+/// this member's position, merged here. A member that does not answer
+/// has its part run here instead. A split result says so:
+/// `split: {parts, here}`, `here` being the parts run on this member.
+#[allow(clippy::too_many_arguments)]
+pub fn read(
+    writer: &crate::http::Writes,
+    node: &Node,
+    ns: &str,
+    query: &str,
+    params: &grafeno_query::Params,
+    limits: &grafeno_query::Limits,
+    split: &SplitRequest,
+) -> Result<serde_json::Value, crate::http::ApiError> {
+    let (position, read) = node.snapshot().map_err(engine_error)?;
+    let members = writer.members();
+    let plan = match split.mode {
+        SplitMode::Off => None,
+        _ if members.len() < 2 => None,
+        mode => grafeno_query::split_plan(&read, ns, query, params)?
+            .filter(|plan| mode == SplitMode::On || plan.cost() >= writer.split_cost()),
+    };
+    let Some(plan) = plan else {
+        return Ok(grafeno_query::execute_read_with(&read, ns, query, params, limits)?.to_json());
+    };
+    let parts = members.len();
+    let request = |part: usize| PartRequest {
+        query: query.to_owned(),
+        params: split.params.clone(),
+        plan: plan.clone(),
+        part,
+        parts,
+        position,
+    };
+    let timeout = limits.timeout.unwrap_or(Duration::from_secs(60)) + PART_WAIT;
+    let me = node.id();
+    let local = |part: usize| {
+        grafeno_query::execute_part(&read, ns, query, params, limits, &plan, part, parts)
+    };
+    let partials = std::thread::scope(|scope| {
+        let remote: Vec<_> = members
+            .iter()
+            .enumerate()
+            .map(|(part, (id, api))| {
+                (*id != me).then(|| {
+                    let request = request(part);
+                    let authorization = split.authorization.as_deref();
+                    scope.spawn(move || remote_part(api, ns, &request, authorization, timeout))
+                })
+            })
+            .collect();
+        // This member's part, while the others run theirs.
+        let mut partials: Vec<Option<Result<grafeno_query::Partial, grafeno_query::QueryError>>> =
+            remote.iter().map(|_| None).collect();
+        let mut here = 0;
+        for (part, handle) in remote.iter().enumerate() {
+            if handle.is_none() {
+                partials[part] = Some(local(part));
+                here += 1;
+            }
+        }
+        for (part, handle) in remote.into_iter().enumerate() {
+            if let Some(handle) = handle {
+                partials[part] = Some(match handle.join().ok().flatten() {
+                    Some(partial) => Ok(partial),
+                    None => {
+                        here += 1;
+                        local(part)
+                    }
+                });
+            }
+        }
+        partials
+            .into_iter()
+            .map(|partial| partial.expect("every part ran"))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|partials| (partials, here))
+    });
+    let (partials, here) = partials?;
+    let result = grafeno_query::merge_parts(&read, ns, query, params, limits, &plan, partials)?;
+    let mut json = result.to_json();
+    json["split"] = serde_json::json!({ "parts": parts, "here": here });
+    Ok(json)
+}
+
+/// Runs one part of a split read on this member's snapshot at the
+/// coordinator's position.
+pub fn read_part(
+    node: &Node,
+    ns: &str,
+    request: &PartRequest,
+    limits: &grafeno_query::Limits,
+) -> Result<serde_json::Value, crate::http::ApiError> {
+    let read = node
+        .snapshot_at(request.position, PART_WAIT)
+        .map_err(engine_error)?;
+    let params = grafeno_query::params_from_json(&request.params);
+    let partial = grafeno_query::execute_part(
+        &read,
+        ns,
+        &request.query,
+        &params,
+        limits,
+        &request.plan,
+        request.part,
+        request.parts,
+    )?;
+    serde_json::to_value(partial)
+        .map_err(|e| crate::http::ApiError::from(grafeno::Error::Serialization(e.to_string())))
 }

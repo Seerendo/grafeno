@@ -340,6 +340,12 @@ export interface QueryResult {
   stats: WriteStats;
   /** What each step did, for statements that start with PROFILE. */
   profile?: PlanStep[];
+  /**
+   * On a cluster, a read split across the members: how many parts, and
+   * how many ran on the member asked (its own, and those of members that
+   * did not answer).
+   */
+  split?: { parts: number; here: number };
 }
 
 export interface BatchResult {
@@ -528,6 +534,12 @@ export interface GrafenoOptions {
    * the member to have applied the last position this client saw.
    */
   readYourWrites?: boolean;
+  /**
+   * Spread requests over the members (default false): each request starts
+   * on the next one. Followers forward writes to the leader, and with
+   * `readYourWrites` reads still see this client's writes.
+   */
+  spread?: boolean;
   /** A custom `fetch`, for tests or other runtimes. */
   fetch?: typeof fetch;
 }
@@ -541,6 +553,11 @@ export interface QueryOptions {
   idempotencyKey?: string;
   /** The consistency of this statement, over the client's. */
   consistency?: Consistency;
+  /**
+   * On a cluster, `on` splits a read across the members whenever its shape
+   * allows, `off` never; `auto` (default) when it is costly enough.
+   */
+  split?: "auto" | "on" | "off";
 }
 
 /** An error returned by the server (or a network failure, with status 0). */
@@ -566,6 +583,7 @@ export class Grafeno {
   readonly #token: string | undefined;
   readonly #consistency: Consistency | undefined;
   readonly #readYourWrites: boolean;
+  readonly #spread: boolean;
   readonly #fetch: typeof fetch;
 
   constructor(options: GrafenoOptions) {
@@ -575,6 +593,7 @@ export class Grafeno {
     this.#token = options.token;
     this.#consistency = options.consistency;
     this.#readYourWrites = options.readYourWrites ?? true;
+    this.#spread = options.spread ?? false;
     // Browsers refuse `fetch` called as a method of another object
     // ("Illegal invocation"), so the global one is bound to `globalThis`.
     this.#fetch = options.fetch ?? fetch.bind(globalThis);
@@ -706,7 +725,9 @@ export class Grafeno {
     if (this.#consistency) headers["x-grafeno-consistency"] = this.#consistency;
     if (this.#readYourWrites && this.#position > 0) headers["x-grafeno-after"] = String(this.#position);
     Object.assign(headers, extra);
-    // The member in use first, then the others in turn.
+    // The member in use first (the next one when spreading), then the
+    // others in turn.
+    if (this.#spread) this.#current = (this.#current + 1) % this.#urls.length;
     let response: Response | undefined;
     const failures: string[] = [];
     for (let step = 0; step < this.#urls.length && response === undefined; step++) {
@@ -911,6 +932,7 @@ export class Namespace {
     const extra: Record<string, string> = {};
     if (options.idempotencyKey !== undefined) extra["idempotency-key"] = options.idempotencyKey;
     if (options.consistency !== undefined) extra["x-grafeno-consistency"] = options.consistency;
+    if (options.split !== undefined) extra["x-grafeno-split"] = options.split;
     return this.#client.request("POST", this.#base + "/query", { query, params }, extra);
   }
 

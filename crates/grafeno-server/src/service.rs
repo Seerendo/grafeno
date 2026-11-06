@@ -129,7 +129,10 @@ pub fn run(
             .iter()
             .filter_map(|peer| peer.api.clone().map(|api| (peer.id, api)))
             .collect();
-        state = state.with_cluster(node, apis);
+        let split_cost = cluster
+            .split_cost
+            .map_or(crate::cluster::DEFAULT_SPLIT_COST, |cost| cost as f64);
+        state = state.with_cluster(node, apis, split_cost);
     }
     runtime.block_on(http::serve_until(
         state,

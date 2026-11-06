@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use grafeno_core::Result;
 use redb::ReadableTable;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
 use crate::ReadTx;
@@ -118,7 +118,7 @@ impl IndexStats {
 }
 
 /// Edges of one label and the nodes they join.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EdgeLabelStats {
     pub label: String,
     pub edges: u64,
@@ -153,7 +153,90 @@ pub struct PlannerStats {
     pub build_ms: f64,
 }
 
+/// Every field of [`IndexStats`], the encoded ones too.
+#[derive(Serialize, Deserialize)]
+struct WireIndex {
+    name: String,
+    label: String,
+    key: String,
+    unique: bool,
+    entries: u64,
+    distinct: u64,
+    label_nodes: u64,
+    common: Vec<(Json, u64)>,
+    common_bytes: Vec<(Vec<u8>, u64)>,
+    bounds: Vec<Vec<u8>>,
+}
+
+/// Every field of [`PlannerStats`].
+#[derive(Serialize, Deserialize)]
+struct WireStats {
+    ns: String,
+    nodes: u64,
+    edges: u64,
+    indexes: Vec<WireIndex>,
+    edge_labels: Vec<EdgeLabelStats>,
+    build_ms: f64,
+}
+
 impl PlannerStats {
+    /// The statistics whole, for another process to plan exactly as this
+    /// one would (a query split across cluster members).
+    pub fn to_wire(&self) -> Json {
+        let wire = WireStats {
+            ns: self.ns.clone(),
+            nodes: self.nodes,
+            edges: self.edges,
+            indexes: self
+                .indexes
+                .iter()
+                .map(|index| WireIndex {
+                    name: index.name.clone(),
+                    label: index.label.clone(),
+                    key: index.key.clone(),
+                    unique: index.unique,
+                    entries: index.entries,
+                    distinct: index.distinct,
+                    label_nodes: index.label_nodes,
+                    common: index.common.clone(),
+                    common_bytes: index.common_bytes.clone(),
+                    bounds: index.bounds.clone(),
+                })
+                .collect(),
+            edge_labels: self.edge_labels.clone(),
+            build_ms: self.build_ms,
+        };
+        serde_json::to_value(wire).unwrap_or(Json::Null)
+    }
+
+    /// Statistics from [`PlannerStats::to_wire`].
+    pub fn from_wire(json: &Json) -> Option<Self> {
+        let wire: WireStats = serde_json::from_value(json.clone()).ok()?;
+        Some(Self {
+            ns: wire.ns,
+            nodes: wire.nodes,
+            edges: wire.edges,
+            indexes: wire
+                .indexes
+                .into_iter()
+                .map(|index| IndexStats {
+                    name: index.name,
+                    label: index.label,
+                    key: index.key,
+                    unique: index.unique,
+                    entries: index.entries,
+                    distinct: index.distinct,
+                    label_nodes: index.label_nodes,
+                    common: index.common,
+                    common_bytes: index.common_bytes,
+                    bounds: index.bounds,
+                })
+                .collect(),
+            edge_labels: wire.edge_labels,
+            build_ms: wire.build_ms,
+        })
+    }
+
     pub fn index(&self, name: &str) -> Option<&IndexStats> {
         self.indexes.iter().find(|index| index.name == name)
     }

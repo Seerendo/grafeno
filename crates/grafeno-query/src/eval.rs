@@ -18,6 +18,24 @@ use crate::value::{Value, compare, equals, sort_order};
 /// Variable bindings of one result row.
 pub(crate) type Row = HashMap<String, Value>;
 
+/// A row as exact JSON (see [`Value::to_wire`]).
+pub(crate) fn row_to_wire(row: &Row) -> serde_json::Value {
+    serde_json::Value::Object(
+        row.iter()
+            .map(|(name, value)| (name.clone(), value.to_wire()))
+            .collect(),
+    )
+}
+
+/// A row from [`row_to_wire`].
+pub(crate) fn row_from_wire(json: &serde_json::Value) -> Result<Row, QueryError> {
+    json.as_object()
+        .ok_or_else(|| QueryError::runtime("a partial row is malformed"))?
+        .iter()
+        .map(|(name, value)| Ok((name.clone(), Value::from_wire(value)?)))
+        .collect()
+}
+
 /// Query parameters (`$name`).
 pub type Params = HashMap<String, Value>;
 
@@ -34,6 +52,30 @@ pub(crate) struct Context<'a> {
     pub(crate) edges: &'a EdgeFilter,
     pub(crate) info: &'a PlanInfo,
     pub(crate) budget: &'a Budget,
+}
+
+/// Part `part` of `parts` of the candidates of a query's first match (a
+/// query split across cluster members). Taken by the first match only.
+pub(crate) struct Slice {
+    taken: std::sync::atomic::AtomicBool,
+    part: usize,
+    parts: usize,
+}
+
+impl Slice {
+    pub(crate) fn new(part: usize, parts: usize) -> Self {
+        Self {
+            taken: std::sync::atomic::AtomicBool::new(false),
+            part,
+            parts,
+        }
+    }
+
+    /// `(part, parts)` the first time; `None` after.
+    pub(crate) fn take(&self) -> Option<(usize, usize)> {
+        (!self.taken.swap(true, std::sync::atomic::Ordering::AcqRel))
+            .then_some((self.part, self.parts))
+    }
 }
 
 impl Context<'_> {
@@ -919,6 +961,14 @@ pub(crate) fn percentile_of(name: &str, value: &Value) -> Result<f64, QueryError
 
 /// An aggregate over its values (nulls and, with DISTINCT, repeats already
 /// left out), in the order they came.
+/// The numbers among `values` added without rounding errors, so that the
+/// sum does not depend on their order.
+fn exact_sum(values: &[Value]) -> f64 {
+    let mut sum = crate::aggregate::ExactSum::default();
+    values.iter().filter_map(number).for_each(|f| sum.add(f));
+    sum.value()
+}
+
 pub(crate) fn reduce(name: &str, values: Vec<Value>, percentile: f64) -> Result<Value, QueryError> {
     Ok(match name {
         "count" => Value::Int(values.len() as i64),
@@ -1000,20 +1050,20 @@ pub(crate) fn reduce(name: &str, values: Vec<Value>, percentile: f64) -> Result<
                 if values.is_empty() {
                     return Ok(Value::Null);
                 }
-                let total: f64 = values.iter().filter_map(number).sum();
-                Value::Float(total / values.len() as f64)
+                Value::Float(exact_sum(&values) / values.len() as f64)
             } else if values.iter().all(|v| matches!(v, Value::Int(_))) {
-                let mut total = 0i64;
-                for value in &values {
-                    if let Value::Int(i) = value {
-                        total = total
-                            .checked_add(*i)
-                            .ok_or_else(|| error("integer overflow"))?;
-                    }
-                }
-                Value::Int(total)
+                // In 128 bits: only a total that does not fit is an error,
+                // whatever the order of the values.
+                let total: i128 = values
+                    .iter()
+                    .map(|v| match v {
+                        Value::Int(i) => *i as i128,
+                        _ => 0,
+                    })
+                    .sum();
+                Value::Int(i64::try_from(total).map_err(|_| error("integer overflow"))?)
             } else {
-                Value::Float(values.iter().filter_map(number).sum())
+                Value::Float(exact_sum(&values))
             }
         }
         _ => unreachable!("not an aggregate"),

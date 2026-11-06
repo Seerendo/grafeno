@@ -65,6 +65,91 @@ impl Value {
         }
     }
 
+    /// Exact JSON for another process (a part of a query split across
+    /// cluster members): types kept, floats by their bits, nodes, edges and
+    /// paths whole. [`Value::from_wire`] reads it back.
+    pub(crate) fn to_wire(&self) -> serde_json::Value {
+        match self {
+            Value::Null => json!(["n"]),
+            Value::Bool(b) => json!(["b", b]),
+            Value::Int(i) => json!(["i", i]),
+            Value::Float(f) => json!(["f", f.to_bits()]),
+            Value::Str(s) => json!(["s", s]),
+            Value::Time(t) => json!(["t", t]),
+            Value::Duration(d) => json!(["d", d.months, d.days, d.micros]),
+            Value::List(items) => {
+                json!(["l", items.iter().map(Value::to_wire).collect::<Vec<_>>()])
+            }
+            Value::Map(map) => json!([
+                "m",
+                map.iter()
+                    .map(|(key, value)| (key.clone(), value.to_wire()))
+                    .collect::<serde_json::Map<_, _>>()
+            ]),
+            Value::Node(node) => json!(["N", node.as_ref()]),
+            Value::Edge(edge) => json!(["E", edge.as_ref()]),
+            Value::Path(path) => json!([
+                "P",
+                path.nodes.iter().map(|n| n.as_ref()).collect::<Vec<_>>(),
+                path.edges.iter().map(|e| e.as_ref()).collect::<Vec<_>>()
+            ]),
+        }
+    }
+
+    /// A value from [`Value::to_wire`].
+    pub(crate) fn from_wire(json: &serde_json::Value) -> Result<Value, crate::QueryError> {
+        let bad = || crate::QueryError::runtime(format!("not a wire value: {json}"));
+        let parts = json.as_array().ok_or_else(bad)?;
+        let tag = parts.first().and_then(|t| t.as_str()).ok_or_else(bad)?;
+        let at = |i: usize| parts.get(i).ok_or_else(bad);
+        fn decode<T: serde::de::DeserializeOwned>(
+            value: &serde_json::Value,
+        ) -> Result<T, crate::QueryError> {
+            serde_json::from_value(value.clone())
+                .map_err(|_| crate::QueryError::runtime("not a wire value"))
+        }
+        Ok(match tag {
+            "n" => Value::Null,
+            "b" => Value::Bool(at(1)?.as_bool().ok_or_else(bad)?),
+            "i" => Value::Int(at(1)?.as_i64().ok_or_else(bad)?),
+            "f" => Value::Float(f64::from_bits(at(1)?.as_u64().ok_or_else(bad)?)),
+            "s" => Value::Str(at(1)?.as_str().ok_or_else(bad)?.to_owned()),
+            "t" => Value::Time(decode(at(1)?)?),
+            "d" => Value::Duration(Duration {
+                months: at(1)?.as_i64().ok_or_else(bad)?,
+                days: at(2)?.as_i64().ok_or_else(bad)?,
+                micros: at(3)?.as_i64().ok_or_else(bad)?,
+            }),
+            "l" => Value::List(
+                at(1)?
+                    .as_array()
+                    .ok_or_else(bad)?
+                    .iter()
+                    .map(Value::from_wire)
+                    .collect::<Result<_, _>>()?,
+            ),
+            "m" => Value::Map(
+                at(1)?
+                    .as_object()
+                    .ok_or_else(bad)?
+                    .iter()
+                    .map(|(key, value)| Ok((key.clone(), Value::from_wire(value)?)))
+                    .collect::<Result<_, crate::QueryError>>()?,
+            ),
+            "N" => Value::Node(Arc::new(decode(at(1)?)?)),
+            "E" => Value::Edge(Arc::new(decode(at(1)?)?)),
+            "P" => {
+                let nodes: Vec<Node> = decode(at(1)?)?;
+                let edges: Vec<Edge> = decode(at(2)?)?;
+                Value::Path(Arc::new(Path {
+                    nodes: nodes.into_iter().map(Arc::new).collect(),
+                    edges: edges.into_iter().map(Arc::new).collect(),
+                }))
+            }
+            _ => return Err(bad()),
+        })
+    }
+
     /// JSON for results: nodes and edges as their records, times as ISO
     /// 8601 strings.
     pub fn to_json(&self) -> serde_json::Value {

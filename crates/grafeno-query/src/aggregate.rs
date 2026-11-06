@@ -19,6 +19,7 @@ use crate::ast::Expr;
 use crate::eval::{Context, Row, Scope, eval, number, percentile_of, reduce};
 use crate::temporal::Duration;
 use crate::value::{Value, sort_order};
+use serde_json::{Value as Json, json};
 
 /// Rows per batch handed from a match to the aggregation.
 pub(crate) const BATCH: usize = 1024;
@@ -218,19 +219,123 @@ enum Acc {
     },
 }
 
-/// Running totals for `sum` and `avg`, kept so that the result equals
-/// adding the values in order: integers checked (an overflow on the way is
-/// an error, as it is row by row), floats in order, durations apart.
+/// Running totals for `sum` and `avg`. Integers add in 128 bits (the
+/// result must fit 64), floats exactly ([`ExactSum`]), durations apart, so
+/// the result does not depend on the order of the values: partial sums of
+/// a query split across members merge into what one server computes.
 #[derive(Default)]
 struct Sum {
     n: usize,
     seen: Option<HashSet<String>>,
-    ints: Option<i64>,
+    /// With DISTINCT: the distinct values, so that partial sums merge.
+    distinct: Vec<Value>,
+    ints: i128,
     all_int: bool,
-    floats: f64,
+    floats: ExactSum,
     not_number: bool,
     all_duration: bool,
     duration: Option<Result<Duration, QueryError>>,
+}
+
+/// A float sum without rounding errors (Shewchuk's partials, as Python's
+/// `math.fsum`): the result is the exact sum rounded once, whatever the
+/// order of the values.
+#[derive(Clone, Default)]
+pub(crate) struct ExactSum {
+    partials: Vec<f64>,
+    nan: bool,
+    positive_infinity: bool,
+    negative_infinity: bool,
+}
+
+impl ExactSum {
+    pub(crate) fn add(&mut self, value: f64) {
+        if !value.is_finite() {
+            if value.is_nan() {
+                self.nan = true;
+            } else if value > 0.0 {
+                self.positive_infinity = true;
+            } else {
+                self.negative_infinity = true;
+            }
+            return;
+        }
+        let mut x = value;
+        let mut kept = 0;
+        for j in 0..self.partials.len() {
+            let mut y = self.partials[j];
+            if x.abs() < y.abs() {
+                std::mem::swap(&mut x, &mut y);
+            }
+            let high = x + y;
+            if !high.is_finite() {
+                // The sum left the range of floats.
+                if high > 0.0 {
+                    self.positive_infinity = true;
+                } else {
+                    self.negative_infinity = true;
+                }
+                return;
+            }
+            let low = y - (high - x);
+            if low != 0.0 {
+                self.partials[kept] = low;
+                kept += 1;
+            }
+            x = high;
+        }
+        self.partials.truncate(kept);
+        self.partials.push(x);
+    }
+
+    pub(crate) fn merge(&mut self, other: &ExactSum) {
+        for partial in &other.partials {
+            self.add(*partial);
+        }
+        self.nan |= other.nan;
+        self.positive_infinity |= other.positive_infinity;
+        self.negative_infinity |= other.negative_infinity;
+    }
+
+    pub(crate) fn value(&self) -> f64 {
+        if self.nan || (self.positive_infinity && self.negative_infinity) {
+            return f64::NAN;
+        }
+        if self.positive_infinity {
+            return f64::INFINITY;
+        }
+        if self.negative_infinity {
+            return f64::NEG_INFINITY;
+        }
+        let p = &self.partials;
+        let mut n = p.len();
+        if n == 0 {
+            return 0.0;
+        }
+        n -= 1;
+        let mut high = p[n];
+        let mut low = 0.0;
+        while n > 0 {
+            let x = high;
+            n -= 1;
+            let y = p[n];
+            high = x + y;
+            let rounded = high - x;
+            low = y - rounded;
+            if low != 0.0 {
+                break;
+            }
+        }
+        // Round half to even across the remaining partials.
+        if n > 0 && ((low < 0.0 && p[n - 1] < 0.0) || (low > 0.0 && p[n - 1] > 0.0)) {
+            let y = low * 2.0;
+            let x = high + y;
+            if y == x - high {
+                high = x;
+            }
+        }
+        high
+    }
 }
 
 impl Acc {
@@ -240,7 +345,6 @@ impl Acc {
             "count" => Acc::Count { n: 0, seen },
             "sum" | "avg" => Acc::Sum(Box::new(Sum {
                 seen,
-                ints: Some(0),
                 all_int: true,
                 all_duration: true,
                 duration: Some(Ok(Duration::ZERO)),
@@ -281,23 +385,10 @@ impl Acc {
                 if !fresh(&mut sum.seen, &value) {
                     return Ok(());
                 }
-                sum.n += 1;
-                match &value {
-                    Value::Duration(d) => {
-                        if let Some(Ok(total)) = &sum.duration {
-                            sum.duration = Some(total.plus(*d));
-                        }
-                    }
-                    _ => sum.all_duration = false,
+                if sum.seen.is_some() {
+                    sum.distinct.push(value.clone());
                 }
-                match number(&value) {
-                    Some(f) => sum.floats += f,
-                    None => sum.not_number = true,
-                }
-                match value {
-                    Value::Int(i) => sum.ints = sum.ints.and_then(|total| total.checked_add(i)),
-                    _ => sum.all_int = false,
-                }
+                sum.add(value);
             }
             Acc::Extreme { max, best } => {
                 // Like min_by and max_by: the first of equal minimums, the
@@ -318,6 +409,72 @@ impl Acc {
                     values.push(value);
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Folds in the state of the same aggregate over rows that came after
+    /// this one's (the next part of a split query).
+    fn merge(&mut self, call: &Call, other: Acc) -> Result<(), QueryError> {
+        match (self, other) {
+            (Acc::Count { n, seen: None }, Acc::Count { n: more, .. }) => *n += more,
+            (
+                Acc::Count {
+                    n,
+                    seen: Some(seen),
+                },
+                Acc::Count {
+                    seen: Some(more), ..
+                },
+            ) => {
+                for key in more {
+                    if seen.insert(key) {
+                        *n += 1;
+                    }
+                }
+            }
+            (Acc::Sum(sum), Acc::Sum(more)) => {
+                if sum.seen.is_some() {
+                    for value in more.distinct {
+                        let fresh = sum
+                            .seen
+                            .as_mut()
+                            .is_some_and(|seen| seen.insert(value.key()));
+                        if fresh {
+                            sum.distinct.push(value.clone());
+                            sum.add(value);
+                        }
+                    }
+                } else {
+                    sum.n += more.n;
+                    sum.ints += more.ints;
+                    sum.all_int &= more.all_int;
+                    sum.floats.merge(&more.floats);
+                    sum.not_number |= more.not_number;
+                    sum.all_duration &= more.all_duration;
+                    sum.duration = match (sum.duration.take(), more.duration) {
+                        (Some(Ok(a)), Some(Ok(b))) => Some(a.plus(b)),
+                        (Some(Err(error)), _) | (_, Some(Err(error))) => Some(Err(error)),
+                        (a, b) => a.or(b),
+                    };
+                }
+            }
+            (this @ Acc::Extreme { .. }, Acc::Extreme { best, .. }) => {
+                if let Some(best) = best {
+                    this.add(call, best)?;
+                }
+            }
+            (Acc::Values { values, seen }, Acc::Values { values: more, .. }) => match seen {
+                None => values.extend(more),
+                Some(seen) => {
+                    for value in more {
+                        if seen.insert(value.key()) {
+                            values.push(value);
+                        }
+                    }
+                }
+            },
+            _ => return Err(QueryError::runtime("partial aggregates do not match")),
         }
         Ok(())
     }
@@ -346,17 +503,262 @@ impl Acc {
                     if sum.n == 0 {
                         Value::Null
                     } else {
-                        Value::Float(sum.floats / sum.n as f64)
+                        Value::Float(sum.floats.value() / sum.n as f64)
                     }
                 } else if sum.all_int {
                     Value::Int(
-                        sum.ints
-                            .ok_or_else(|| QueryError::runtime("integer overflow"))?,
+                        i64::try_from(sum.ints)
+                            .map_err(|_| QueryError::runtime("integer overflow"))?,
                     )
                 } else {
-                    Value::Float(sum.floats)
+                    Value::Float(sum.floats.value())
                 }
             }
         })
+    }
+
+    fn to_wire(&self) -> Json {
+        let keys = |seen: &Option<HashSet<String>>| {
+            seen.as_ref()
+                .map(|seen| json!(seen.iter().collect::<Vec<_>>()))
+                .unwrap_or(Json::Null)
+        };
+        let wires = |values: &[Value]| Json::Array(values.iter().map(Value::to_wire).collect());
+        match self {
+            Acc::Count { n, seen } => json!({"count": n, "seen": keys(seen)}),
+            Acc::Extreme { best, .. } => {
+                json!({"best": best.as_ref().map(Value::to_wire)})
+            }
+            Acc::Values { values, seen } => json!({"values": wires(values), "seen": keys(seen)}),
+            Acc::Sum(sum) => json!({"sum": {
+                "n": sum.n,
+                "seen": keys(&sum.seen),
+                "distinct": wires(&sum.distinct),
+                "ints": sum.ints.to_string(),
+                "all_int": sum.all_int,
+                "partials": sum.floats.partials.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+                "nan": sum.floats.nan,
+                "pinf": sum.floats.positive_infinity,
+                "ninf": sum.floats.negative_infinity,
+                "not_number": sum.not_number,
+                "all_duration": sum.all_duration,
+                "duration": match &sum.duration {
+                    Some(Ok(d)) => json!([d.months, d.days, d.micros]),
+                    Some(Err(error)) => json!({"error": error.message}),
+                    None => Json::Null,
+                },
+            }}),
+        }
+    }
+
+    fn from_wire(call: &Call, json: &Json) -> Result<Acc, QueryError> {
+        let bad = || QueryError::runtime("a partial aggregate is malformed");
+        let keys = |json: &Json| -> Option<HashSet<String>> {
+            json.as_array().map(|keys| {
+                keys.iter()
+                    .filter_map(|k| k.as_str().map(str::to_owned))
+                    .collect()
+            })
+        };
+        let values = |json: &Json| -> Result<Vec<Value>, QueryError> {
+            json.as_array()
+                .ok_or_else(bad)?
+                .iter()
+                .map(Value::from_wire)
+                .collect()
+        };
+        let mut acc = Acc::new(call);
+        match &mut acc {
+            Acc::Count { n, seen } => {
+                *n = json["count"].as_i64().ok_or_else(bad)?;
+                if seen.is_some() {
+                    *seen = keys(&json["seen"]);
+                }
+            }
+            Acc::Extreme { best, .. } => {
+                *best = match &json["best"] {
+                    Json::Null => None,
+                    wire => Some(Value::from_wire(wire)?),
+                };
+            }
+            Acc::Values { values: list, seen } => {
+                *list = values(&json["values"])?;
+                if seen.is_some() {
+                    *seen = keys(&json["seen"]);
+                }
+            }
+            Acc::Sum(sum) => {
+                let w = &json["sum"];
+                sum.n = w["n"].as_u64().ok_or_else(bad)? as usize;
+                if sum.seen.is_some() {
+                    sum.seen = keys(&w["seen"]);
+                }
+                sum.distinct = values(&w["distinct"])?;
+                sum.ints = w["ints"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .ok_or_else(bad)?;
+                sum.all_int = w["all_int"].as_bool().ok_or_else(bad)?;
+                sum.floats = ExactSum {
+                    partials: w["partials"]
+                        .as_array()
+                        .ok_or_else(bad)?
+                        .iter()
+                        .map(|f| f.as_u64().map(f64::from_bits).ok_or_else(bad))
+                        .collect::<Result<_, _>>()?,
+                    nan: w["nan"].as_bool().unwrap_or(false),
+                    positive_infinity: w["pinf"].as_bool().unwrap_or(false),
+                    negative_infinity: w["ninf"].as_bool().unwrap_or(false),
+                };
+                sum.not_number = w["not_number"].as_bool().unwrap_or(false);
+                sum.all_duration = w["all_duration"].as_bool().unwrap_or(false);
+                sum.duration = match &w["duration"] {
+                    Json::Array(d) if d.len() == 3 => Some(Ok(Duration {
+                        months: d[0].as_i64().ok_or_else(bad)?,
+                        days: d[1].as_i64().ok_or_else(bad)?,
+                        micros: d[2].as_i64().ok_or_else(bad)?,
+                    })),
+                    Json::Object(error) => Some(Err(QueryError::runtime(
+                        error
+                            .get("error")
+                            .and_then(Json::as_str)
+                            .unwrap_or("duration overflow"),
+                    ))),
+                    _ => None,
+                };
+            }
+        }
+        Ok(acc)
+    }
+}
+
+impl Sum {
+    fn add(&mut self, value: Value) {
+        self.n += 1;
+        match &value {
+            Value::Duration(d) => {
+                if let Some(Ok(total)) = &self.duration {
+                    self.duration = Some(total.plus(*d));
+                }
+            }
+            _ => self.all_duration = false,
+        }
+        match number(&value) {
+            Some(f) => self.floats.add(f),
+            None => self.not_number = true,
+        }
+        match value {
+            Value::Int(i) => self.ints += i as i128,
+            _ => self.all_int = false,
+        }
+    }
+}
+
+impl Groups {
+    /// Folds in the groups of the rows that came after these (the next
+    /// part of a split query): groups already here merge their
+    /// accumulators, new ones are added after, so groups keep the order
+    /// in which they first appeared over all the rows.
+    pub(crate) fn merge(&mut self, spec: &Spec, other: Groups) -> Result<(), QueryError> {
+        self.rows += other.rows;
+        let Groups { groups, index, .. } = other;
+        let mut keyed: Vec<(String, usize)> = index.into_iter().collect();
+        keyed.sort_by_key(|(_, at)| *at);
+        let mut groups: Vec<Option<Group>> = groups.into_iter().map(Some).collect();
+        for (key, at) in keyed {
+            let Some(group) = groups[at].take() else {
+                continue;
+            };
+            match self.index.get(&key) {
+                Some(&mine) => {
+                    let target = &mut self.groups[mine];
+                    for ((call, acc), more) in
+                        spec.calls.iter().zip(&mut target.accs).zip(group.accs)
+                    {
+                        acc.merge(call, more)?;
+                    }
+                }
+                None => {
+                    self.index.insert(key, self.groups.len());
+                    self.groups.push(group);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The groups as exact JSON, for the member that merges a split query.
+    pub(crate) fn to_wire(&self) -> Json {
+        let mut keyed: Vec<(&String, usize)> = self.index.iter().map(|(k, at)| (k, *at)).collect();
+        keyed.sort_by_key(|(_, at)| *at);
+        let groups: Vec<Json> = keyed
+            .into_iter()
+            .map(|(key, at)| {
+                let group = &self.groups[at];
+                json!({
+                    "key": key,
+                    "first": crate::eval::row_to_wire(&group.first),
+                    "accs": group.accs.iter().map(Acc::to_wire).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        json!({"rows": self.rows, "groups": groups})
+    }
+
+    /// Groups from [`Groups::to_wire`].
+    pub(crate) fn from_wire(spec: &Spec, json: &Json) -> Result<Groups, QueryError> {
+        let bad = || QueryError::runtime("partial groups are malformed");
+        let mut out = Groups {
+            rows: json["rows"].as_u64().ok_or_else(bad)?,
+            ..Groups::default()
+        };
+        for group in json["groups"].as_array().ok_or_else(bad)? {
+            let key = group["key"].as_str().ok_or_else(bad)?.to_owned();
+            let first = crate::eval::row_from_wire(&group["first"])?;
+            let wires = group["accs"].as_array().ok_or_else(bad)?;
+            if wires.len() != spec.calls.len() {
+                return Err(bad());
+            }
+            let accs = spec
+                .calls
+                .iter()
+                .zip(wires)
+                .map(|(call, wire)| Acc::from_wire(call, wire))
+                .collect::<Result<_, _>>()?;
+            out.index.insert(key, out.groups.len());
+            out.groups.push(Group { first, accs });
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExactSum;
+
+    fn exact(values: &[f64]) -> f64 {
+        let mut sum = ExactSum::default();
+        values.iter().for_each(|v| sum.add(*v));
+        sum.value()
+    }
+
+    #[test]
+    fn exact_sums_do_not_depend_on_order() {
+        assert_eq!(exact(&[0.1, 0.2, 0.3]), 0.6);
+        assert_eq!(exact(&[1e100, 1.0, -1e100]), 1.0);
+        assert_eq!(exact(&[]), 0.0);
+        assert!(exact(&[f64::INFINITY, f64::NEG_INFINITY]).is_nan());
+        let values: Vec<f64> = (0..1000).map(|i| (i as f64 * 0.37).sin() * 1e3).collect();
+        let mut reversed = values.clone();
+        reversed.reverse();
+        assert_eq!(exact(&values), exact(&reversed));
+        // Split in three and merged.
+        let mut total = ExactSum::default();
+        for chunk in values.chunks(333) {
+            let mut part = ExactSum::default();
+            chunk.iter().for_each(|v| part.add(*v));
+            total.merge(&part);
+        }
+        assert_eq!(total.value(), exact(&values));
     }
 }

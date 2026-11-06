@@ -1,11 +1,17 @@
 use grafeno::Grafeno;
+mod common;
+
 use grafeno_query::{Params, QueryResult, Value, execute, params_from_json};
 use serde_json::{Value as Json, json};
 
 const NS: &str = "q";
 
 fn run(db: &Grafeno, query: &str) -> QueryResult {
-    execute(db, NS, query, &Params::new()).unwrap_or_else(|e| panic!("{query}\n→ {e}"))
+    let result =
+        execute(db, NS, query, &Params::new()).unwrap_or_else(|e| panic!("{query}\n→ {e}"));
+    // Split across members, a read gives the same rows (13.4).
+    common::check_split(db, NS, query, &Params::new());
+    result
 }
 
 fn fail(db: &Grafeno, query: &str) -> String {
