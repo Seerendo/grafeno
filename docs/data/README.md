@@ -47,6 +47,7 @@ build unless the file says otherwise; on E1, runs vary by about ±20%.
 | `vector_search_int8.csv` | 1 000 searches on 1 M vectors in 512 MiB and 2 GiB, 12.4 against 12.5's int8 copies, four runs each | `ram_bench.rs search` | E2 | 2026-11-06 | paired bars per container, best and worst run |
 | `replication_log.csv` | Writes with the replication log off and on, its size and a replica's apply speed (13.1) | `crates/grafeno/examples/replication_bench.rs` | E1-mem | 2026-11-06 | bars, or a table |
 | `cluster.csv` | Sequential writes on one server and through a three-member Raft cluster, and failover times (13.2) | `crates/grafeno-cluster/examples/cluster_bench.rs` | E1-disk | 2026-11-06 | a table |
+| `faults.csv` | Fault-injection runs: operations checked for linearizability, time for writes to resume after the leader fails, availability (13.3) | `crates/grafeno-cluster/tests/linearizable.rs`, `crates/grafeno-server/tests/faults.rs` | E1-disk | 2026-11-06 | a table |
 | `compact_storage.csv` | Table sizes, edge reads and vector search before and after 12.5 (layout 13), 100 000 nodes, 300 000 edges, 50 000 vectors | `crates/grafeno/examples/storage_bench.rs` | E1-disk | 2026-11-05 | paired bars per table |
 
 `python docs/charts/build.py` draws the charts of

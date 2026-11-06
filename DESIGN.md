@@ -392,7 +392,7 @@ without a current user. They remain possible for embedded use.
     Cypher and tool compatibility, query optimization under concurrency,
     batched execution, batched and parallel traversal, compact storage and
     vector quantization.
-13. **Distributed operation** (in progress, 13.1 and 13.2 done; six steps; see below): several
+13. **Distributed operation** (in progress, 13.1 to 13.3 done; six steps; see below): several
     servers holding the same data, kept in sync by a replicated log with
     Raft; a leader elected among them coordinates writes, the others take
     over when it fails, and reads and large queries spread over all of
@@ -1929,7 +1929,7 @@ As built (`crates/grafeno-raft`, `crates/grafeno-cluster`,
   fsync on each member, all on one disk. A leader cut off is replaced and a
   write committed in 510 to 831 ms (median 595) with 50 ms ticks.
 
-**13.3 Continuing when an instance fails.**
+**13.3 Continuing when an instance fails** (done).
 
 - Failover: when the leader stops answering, a new one is elected within a
   bounded time and writes resume; the old leader, if it comes back, steps
@@ -1954,6 +1954,94 @@ As built (`crates/grafeno-raft`, `crates/grafeno-cluster`,
   `iptables`/`tc`) under a workload of reads and writes, checked by a
   linearizability checker (registers and counters, as Jepsen does), finds
   no anomaly; failover time and lost availability measured.
+
+As built (`crates/grafeno-raft`, `crates/grafeno-cluster`,
+`crates/grafeno-server/src/cluster.rs`, the shell and the TypeScript
+client):
+
+- Linearizable reads by ReadIndex (`Raft::read_index`): the leader notes
+  its commit index, confirms it is still the leader with a round of
+  heartbeats that a majority answers (a read round carried by appends and
+  echoed in the replies), and hands the index back in `Ready::reads`; a
+  leader that has not yet committed an entry of its term answers "try
+  again", and one that steps down fails its pending reads. No leases: they
+  depend on clocks, and a round costs one heartbeat. `Node::read_barrier`
+  waits until the member has applied the index. The simulation checks every
+  read against the writes acknowledged before it was asked (34 291 reads in
+  1 000 schedules while it was written).
+- Routing on every member (`cluster::route`, a layer on `/v1`): a follower
+  forwards to the leader what only it can serve, with the original path,
+  the body and an allowlist of headers (authorization, content type,
+  idempotency key, `Last-Event-ID`, `x-grafeno-*`), marked so it is never
+  forwarded twice. Peers name the leader's API address (`api` in `peers`).
+  A write refused on a follower (421 `not_leader`) is forwarded; during an
+  election the follower waits up to 3 s for a leader first. Connections
+  between members time out after 500 ms, so a dead leader is noticed
+  quickly (Windows takes 2 s to refuse a connection on its own).
+- Consistency, per request (`x-grafeno-consistency`): `local` (the
+  default: what the member has applied), `bounded` (to the leader when the
+  member is more than 1 000 entries behind or knows no leader), and
+  `linearizable` (a read barrier on the leader; a follower forwards it).
+  Read-your-writes: every response carries the member's applied position
+  (`x-grafeno-position`); a request with `x-grafeno-after: N` waits up to
+  5 s for the member to apply N (503 otherwise). Positions are Raft
+  indexes, the same on every member.
+- Exactly once: a GQ write with an idempotency key (`idempotency_key` in
+  the body or an `Idempotency-Key` header) stores its result in the same
+  replicated transaction, and the same key again returns that result
+  without running it, on any member and after a failover.
+- Clients: the TypeScript client takes several URLs (`url: [...]`) and the
+  shell several in `--url` (comma-separated); both use one member, move to
+  the next when it does not answer, and send the last position they saw,
+  so they read their own writes wherever they land. The TypeScript client
+  also takes a consistency (per client or per statement) and idempotency
+  keys, and shows `url`, `position` and `cluster()`.
+- Work that runs once: webhook delivery and background tasks (extraction,
+  community summaries) run on the leader alone; their cursors live in the
+  replicated state, so a new leader resumes where the old one stopped. The
+  change log is replicated as the leader wrote it (13.1), so sequence
+  numbers are the same on every member and a server-sent event stream
+  resumes on another member with `Last-Event-ID`.
+- The checker (`grafeno_cluster::check`): linearizability of a register,
+  by Wing and Gong's search with Lowe's memo of visited (linearized set,
+  value) pairs. Writes whose outcome is unknown (a timeout, a lost
+  connection) may take effect at any time after they were sent, or never;
+  reads with no answer are left out.
+- Fault injection: `grafeno-cluster/tests/linearizable.rs` runs five
+  members in one process while clients write distinct values to one
+  register and read it linearizably, and a nemesis cuts members off (one,
+  the leader, or two at once), restarts them (the leader too) and compacts
+  their logs, one fault every 0.5 to 1.3 s; `grafeno-server/tests/faults.rs`
+  runs three `grafeno serve` processes, with clients that know every member,
+  killing a process (half the time the leader's) every 1.5 to 3.5 s and
+  starting it again. Both check the history and print the failover time
+  and availability; `FAULT_SEED` replays a run. The control
+  (`FAULT_UNSAFE_READS=1`, reads of a member's own state without ReadIndex)
+  is rejected by the checker in every run, so the test can see the anomaly
+  it looks for.
+- Measured (E1-disk, 20 ms ticks, so election timeouts of 200 to 400 ms):
+  in one process, three runs of 30 s with 130 faults: 23 645 operations,
+  all linearizable; after a fault that hit the leader, the first write sent
+  after it succeeded within 370 to 384 ms (median of each run), 1 015 ms at
+  most; writes succeeded in 68 to 75% of 100 ms windows under that rate of
+  faults. With real processes, two runs of 40 s with 32 processes killed
+  (19 of them leaders): 8 114 operations, all linearizable; writes resumed
+  529 to 531 ms (median) after the leader was killed, 697 ms at most, and
+  succeeded in 73 to 78% of windows. Before the connection timeout the
+  median was 1 545 ms (Windows's 2 s refusal); with a 1 s timeout, 1 023 ms.
+- Not built in this step: partitions and pauses of real processes
+  (`iptables`, `tc`, docker compose; partitions are exercised in one
+  process, kills on real processes), a counter workload (registers only),
+  read leases, and the Desktop app and MCP with several addresses (MCP
+  opens a database file and has no remote mode yet).
+- Tests: `grafeno-raft/tests/simulation.rs` (reads added),
+  `grafeno-cluster/tests/linearizable.rs`, `grafeno-cluster/src/check.rs`
+  (the checker on hand-made histories), `grafeno-server/tests/cluster.rs`
+  (a write forwarded by a follower with its position, a read on a third
+  member waiting for it, a linearizable read on a follower, a keyed write
+  sent three times, failover), `grafeno-server/tests/faults.rs`, and
+  `clients/typescript/test/cluster.test.ts` (the client across three
+  processes, the member it uses killed).
 
 **13.4 Queries in parallel across instances.**
 
@@ -2400,11 +2488,12 @@ spinning disk, on ARM, or for days at a time.
 | Vector search, 1 M vectors in 512 MiB, int8 copies (12.5) | 3.5 to 4.2 ms (4.9 to 5.2 ms before), same resident memory | E2 | `vector_search_int8.csv` |
 | Replication log (13.1) | writes at 80% of the speed with the log on; 568 bytes per record; a replica applies 22 300 records/s | E1-mem | `replication_log.csv` |
 | Raft cluster of three (13.2) | 137 sequential writes/s (618 on one server), p50 7.2 ms; a leader replaced in 0.5 to 0.8 s | E1-disk | `cluster.csv` |
+| Faults injected under reads and writes (13.3) | 31 759 operations, all linearizable; writes resume 0.4 s (one process) and 0.5 s (real processes) after the leader fails | E1-disk | `faults.csv` |
 
 ### Guarantees and the tests that hold them
 
-`cargo test --workspace` runs about 210 Rust tests (unit and
-integration); the TypeScript client has 7 end-to-end tests against the
+`cargo test --workspace` runs about 300 Rust tests (unit and
+integration); the TypeScript client has 8 end-to-end tests against the
 real binary. The ones that carry each guarantee:
 
 | Guarantee | Tests | How |
@@ -2433,6 +2522,7 @@ real binary. The ones that carry each guarantee:
 | int8 searches keep their quality and compact entries read back exactly | `grafeno/tests/quantized.rs`, `src/store.rs` and `src/vector.rs` tests | recall@10 of 0.95 or more with exact scores; the copies through removal, replacement, compaction, backup and namespace drop; adjacency values round trip at every bound; quantized dot products within 0.02 |
 | A replica that applies the log holds the same data | `grafeno/tests/replication.rs`, `model.rs`, `grafeno-query/tests/replication.rs` | every kind of write replayed onto an empty database and compared (exports, counters, change log, constraints and their events, merges, state, principals); idempotence, gaps, catching up from a backup after truncation, group commits with failures; the model's random sequences replayed |
 | Raft never loses an acknowledged write and members agree | `grafeno-raft/tests/simulation.rs`, `grafeno-cluster/tests/cluster.rs`, `grafeno-server/tests/cluster.rs` | random schedules of drops, delays, duplicates, partitions, crashes, membership changes and snapshots checked for one leader per term, one entry per index, no lost acknowledged write and convergence; members in one process and three real processes through failover, restart, joining and leaving |
+| Reads and writes stay linearizable through failures | `grafeno-cluster/tests/linearizable.rs`, `grafeno-server/tests/faults.rs`, `grafeno-cluster/src/check.rs`, `clients/typescript/test/cluster.test.ts` | a register written and read by concurrent clients while members are cut off, restarted, compacted and killed, every history checked by a linearizability checker (which rejects the unsafe control); forwarding, read-your-writes and keyed writes across real processes |
 | Costly queries stop | `grafeno-query/tests/adversarial.rs` | 32 hostile queries within their limits; nesting just under the limit runs on a 2 MiB stack; `max_cost` refuses; procedure rows count against `max_memory` |
 | Nothing a client sends crashes the parser | `grafeno-query/tests/fuzz.rs` | proptest: random tokens, valid queries with random edits, arbitrary text, through the lexer, parser, planner, `EXPLAIN` and executor |
 | The API keeps its contract | `grafeno-server/tests/http.rs`, `mcp.rs`, `shell.rs`, `clients/typescript/test` | every endpoint and MCP tool, limits, conflicts (409 with details), metrics, the CLI shell, and the client against the real binary |
@@ -2460,6 +2550,8 @@ cargo run --release -p grafeno --example storage_bench -- 100000 50000
 cargo run --release -p grafeno --example replication_bench -- 100000
 cargo test --release -p grafeno-raft --test simulation   # RAFT_SEEDS=3000 for more
 cargo run --release -p grafeno-cluster --example cluster_bench -- 500
+FAULT_SECONDS=30 cargo test --release -p grafeno-cluster --test linearizable -- --nocapture
+FAULT_SECONDS=40 cargo test --release -p grafeno-server --test faults -- --nocapture
 cargo run --release -p grafeno --example changes_bench -- 100000
 cargo run --release -p grafeno-server --example events_bench -- 100000
 cargo test --release -p grafeno-query --test adversarial -- --nocapture
@@ -2512,9 +2604,11 @@ docker run --rm --memory 512m --memory-swap 512m -e CACHE_MB=128 -e PROJECTION_C
 - On Windows, building needs the MSVC toolchain (Visual Studio Build Tools):
   tokio's `windows-sys` does not build with the self-contained GNU toolchain.
 - Phase 13: TLS between members (13.2 authenticates with a shared secret
-  only); the default read consistency (linearizable or bounded); and how
+  only); and how
   floating-point aggregates merge across members so that results equal one
-  server's. (Decided in 13.2: a Raft of our own; HTTP between members.)
+  server's. (Decided in 13.2: a Raft of our own; HTTP between members. In 13.3: reads
+  are `local` unless a request asks for more, and linearizable reads use
+  ReadIndex, not leases.)
 - Phase 14: whether denials exist (they make exceptions to broad grants
   easy, as in Neo4j, but PostgreSQL does without them); whether hidden
   properties are absent or masked; session tokens signed (stateless,

@@ -681,6 +681,31 @@ entry is the lever (not built yet). With the leader cut off, another
 member is elected and commits a write in 510 to 831 ms (median 595, five
 runs) with 50 ms ticks (election timeouts of 0.5 to 1 s).
 
+## Faults under load (`linearizable.rs`, `faults.rs`)
+
+Clients write distinct values to one register and read it with
+linearizable reads while a nemesis injects faults; every history is
+checked by `grafeno_cluster::check`. 20 ms ticks (election timeouts of
+200 to 400 ms), 2026-11-06. "Resume" is the time from a fault that hit the
+leader to the first write sent after it that succeeded; "available" is the
+share of 100 ms windows in which a write succeeded.
+
+| Setup | Operations | Faults (on the leader) | Resume, median / max | Available | Linearizable |
+| --- | --- | --- | --- | --- | --- |
+| five members in one process, 30 s (three runs) | 23 645 | 130 (60) | 370-384 / 1 015 ms | 68-75% | all |
+| three processes killed and restarted, 40 s (two runs) | 8 114 | 32 (19) | 529-531 / 697 ms | 73-78% | all |
+
+In one process the faults are cutting off one member, the leader or two
+members, restarting a member or the leader, and compacting a log, one
+every 0.5 to 1.3 s; with processes, a kill every 1.5 to 3.5 s, half of
+them the leader's. Availability is low because the rate of faults is
+high: a fault aimed at the leader costs about half a second of writes.
+With real processes, the time to resume was 1 545 ms before connections
+between members got a timeout (Windows takes 2 s to refuse a connection
+to a port nobody listens on), 1 023 ms with a 1 s timeout, and 530 ms with
+the 500 ms one kept. The control run, with reads served from a member's
+own state without ReadIndex, fails the check every time.
+
 ## Remaining limits
 
 - **Vector search reads each visited vector from redb** (about 0.4 µs per

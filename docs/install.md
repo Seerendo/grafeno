@@ -168,7 +168,7 @@ docker run -d -p 7810:7810 -v grafeno-data:/data -e GRAFENO_TOKEN=change-me graf
 ## A cluster of servers
 
 Three (or five) servers can hold the same data and keep serving when one
-fails (phase 13.2). Each gets the same `[cluster]` section in its
+fails (phases 13.2 and 13.3). Each gets the same `[cluster]` section in its
 `grafeno.toml`, with its own `id` and `addr`:
 
 ```toml
@@ -177,16 +177,26 @@ id = 1                         # 2 and 3 on the others
 addr = "10.0.0.1:7811"         # where this member listens for the others
 secret = "a long random string, the same on every member"
 voters = [1, 2, 3]             # the first members; [] on a member that joins later
-peers = [
-  { id = 1, addr = "10.0.0.1:7811" },
-  { id = 2, addr = "10.0.0.2:7811" },
-  { id = 3, addr = "10.0.0.3:7811" },
+peers = [                      # addr: the members' port; api: the HTTP API, for forwarding
+  { id = 1, addr = "10.0.0.1:7811", api = "10.0.0.1:7810" },
+  { id = 2, addr = "10.0.0.2:7811", api = "10.0.0.2:7810" },
+  { id = 3, addr = "10.0.0.3:7811", api = "10.0.0.3:7810" },
 ]
 ```
 
-Start all three: they elect a leader within a second or so. Writes go to
-the leader (a follower answers 503 with `write to member N`); reads work on
-every member. `grafeno cluster status --url http://10.0.0.1:7810 --token …`
+Start all three: they elect a leader within a second or so. Send requests
+to any member: a follower forwards writes to the leader (with `api` in
+`peers`; without it, it answers 421 `not_leader` naming the leader), and
+reads are served by the member itself. A read can ask for more with the
+header `x-grafeno-consistency`: `bounded` goes to the leader when the
+member lags far behind, `linearizable` sees every write acknowledged
+before it. Every response carries `x-grafeno-position`; a request with
+`x-grafeno-after: N` waits until its member has applied N (read your
+writes). A GQ write sent with an `Idempotency-Key` header runs once,
+however many times it is retried. The shell (`--url` with several
+addresses, comma-separated) and the TypeScript client (`url: [...]`)
+move to another member when one fails and read their own writes. When
+the leader dies, writes resume in about half a second. `grafeno cluster status --url http://10.0.0.1:7810 --token …`
 shows a member's view; `grafeno cluster voters 1 2 3 4` (on the leader)
 changes the members, the new one listed in every member's `peers` and
 started with `voters = []`; `grafeno cluster compact` snapshots a member's
@@ -195,8 +205,8 @@ database and trims its log. Each member keeps its Raft state in
 
 For now: traffic between members is authenticated by the secret but not
 encrypted (keep them on a private network); imports go into a single server
-before it starts a cluster; background work (extraction, summaries,
-webhooks) is meant for single servers until it runs on the leader alone.
+before it starts a cluster. Webhooks and background work (extraction,
+summaries) run on the leader, and a new leader resumes them.
 
 ## Backups
 

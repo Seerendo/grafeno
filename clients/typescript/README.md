@@ -24,6 +24,18 @@ const ranked = await vault.algorithm("pageRank", { settings: { labels: "Person" 
 await vault.algorithm("louvain", { write: "community" });
 ```
 
+For a cluster, pass several members: the client uses one, moves to the
+next when it does not answer, and reads its own writes on any of them (it
+sends the last `position` it saw). Reads can ask for more consistency, and
+a write with an idempotency key runs once however often it is retried:
+
+```ts
+const cluster = new Grafeno({ url: ["http://10.0.0.1:7810", "http://10.0.0.2:7810", "http://10.0.0.3:7810"], token });
+const ns = cluster.namespace("vault-123");
+await ns.query("CREATE (:Note {title: $t})", { t: "hi" }, { idempotencyKey: crypto.randomUUID() });
+await ns.query("MATCH (n:Note) RETURN count(n)", {}, { consistency: "linearizable" });
+```
+
 Field names follow the API (snake_case); see
 [the server README](../../crates/grafeno-server/README.md) for every endpoint.
 Errors are thrown as `GrafenoError`, with the HTTP `status` and the API's

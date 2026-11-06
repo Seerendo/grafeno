@@ -181,6 +181,13 @@ measured speed, memory and limits, with charts, in
   deterministic simulation of thousands of failure schedules) orders the
   writes, a majority must hold each before it returns, and a new leader
   takes over in under a second when one fails.
+- **Phase 13.3, failover:** any member takes any request (followers
+  forward writes to the leader), reads choose their consistency (local,
+  bounded, linearizable), clients that know several members move on when
+  one dies and read their own writes, and keyed writes run once. Fault
+  injection (members cut off, restarted and killed) checked by a
+  linearizability checker found no anomaly; writes resume about half a
+  second after the leader dies.
 
 Next, the rest of phase 13: distributed operation (servers kept in sync by a
 replicated log with Raft, failover, reads and large queries spread over

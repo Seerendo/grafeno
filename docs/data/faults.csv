@@ -1,0 +1,8 @@
+setup,members,seconds,operations,writes,reads,unknown_writes,faults,leader_faults,resume_median_ms,resume_max_ms,available_pct,linearizable
+one process,5,30,6903,3376,3506,21,46,27,370,908,67.7,yes
+one process,5,30,7781,3837,3931,13,42,15,378,1015,68.9,yes
+one process,5,30,8961,4350,4599,12,42,18,384,813,74.9,yes
+processes (500 ms connect timeout),3,40,3546,1734,1777,35,16,8,529,534,73.0,yes
+processes (500 ms connect timeout),3,40,4568,2290,2234,44,16,11,531,697,78.3,yes
+processes (1 s connect timeout),3,40,3673,1808,1833,32,16,9,1023,1030,70.2,yes
+processes (no connect timeout),3,40,3833,1855,1957,21,16,8,1545,1551,62.5,yes

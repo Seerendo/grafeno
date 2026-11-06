@@ -63,6 +63,9 @@ grafeno shell --db memory.redb -n vault
 grafeno shell --url http://127.0.0.1:7810 --token change-me -n vault
 ```
 
+For a cluster, `--url` takes several members, comma-separated; the shell
+moves to the next when one does not answer, and reads its own writes.
+
 ```text
 vault=> MATCH (p:Person)-[:works_at]->(c)
 vault->   RETURN p.name, c.name LIMIT 3;
@@ -331,8 +334,19 @@ Syncing a note and replacing its links in one request:
 ### Cluster
 
 On a cluster member (`[cluster]` in `grafeno.toml`, see
-[docs/install.md](../../docs/install.md)), writes go through the leader:
-a follower answers `busy` (503) with `write to member N`. Owner routes:
+[docs/install.md](../../docs/install.md)), any member takes any request:
+a follower forwards writes (and linearizable reads) to the leader, waiting
+for an election if there is none; without the leader's `api` address it
+answers `not_leader` (421) naming the leader. Headers:
+
+| Header | Direction | Meaning |
+| --- | --- | --- |
+| `x-grafeno-position` | response | the member's applied position (a Raft index, the same on every member) |
+| `x-grafeno-after: N` | request | wait up to 5 s for the member to apply N (503 otherwise): read your writes |
+| `x-grafeno-consistency` | request | `local` (default), `bounded` (to the leader when the member is over 1 000 entries behind) or `linearizable` (through the leader, with ReadIndex) |
+| `Idempotency-Key` | request | on `POST /v1/{ns}/query` (or `idempotency_key` in its body): a write with the same key runs once, and later sends return its first result |
+
+Webhooks and background work run on the leader only. Owner routes:
 
 | Method | Path | Body | Returns |
 | --- | --- | --- | --- |
