@@ -140,6 +140,8 @@ enum Event {
     Propose(Vec<u8>, Reply<()>),
     Membership(Vec<NodeId>, Reply<Index>),
     Compact(Reply<Index>),
+    /// A linearizable read: the index to wait for.
+    ReadIndex(Reply<Index>),
     Stop,
 }
 
@@ -208,6 +210,8 @@ impl Node {
             snapshot_file: loaded.snapshot_file,
             incoming: HashMap::new(),
             waiters: HashMap::new(),
+            reads: HashMap::new(),
+            next_read: 0,
         };
         driver.publish();
         let handle = std::thread::Builder::new()
@@ -293,6 +297,35 @@ impl Node {
         }
     }
 
+    /// The index a linearizable read must wait for (leader only): every
+    /// write acknowledged before this call is at or below it.
+    pub fn read_index(&self) -> Result<Index, Error> {
+        let deadline = Instant::now() + self.inner.options.write_timeout;
+        loop {
+            let (reply, answer) = mpsc::sync_channel(1);
+            self.send(Event::ReadIndex(reply))?;
+            let left = deadline.saturating_duration_since(Instant::now());
+            match answer.recv_timeout(left) {
+                Ok(Ok(index)) => return Ok(index),
+                // A new leader has not committed in its term yet.
+                Ok(Err(Error::Lost)) if Instant::now() < deadline => {
+                    std::thread::sleep(self.inner.options.tick);
+                }
+                Ok(Err(error)) => return Err(error),
+                Err(_) => return Err(Error::Timeout),
+            }
+        }
+    }
+
+    /// Waits until this member can serve a linearizable read: the leader
+    /// confirms its index, and this member has applied it.
+    pub fn read_barrier(&self) -> Result<Index, Error> {
+        let index = self.read_index()?;
+        self.wait_for(self.inner.options.write_timeout, |s| s.applied >= index)
+            .map(|_| index)
+            .ok_or(Error::Timeout)
+    }
+
     /// Changes the voting members (leader only): the old and new sets
     /// decide together, then the new set alone.
     pub fn change_membership(&self, voters: &[NodeId]) -> Result<Index, Error> {
@@ -340,6 +373,9 @@ struct Driver {
     incoming: HashMap<Index, Arc<Vec<u8>>>,
     /// Writes proposed here, by index: the term they were proposed in.
     waiters: HashMap<Index, (Term, Reply<()>)>,
+    /// Linearizable reads waiting for the leader's confirmation.
+    reads: HashMap<u64, Reply<Index>>,
+    next_read: u64,
 }
 
 impl Driver {
@@ -378,6 +414,21 @@ impl Driver {
                             });
                     let _ = reply.send(outcome);
                 }
+                Ok(Event::ReadIndex(reply)) => {
+                    self.next_read += 1;
+                    let context = self.next_read;
+                    match self.raft.read_index(context) {
+                        Ok(()) => {
+                            self.reads.insert(context, reply);
+                        }
+                        Err(grafeno_raft::Error::NotLeader(leader)) => {
+                            let _ = reply.send(Err(Error::NotLeader(leader)));
+                        }
+                        Err(_) => {
+                            let _ = reply.send(Err(Error::Lost));
+                        }
+                    }
+                }
                 Ok(Event::Compact(reply)) => {
                     let outcome = self.compact();
                     let _ = reply.send(outcome);
@@ -402,6 +453,9 @@ impl Driver {
             self.publish();
         }
         for (_, (_, reply)) in self.waiters.drain() {
+            let _ = reply.send(Err(Error::Stopped));
+        }
+        for (_, reply) in self.reads.drain() {
             let _ = reply.send(Err(Error::Stopped));
         }
         lock(&self.inner.status).role = "stopped".into();
@@ -446,6 +500,11 @@ impl Driver {
         )?;
         if let Some((_, path)) = installed {
             self.replace_snapshot_file(path);
+        }
+        for (context, index) in ready.reads {
+            if let Some(reply) = self.reads.remove(&context) {
+                let _ = reply.send(index.ok_or(Error::NotLeader(self.raft.leader())));
+            }
         }
         for envelope in ready.messages {
             let snapshot = match envelope.message {

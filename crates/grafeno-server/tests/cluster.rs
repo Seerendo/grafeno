@@ -1,7 +1,9 @@
-//! Phase 13.2 end to end: three `grafeno serve` processes with `[cluster]`
-//! settings on this machine. Writes go through the leader's API and reach
-//! the others; a follower names the leader; when the leader's process is
-//! killed, the others elect a new one and writes go on.
+//! Phases 13.2 and 13.3 end to end: three `grafeno serve` processes with
+//! `[cluster]` settings on this machine. Writes reach every member;
+//! followers forward writes and linearizable reads to the leader; a read
+//! waits for a write's position; a keyed write runs once; when the leader's
+//! process is killed, the others elect a new one and writes go on through
+//! any member.
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -47,22 +49,48 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
-fn call(port: u16, method: &str, path: &str, body: Option<Value>) -> Option<(u16, Value)> {
+/// A request with extra headers; returns the status, the body and the
+/// member's position header.
+fn call_with(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    headers: &[(&str, String)],
+) -> Option<(u16, Value, Option<u64>)> {
     let url = format!("http://127.0.0.1:{port}{path}");
     let auth = format!("Bearer {TOKEN}");
     let agent = agent();
     let response = if method == "GET" {
-        agent.get(&url).header("Authorization", &auth).call()
+        let mut request = agent.get(&url).header("Authorization", &auth);
+        for (name, value) in headers {
+            request = request.header(*name, value);
+        }
+        request.call()
     } else {
-        agent
-            .post(&url)
-            .header("Authorization", &auth)
-            .send_json(body.unwrap_or(json!({})))
+        let mut request = agent.post(&url).header("Authorization", &auth);
+        for (name, value) in headers {
+            request = request.header(*name, value);
+        }
+        request.send_json(body.unwrap_or(json!({})))
     };
     let mut response = response.ok()?;
     let status = response.status().as_u16();
+    let position = response
+        .headers()
+        .get("x-grafeno-position")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok());
     let text = response.body_mut().read_to_string().ok()?;
-    Some((status, serde_json::from_str(&text).unwrap_or(Value::Null)))
+    Some((
+        status,
+        serde_json::from_str(&text).unwrap_or(Value::Null),
+        position,
+    ))
+}
+
+fn call(port: u16, method: &str, path: &str, body: Option<Value>) -> Option<(u16, Value)> {
+    call_with(port, method, path, body, &[]).map(|(status, body, _)| (status, body))
 }
 
 fn status(member: &Member) -> Option<Value> {
@@ -79,11 +107,11 @@ fn leader(members: &[Member]) -> usize {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    let logs: Vec<String> = members
+    let views: Vec<String> = members
         .iter()
         .map(|m| format!("member {} ({}): {:?}", m.id, m.api, status(m)))
         .collect();
-    panic!("no leader: {logs:#?}");
+    panic!("no leader: {views:#?}");
 }
 
 fn query(port: u16, text: &str) -> (u16, Value) {
@@ -96,12 +124,15 @@ fn count(port: u16) -> i64 {
         .unwrap_or(-1)
 }
 
-fn start(dir: &Path, id: u64, api: u16, cluster: &[(u64, u16)]) -> Child {
+/// `(id, members' port, API port)` of each member.
+fn start(dir: &Path, id: u64, cluster: &[(u64, u16, u16)]) -> Child {
     let peers: Vec<String> = cluster
         .iter()
-        .map(|(id, port)| format!("{{ id = {id}, addr = \"127.0.0.1:{port}\" }}"))
+        .map(|(id, port, api)| {
+            format!("{{ id = {id}, addr = \"127.0.0.1:{port}\", api = \"127.0.0.1:{api}\" }}")
+        })
         .collect();
-    let own = cluster.iter().find(|(peer, _)| *peer == id).unwrap().1;
+    let (_, own, api) = *cluster.iter().find(|(peer, _, _)| *peer == id).unwrap();
     let config = format!(
         "db = \"{}\"\naddr = \"127.0.0.1:{api}\"\ntoken = \"{TOKEN}\"\nstudio = false\n\n\
          [cluster]\nid = {id}\naddr = \"127.0.0.1:{own}\"\nsecret = \"s3cret\"\nvoters = [1, 2, 3]\n\
@@ -123,19 +154,19 @@ fn start(dir: &Path, id: u64, api: u16, cluster: &[(u64, u16)]) -> Child {
 }
 
 #[test]
-fn three_processes_replicate_and_fail_over() {
+fn three_processes_replicate_route_and_fail_over() {
     let dir: PathBuf = std::env::temp_dir().join(format!("grafeno-cluster-e2e-{}", NodeId::new()));
     std::fs::create_dir_all(&dir).unwrap();
     let ports = free_ports(6);
-    let cluster: Vec<(u64, u16)> = (1..=3).map(|id| (id, ports[id as usize - 1])).collect();
-    let mut members: Vec<Member> = (1..=3)
-        .map(|id| {
-            let api = ports[id as usize + 2];
-            Member {
-                id,
-                api,
-                child: Some(start(&dir, id, api, &cluster)),
-            }
+    let cluster: Vec<(u64, u16, u16)> = (1..=3)
+        .map(|id| (id, ports[id as usize - 1], ports[id as usize + 2]))
+        .collect();
+    let mut members: Vec<Member> = cluster
+        .iter()
+        .map(|(id, _, api)| Member {
+            id: *id,
+            api: *api,
+            child: Some(start(&dir, *id, &cluster)),
         })
         .collect();
 
@@ -144,22 +175,62 @@ fn three_processes_replicate_and_fail_over() {
         let (code, body) = query(members[first].api, &format!("CREATE (:Note {{i: {i}}})"));
         assert_eq!(code, 200, "{body}");
     }
-    // A follower refuses writes and names the leader.
+    // A follower forwards a write to the leader; the answer carries the
+    // position to read it at.
     let follower = (first + 1) % 3;
-    let (code, body) = query(members[follower].api, "CREATE (:Note {i: 99})");
-    assert_eq!(code, 503, "{body}");
-    assert!(
-        body.to_string()
-            .contains(&format!("member {}", members[first].id)),
-        "{body}"
-    );
+    let other = (first + 2) % 3;
+    let (code, body, position) = call_with(
+        members[follower].api,
+        "POST",
+        "/v1/c/query",
+        Some(json!({ "query": "CREATE (:Note {i: 99})" })),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(code, 200, "{body}");
+    let position = position.expect("a position");
+    // Read your writes on the third member: it waits for that position.
+    let (code, body, _) = call_with(
+        members[other].api,
+        "POST",
+        "/v1/c/query",
+        Some(json!({ "query": "MATCH (n:Note) RETURN count(n)" })),
+        &[("x-grafeno-after", position.to_string())],
+    )
+    .unwrap();
+    assert_eq!(code, 200, "{body}");
+    assert_eq!(body["rows"][0][0], 6);
+    // A linearizable read on a follower goes through the leader.
+    let (code, body, _) = call_with(
+        members[other].api,
+        "POST",
+        "/v1/c/query",
+        Some(json!({ "query": "MATCH (n:Note) RETURN count(n)" })),
+        &[("x-grafeno-consistency", "linearizable".into())],
+    )
+    .unwrap();
+    assert_eq!(code, 200, "{body}");
+    assert_eq!(body["rows"][0][0], 6);
+    // A keyed write runs once, however many times it is sent.
+    for _ in 0..3 {
+        let (code, body) = call(
+            members[follower].api,
+            "POST",
+            "/v1/c/query",
+            Some(
+                json!({ "query": "CREATE (:Note {i: 100}) RETURN 1", "idempotency_key": "k-100" }),
+            ),
+        )
+        .unwrap();
+        assert_eq!(code, 200, "{body}");
+    }
     // Every member reads the same notes (followers apply shortly after).
     let deadline = Instant::now() + Duration::from_secs(10);
-    while members.iter().any(|m| count(m.api) != 5) && Instant::now() < deadline {
+    while members.iter().any(|m| count(m.api) != 7) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
     }
     for member in &members {
-        assert_eq!(count(member.api), 5, "member {}", member.id);
+        assert_eq!(count(member.api), 7, "member {}", member.id);
     }
 
     // The leader's process dies: the others go on.
@@ -173,15 +244,18 @@ fn three_processes_replicate_and_fail_over() {
     assert_ne!(members[second].id, killed);
     let (code, body) = query(members[second].api, "CREATE (:Note {i: 5})");
     assert_eq!(code, 200, "{body}");
+    // Writes keep working on any surviving member.
     let survivor = members
         .iter()
         .find(|m| m.child.is_some() && m.id != members[second].id)
         .unwrap();
+    let (code, body) = query(survivor.api, "CREATE (:Note {i: 6})");
+    assert_eq!(code, 200, "{body}");
     let deadline = Instant::now() + Duration::from_secs(10);
-    while count(survivor.api) != 6 && Instant::now() < deadline {
+    while count(survivor.api) != 9 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert_eq!(count(survivor.api), 6);
+    assert_eq!(count(survivor.api), 9);
     assert_eq!(
         status(&members[second]).unwrap()["voters"],
         json!([1, 2, 3])

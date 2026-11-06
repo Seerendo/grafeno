@@ -124,7 +124,12 @@ pub fn run(
     if let Some(cluster) = &settings.cluster {
         let node = crate::cluster::start(db, settings.db.as_deref(), cluster)?;
         runtime.block_on(crate::cluster::listen(node.clone(), cluster))?;
-        state = state.with_cluster(node);
+        let apis = cluster
+            .peers
+            .iter()
+            .filter_map(|peer| peer.api.clone().map(|api| (peer.id, api)))
+            .collect();
+        state = state.with_cluster(node, apis);
     }
     runtime.block_on(http::serve_until(
         state,

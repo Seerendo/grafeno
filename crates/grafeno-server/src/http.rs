@@ -61,6 +61,8 @@ pub struct AppState {
 pub struct Writes {
     local: Arc<grafeno::Writer>,
     cluster: Option<Arc<grafeno_cluster::Node>>,
+    /// The members' API addresses, for forwarding to the leader.
+    apis: std::collections::HashMap<u64, String>,
 }
 
 impl Writes {
@@ -111,6 +113,11 @@ impl Writes {
     pub fn cluster(&self) -> Option<&Arc<grafeno_cluster::Node>> {
         self.cluster.as_ref()
     }
+
+    /// A member's API address, if configured.
+    pub fn api_of(&self, id: u64) -> Option<String> {
+        self.apis.get(&id).cloned()
+    }
 }
 
 /// Requests served at once under `/v1` by default.
@@ -139,6 +146,7 @@ impl AppState {
             writer: Arc::new(Writes {
                 local: Arc::new(grafeno::Writer::new(db.clone(), options)),
                 cluster: None,
+                apis: Default::default(),
             }),
             keys: Arc::new(Keyring::load(&db).unwrap_or_default()),
             db,
@@ -153,12 +161,25 @@ impl AppState {
     }
 
     /// Sends every write through a cluster member (phase 13.2).
-    pub fn with_cluster(mut self, node: Arc<grafeno_cluster::Node>) -> Self {
+    pub fn with_cluster(
+        mut self,
+        node: Arc<grafeno_cluster::Node>,
+        apis: std::collections::HashMap<u64, String>,
+    ) -> Self {
         self.writer = Arc::new(Writes {
             local: self.writer.local.clone(),
             cluster: Some(node),
+            apis,
         });
         self
+    }
+
+    /// Whether work that must run once (webhooks, background tasks) runs
+    /// here: on a single server, or on a cluster's leader.
+    pub fn leading(&self) -> bool {
+        self.writer
+            .cluster()
+            .is_none_or(|node| node.status().role == "leader")
     }
 
     pub fn with_background(mut self, background: crate::events::BackgroundConfig) -> Self {
@@ -338,6 +359,10 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/cluster", get(cluster_status))
         .route("/cluster/voters", post(cluster_voters))
         .route("/cluster/compact", post(cluster_compact))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::cluster::route,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
         .route_layer(middleware::from_fn_with_state(state.clone(), admit))
         .route_layer(middleware::from_fn_with_state(state.clone(), observe));
@@ -451,6 +476,13 @@ impl From<Error> for ApiError {
             ErrorKind::BadRequest => (StatusCode::BAD_REQUEST, "invalid"),
             ErrorKind::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             ErrorKind::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+            ErrorKind::Busy
+                if error
+                    .to_string()
+                    .contains(crate::cluster::NOT_LEADER_MESSAGE) =>
+            {
+                (StatusCode::MISDIRECTED_REQUEST, "not_leader")
+            }
             ErrorKind::Busy => (StatusCode::SERVICE_UNAVAILABLE, "busy"),
             ErrorKind::Conflict => (StatusCode::CONFLICT, "conflict"),
             ErrorKind::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
@@ -472,6 +504,12 @@ impl IntoResponse for ApiError {
         error.extend(self.details.unwrap_or_default());
         let body = json!({ "error": error });
         let mut response = (self.status, Json(body)).into_response();
+        if self.code == "not_leader" {
+            response.headers_mut().insert(
+                crate::cluster::NOT_LEADER,
+                header::HeaderValue::from_static("1"),
+            );
+        }
         if self.status == StatusCode::SERVICE_UNAVAILABLE {
             response
                 .headers_mut()
@@ -1653,6 +1691,11 @@ struct QueryInput {
     query: String,
     #[serde(default)]
     params: serde_json::Map<String, Value>,
+    /// A writing query with a key runs once: the same key again returns
+    /// the first result without writing (also as the `Idempotency-Key`
+    /// header).
+    #[serde(default)]
+    idempotency_key: Option<String>,
 }
 
 impl From<grafeno_query::QueryError> for ApiError {
@@ -1693,11 +1736,23 @@ impl Drop for CancelOnDrop {
 async fn query(
     State(state): State<AppState>,
     Path(ns): Path<String>,
+    headers: axum::http::HeaderMap,
     Body(input): Body<QueryInput>,
 ) -> ApiResult<Json<Value>> {
     let params = grafeno_query::params_from_json(&input.params);
-    run_query(&state, ns, input.query, params).await.map(Json)
+    let key = input.idempotency_key.or_else(|| {
+        headers
+            .get("idempotency-key")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    });
+    run_query_keyed(&state, ns, input.query, params, key)
+        .await
+        .map(Json)
 }
+
+/// State kind of the results of keyed writing queries.
+const IDEMPOTENT: &str = "idempotency";
 
 /// Runs a GQ query, counted in the metrics.
 async fn run_query(
@@ -1706,8 +1761,18 @@ async fn run_query(
     query: String,
     params: grafeno_query::Params,
 ) -> ApiResult<Value> {
+    run_query_keyed(state, ns, query, params, None).await
+}
+
+async fn run_query_keyed(
+    state: &AppState,
+    ns: String,
+    query: String,
+    params: grafeno_query::Params,
+    key: Option<String>,
+) -> ApiResult<Value> {
     let started = std::time::Instant::now();
-    let outcome = run_query_counted(state, ns, query, params).await;
+    let outcome = run_query_counted(state, ns, query, params, key).await;
     let limit = match &outcome {
         Err(error) if error.code == "query_limit" => Some(error.message.as_str()),
         _ => None,
@@ -1722,6 +1787,7 @@ async fn run_query_counted(
     ns: String,
     query: String,
     params: grafeno_query::Params,
+    key: Option<String>,
 ) -> ApiResult<Value> {
     let db = state.db.clone();
     // When the client goes away, this handler is dropped: the guard then
@@ -1754,16 +1820,31 @@ async fn run_query_counted(
     let failure: Arc<std::sync::Mutex<Option<grafeno_query::QueryError>>> = Arc::default();
     let kept = failure.clone();
     let outcome = write(state, move |tx| {
+        // Written already under this key: the first result, nothing more.
+        if let Some(key) = &key
+            && let Some(bytes) = tx.state(&ns, IDEMPOTENT, key)?
+        {
+            return serde_json::from_slice::<Value>(&bytes)
+                .map_err(|error| Error::Serialization(error.to_string()));
+        }
         let read = db.begin_read()?;
-        grafeno_query::execute_in(tx, &read, &ns, &query, &params, &limits).map_err(|error| {
-            let message = error.to_string();
-            *kept.lock().expect("not poisoned") = Some(error);
-            Error::Invalid(message)
-        })
+        let result = grafeno_query::execute_in(tx, &read, &ns, &query, &params, &limits)
+            .map_err(|error| {
+                let message = error.to_string();
+                *kept.lock().expect("not poisoned") = Some(error);
+                Error::Invalid(message)
+            })?
+            .to_json();
+        if let Some(key) = &key {
+            let bytes = serde_json::to_vec(&result)
+                .map_err(|error| Error::Serialization(error.to_string()))?;
+            tx.put_state(&ns, IDEMPOTENT, key, &bytes)?;
+        }
+        Ok(result)
     })
     .await;
     match outcome {
-        Ok(result) => Ok(result.to_json()),
+        Ok(result) => Ok(result),
         Err(error) => match failure.lock().expect("not poisoned").take() {
             Some(query_error) => Err(query_error.into()),
             None => Err(error),

@@ -21,8 +21,13 @@
 //! far behind receives the snapshot's metadata (its data travels beside the
 //! message, handled by the caller).
 //!
-//! Not here: read leases and read index (13.3), learners, leadership
-//! transfer.
+//! Linearizable reads use ReadIndex ([`Raft::read_index`]): the leader
+//! notes its commit index, confirms it is still the leader by a round of
+//! heartbeats a majority answers, and only then hands the index back; a
+//! read served once that index is applied sees every write acknowledged
+//! before it began.
+//!
+//! Not here: read leases, learners, leadership transfer.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -136,6 +141,9 @@ pub enum Message {
         prev_term: Term,
         entries: Vec<Entry>,
         commit: Index,
+        /// The leader's latest read round (ReadIndex), echoed back.
+        #[serde(default)]
+        read: u64,
     },
     AppendReply {
         term: Term,
@@ -144,6 +152,9 @@ pub enum Message {
         matched: Index,
         /// On failure, where the leader should try next.
         hint: Index,
+        /// The read round of the append this answers.
+        #[serde(default)]
+        read: u64,
     },
     /// The leader's snapshot: its data travels with the message, handled by
     /// the caller ([`Ready::snapshot`] says when to install it).
@@ -227,6 +238,9 @@ pub struct Ready {
     pub snapshot: Option<SnapshotMeta>,
     pub messages: Vec<Envelope>,
     pub committed: Vec<Entry>,
+    /// Reads asked with [`Raft::read_index`] that are settled: the index to
+    /// wait for, or `None` when leadership was lost before confirming.
+    pub reads: Vec<(u64, Option<Index>)>,
 }
 
 impl Ready {
@@ -237,6 +251,7 @@ impl Ready {
             && self.snapshot.is_none()
             && self.messages.is_empty()
             && self.committed.is_empty()
+            && self.reads.is_empty()
     }
 }
 
@@ -285,6 +300,15 @@ pub struct Raft {
     persist_from: Option<Index>,
     hard_dirty: bool,
     installed: Option<SnapshotMeta>,
+    /// ReadIndex: the last read round sent, the reads waiting for a round a
+    /// majority answered `(context, round, index)`, the highest round each
+    /// member answered in this term, and the settled reads.
+    read_round: u64,
+    pending_reads: Vec<(u64, u64, Index)>,
+    read_acks: BTreeMap<NodeId, u64>,
+    settled_reads: Vec<(u64, Option<Index>)>,
+    /// The read round of the append being answered.
+    reply_read: u64,
 }
 
 impl Raft {
@@ -333,6 +357,11 @@ impl Raft {
             persist_from: None,
             hard_dirty: false,
             installed: None,
+            read_round: 0,
+            pending_reads: Vec::new(),
+            read_acks: BTreeMap::new(),
+            settled_reads: Vec::new(),
+            reply_read: 0,
         };
         raft.reload_config();
         raft.reset_timeout();
@@ -464,6 +493,10 @@ impl Raft {
     }
 
     fn become_follower(&mut self, term: Term, leader: Option<NodeId>) {
+        for (context, _, _) in self.pending_reads.drain(..) {
+            self.settled_reads.push((context, None));
+        }
+        self.read_acks.clear();
         let vote = if term > self.term { None } else { self.vote };
         self.set_hard(term, vote);
         self.role = Role::Follower;
@@ -572,6 +605,7 @@ impl Raft {
     }
 
     fn become_leader(&mut self) {
+        self.read_acks.clear();
         self.role = Role::Leader;
         self.leader = Some(self.id);
         self.votes.clear();
@@ -678,7 +712,7 @@ impl Raft {
         let entries: Vec<Entry> = (progress.next..=end)
             .filter_map(|index| self.entry(index).cloned())
             .collect();
-        let (term, commit) = (self.term, self.commit);
+        let (term, commit, read) = (self.term, self.commit, self.read_round);
         self.send(
             peer,
             Message::Append {
@@ -687,8 +721,44 @@ impl Raft {
                 prev_term,
                 entries,
                 commit,
+                read,
             },
         );
+    }
+
+    /// Asks for a linearizable read: once a majority confirms this member
+    /// is still the leader, [`Ready::reads`] gives `context` the index to
+    /// wait for before reading. Fails if not the leader, or if the leader
+    /// has not committed an entry of its term yet (try again shortly).
+    pub fn read_index(&mut self, context: u64) -> Result<(), Error> {
+        if self.role != Role::Leader {
+            return Err(Error::NotLeader(self.leader));
+        }
+        if self.term_at(self.commit) != Some(self.term) {
+            return Err(Error::Unavailable);
+        }
+        self.read_round += 1;
+        let (round, index) = (self.read_round, self.commit);
+        self.pending_reads.push((context, round, index));
+        self.settle_reads();
+        self.broadcast();
+        Ok(())
+    }
+
+    /// Reads whose round a majority (with the leader) answered.
+    fn settle_reads(&mut self) {
+        let id = self.id;
+        let mut settled = Vec::new();
+        self.pending_reads.retain(|(context, round, index)| {
+            let confirmed = self.config.quorum(|member| {
+                member == id || self.read_acks.get(&member).is_some_and(|r| r >= round)
+            });
+            if confirmed {
+                settled.push((*context, Some(*index)));
+            }
+            !confirmed
+        });
+        self.settled_reads.extend(settled);
     }
 
     fn maybe_commit(&mut self) {
@@ -757,6 +827,7 @@ impl Raft {
                             success: false,
                             matched: 0,
                             hint: 0,
+                            read: 0,
                         },
                     );
                 }
@@ -792,14 +863,26 @@ impl Raft {
                 prev_term,
                 entries,
                 commit,
+                read,
                 ..
-            } => self.on_append(from, prev_index, prev_term, entries, commit),
+            } => {
+                self.reply_read = read;
+                self.on_append(from, prev_index, prev_term, entries, commit)
+            }
             Message::AppendReply {
                 success,
                 matched,
                 hint,
+                read,
                 ..
-            } => self.on_append_reply(from, success, matched, hint),
+            } => {
+                if self.role == Role::Leader {
+                    let ack = self.read_acks.entry(from).or_insert(0);
+                    *ack = (*ack).max(read);
+                    self.settle_reads();
+                }
+                self.on_append_reply(from, success, matched, hint)
+            }
             Message::Snapshot { meta, .. } => self.on_snapshot(from, meta),
             Message::SnapshotReply { index, .. } => self.on_snapshot_reply(from, index),
         }
@@ -886,7 +969,7 @@ impl Raft {
         }
         self.leader = Some(from);
         self.elapsed = 0;
-        let term = self.term;
+        let (term, read) = (self.term, self.reply_read);
         // What the snapshot already holds is matched.
         if prev_index < self.snapshot.index {
             let entries: Vec<Entry> = entries
@@ -905,6 +988,7 @@ impl Raft {
                     success: true,
                     matched,
                     hint: 0,
+                    read,
                 },
             );
             return;
@@ -930,6 +1014,7 @@ impl Raft {
                     success: false,
                     matched: 0,
                     hint,
+                    read,
                 },
             );
             return;
@@ -966,6 +1051,7 @@ impl Raft {
                 success: true,
                 matched: last_new,
                 hint: 0,
+                read,
             },
         );
     }
@@ -1095,6 +1181,7 @@ impl Raft {
                 .filter_map(|index| self.entry(index).cloned())
                 .collect();
         }
+        ready.reads = std::mem::take(&mut self.settled_reads);
         if self.commit > self.applied {
             let from = self.applied.max(self.snapshot.index) + 1;
             ready.committed = (from..=self.commit)

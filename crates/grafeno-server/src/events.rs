@@ -583,11 +583,15 @@ pub fn start(state: &AppState) {
             let backoff = Arc::new(Mutex::new(HashMap::new()));
             loop {
                 let (state, backoff) = (state.clone(), backoff.clone());
-                let _ = tokio::task::spawn_blocking(move || {
-                    let mut backoff = backoff.lock().unwrap_or_else(|e| e.into_inner());
-                    deliver(&state, &mut backoff)
-                })
-                .await;
+                // On a cluster, only the leader delivers: its cursors are
+                // replicated, so a new leader resumes where it stopped.
+                if state.leading() {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let mut backoff = backoff.lock().unwrap_or_else(|e| e.into_inner());
+                        deliver(&state, &mut backoff)
+                    })
+                    .await;
+                }
                 tokio::select! {
                     changed = commits.changed() => if changed.is_err() { return },
                     _ = tokio::time::sleep(Duration::from_secs(2)) => {}
@@ -627,6 +631,11 @@ pub fn start(state: &AppState) {
         tokio::spawn(async move {
             let last_refresh = Arc::new(Mutex::new(None));
             loop {
+                // On a cluster, background work runs on the leader alone.
+                if !state.leading() {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
                 let (state2, ns2, last) = (state.clone(), ns.clone(), last_refresh.clone());
                 let outcome = tokio::task::spawn_blocking(move || {
                     let mut last = last.lock().unwrap_or_else(|e| e.into_inner());

@@ -24,6 +24,7 @@ static SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
 static CONFIGS: AtomicU64 = AtomicU64::new(0);
 static ACKED: AtomicU64 = AtomicU64::new(0);
 static CRASHES: AtomicU64 = AtomicU64::new(0);
+static READS: AtomicU64 = AtomicU64::new(0);
 
 use grafeno_raft::{
     Entry, Envelope, HardState, Index, Message, NodeId, Options, Payload, Raft, Role, SnapshotMeta,
@@ -89,6 +90,11 @@ struct Sim {
     /// Proposals: value -> (member, index) where proposed.
     proposed: HashMap<Vec<u8>, (NodeId, Index)>,
     acked: BTreeSet<Vec<u8>>,
+    /// The highest index of an acknowledged write.
+    acked_max: Index,
+    /// Reads asked: context -> the highest acknowledged index when asked.
+    reads: HashMap<u64, Index>,
+    next_read: u64,
     committed_configs: BTreeSet<Index>,
     next_value: u64,
     options: Options,
@@ -130,6 +136,9 @@ impl Sim {
             committed: HashMap::new(),
             proposed: HashMap::new(),
             acked: BTreeSet::new(),
+            acked_max: 0,
+            reads: HashMap::new(),
+            next_read: 0,
             committed_configs: BTreeSet::new(),
             next_value: 0,
             options,
@@ -203,9 +212,22 @@ impl Sim {
                 member.disk.state.push((entry.index, data.clone()));
                 if self.proposed.get(data) == Some(&(id, entry.index)) {
                     self.acked.insert(data.clone());
+                    self.acked_max = self.acked_max.max(entry.index);
                 }
             }
             member.disk.applied = entry.index;
+        }
+        // A linearizable read waits for an index covering every write
+        // acknowledged before it was asked.
+        for (context, index) in ready.reads {
+            let asked = self.reads.remove(&context).expect("a read asked");
+            if let Some(index) = index {
+                assert!(
+                    index >= asked,
+                    "a read at {index} misses a write acknowledged at {asked}"
+                );
+                READS.fetch_add(1, Ordering::Relaxed);
+            }
         }
         if role == Role::Leader {
             match self.leaders.get(&term) {
@@ -285,6 +307,15 @@ impl Sim {
         self.next_value += 1;
         let value = format!("v{}", self.next_value).into_bytes();
         let raft = self.members.get_mut(&id).unwrap().raft.as_mut().unwrap();
+        if self.rng.chance(300) {
+            self.next_read += 1;
+            let context = self.next_read;
+            if raft.read_index(context).is_ok() {
+                self.reads.insert(context, self.acked_max);
+                self.process(id);
+            }
+            return;
+        }
         if let Ok(index) = raft.propose(value.clone()) {
             self.proposed.insert(value, (id, index));
             self.process(id);
@@ -547,6 +578,7 @@ fn raft_survives_random_schedules() {
         }
     }
     let count = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+    let reads = count(&READS);
     let (leaders, snapshots, configs, acked, crashes) = (
         count(&LEADERS),
         count(&SNAPSHOTS),
@@ -555,12 +587,17 @@ fn raft_survives_random_schedules() {
         count(&CRASHES),
     );
     println!(
-        "{} schedules: {leaders} terms with a leader, {snapshots} snapshots installed, {configs} configurations committed, {acked} acknowledged writes, {crashes} crashes",
+        "{} schedules: {leaders} terms with a leader, {snapshots} snapshots installed, {configs} configurations committed, {acked} acknowledged writes, {reads} linearizable reads, {crashes} crashes",
         seeds - first + 1
     );
     // The schedules exercise what they claim to.
     assert!(
-        leaders > seeds - first + 1 && snapshots > 0 && configs > 0 && acked > 0 && crashes > 0
+        leaders > seeds - first + 1
+            && snapshots > 0
+            && configs > 0
+            && acked > 0
+            && crashes > 0
+            && reads > 0
     );
 }
 
@@ -589,6 +626,7 @@ fn messages_round_trip_as_json() {
             payload: Payload::Data(b"abc".to_vec()),
         }],
         commit: 7,
+        read: 0,
     };
     let text = serde_json::to_string(&message).unwrap();
     assert_eq!(serde_json::from_str::<Message>(&text).unwrap(), message);
