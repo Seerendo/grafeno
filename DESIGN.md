@@ -33,7 +33,10 @@ MCP.
 - A custom storage engine (pager, WAL): an embedded KV store is used.
 - Full Cypher or GQL: GQ covers patterns, filters, aggregates and writes;
   `OPTIONAL MATCH`, `MERGE`, `WITH` and the rest come when needed.
-- Distribution and sharding.
+- An external coordinator (etcd, ZooKeeper) or a distributed storage layer:
+  replication and failover (phase 13) live in the `grafeno` binary itself.
+- Splitting one namespace across servers: phase 13 replicates whole
+  databases and, at most, places whole namespaces on different groups.
 
 ## Architecture
 
@@ -377,18 +380,23 @@ without a current user. They remain possible for embedded use.
 9. **Desktop application** (done, in five steps; see below): Grafeno
    as a desktop app with its own installers, a new design and a graph you
    can handle directly.
-10. **Hardening** (planned, in seven steps; see below): the priority
+10. **Hardening** (done, in seven steps; see below): the priority
     technical risks, measured and closed before more features build on
     them.
-11. **Memory that keeps itself** (planned, in four steps): incremental
-    extraction and reconciliation of entities, automatic invalidation of
-    contradicting facts, hierarchical community summaries, continuous
-    ingestion and events.
+11. **Memory that keeps itself** (done, in five steps): entity
+    resolution, incremental extraction and reconciliation of entities,
+    automatic invalidation of contradicting facts, hierarchical community
+    summaries, continuous ingestion and events.
 12. **Compatibility and speed** (done, in five steps): wider
     Cypher and tool compatibility, query optimization under concurrency,
     batched execution, batched and parallel traversal, compact storage and
     vector quantization.
-13. **Integrations**: Grafito first, Python bindings, read replicas.
+13. **Distributed operation** (planned, in six steps; see below): several
+    servers holding the same data, kept in sync by a replicated log with
+    Raft; a leader elected among them coordinates writes, the others take
+    over when it fails, and reads and large queries spread over all of
+    them.
+14. **Integrations**: Grafito first, Python bindings.
 
 ### Phase 8 plan
 
@@ -1686,6 +1694,176 @@ As built (layout version 13):
   which redesigns the text index, the writes, `check` and `rebuild`; with
   the value encoding above the adjacency is 14% smaller without it.
 
+### Phase 13 plan: distributed operation
+
+The goal: run Grafeno on several servers that hold the same data, so that
+the service keeps working when one of them fails, reads scale with the
+number of servers, and large queries run on several of them at once,
+without giving up what one server guarantees today (a write is
+all-or-nothing, a read sees whole transactions, an acknowledged write is
+never lost).
+
+The guidelines of phases 10 to 12 hold (local, agent-agnostic, CPU only),
+plus: no external coordinator (no etcd, no ZooKeeper, no shared disk), one
+binary, and a single server keeps working exactly as now, with the cluster
+off. Each step ends with tests (fault injection where it applies), a
+measurement, documentation and its own commit.
+
+**Where it starts from.** One process owns the file and is its only
+writer; concurrent writes are grouped into one redb transaction (group
+commit, 8.4); every write already leaves a change log of what it changed,
+record by record, numbered per namespace (11.4); a backup is a consistent
+snapshot taken without stopping writers (4); the file has a layout version
+and upgrades on open; and 12.3's aggregates fold into accumulators, the
+form a distributed query needs to merge partial results.
+
+**The model chosen.** One leader per group of servers (three or five),
+elected with Raft, orders every write into a replicated log; a write is
+acknowledged once a majority has the entry, and every member applies the
+log in the same order to its own redb file. The alternatives were weighed:
+
+- *Shipping redb pages or files* ("physical" in the storage sense): redb
+  has no write-ahead log to ship, its page layout differs from file to file,
+  and copying whole files only works for catching up, not for each write.
+  Backups (snapshots) are used exactly for that: a new or lagging member.
+- *Shipping the requests* (statement replication): a GQ write or a `remember`
+  call is not deterministic (it draws ids, reads the clock, reads the state
+  it runs on), so members could diverge.
+- *Shipping the effects* (record-level replication), chosen: the leader runs
+  each write group once, and the log entry holds what it did to the records
+  (nodes and edges written or deleted, with their final ids and times,
+  texts, embeddings, index and schema changes), which is what 11.4's change
+  log already captures. Members apply effects, never run statements again,
+  and rebuild their derived entries (adjacency, labels, postings, HNSW
+  links, int8 copies, counters) from them, so a member's file is the same
+  data, verifiable with `check` and by comparing exports.
+
+**13.1 A replicated log of deterministic write groups.**
+
+- Every write group (what the writer thread commits today) is turned, on the
+  leader, into a log entry of resolved effects: final ids and timestamps,
+  GQ statements reduced to the records they wrote, embeddings and texts as
+  values, schema changes (indexes, constraints, principals) as values. An
+  entry carries the layout and entry format versions it was written with.
+- An `apply` path that takes an entry and performs it in one redb write
+  transaction, deriving every index from the records, and stores the log
+  position it reached (`applied_index`) in the same transaction, so a crash
+  between applying and recording is impossible and replaying never applies
+  twice.
+- A log table (entries by index and term), its truncation after a snapshot,
+  and snapshots built from backups plus the position they hold. A new
+  layout version, with its upgrade and fixture.
+- Done when: replaying a database's log onto an empty file gives the same
+  data (exports equal, `check` clean) as the file that wrote it, for every
+  kind of write, including writes that fail halfway (nothing in the log)
+  and group commits that mix failing and succeeding writes; property tests
+  against the 4.x model.
+
+**13.2 Raft: leader election and log replication.**
+
+- Consensus among three or five members: terms, elections with randomized
+  timeouts, log replication with quorum commit, a pre-vote phase so that a
+  member that was cut off does not depose a working leader on return, and
+  membership changes (joint consensus) to add, remove or replace a member
+  without stopping. To evaluate first: `openraft` (an async Rust
+  implementation used in production) against writing the protocol, which is
+  small but subtle; the choice is recorded here with its reasons.
+- The leader's writer proposes each group and acknowledges its writes once
+  the entry is committed (a majority has it durably); followers apply
+  committed entries in order. Durability settings (immediate, eventual)
+  become per-entry fsync policies on every member.
+- Snapshot install for a member too far behind (a backup streamed with its
+  log position, then the log after it), and log compaction.
+- A cluster transport between members (its own port, authenticated with a
+  cluster secret and TLS), and `[cluster]` in `grafeno.toml`: the member's
+  id, its peers, timeouts. `grafeno cluster init`, `join`, `leave`,
+  `status`.
+- Done when: a deterministic in-process simulation (members, a network
+  that drops, delays, duplicates and reorders messages, crashes and
+  restarts, all from a seed) runs thousands of schedules and never loses an
+  acknowledged write, never applies two different entries at one index, and
+  always elects a leader once a majority can talk.
+
+**13.3 Continuing when an instance fails.**
+
+- Failover: when the leader stops answering, a new one is elected within a
+  bounded time and writes resume; the old leader, if it comes back, steps
+  down (terms fence it). Writes in flight during the change fail with a
+  retryable error or succeed exactly once (idempotency keys, as NDJSON
+  ingestion already has).
+- Clients find the leader: followers forward writes to it (or answer with
+  its address); the TypeScript client, the shell, MCP (`--url`) and the
+  Desktop app accept several server addresses and move to another when one
+  fails.
+- Reads by consistency level: `linearizable` (through the leader, with a
+  lease or a read index), `bounded` (any member at most N ms or N entries
+  behind), and read-your-writes (a write returns its log position; a read
+  that carries it waits until the member has applied it).
+- Work that must run once (extraction, community summaries, webhooks, the
+  change log's retention, 11.x) runs on the leader only, with its progress
+  in the replicated state, so a new leader resumes where the old one
+  stopped; server-sent event streams continue their numbering across a
+  failover.
+- Done when: fault injection on real processes (a docker compose of three
+  and five members, killing, pausing and partitioning them with
+  `iptables`/`tc`) under a workload of reads and writes, checked by a
+  linearizability checker (registers and counters, as Jepsen does), finds
+  no anomaly; failover time and lost availability measured.
+
+**13.4 Queries in parallel across instances.**
+
+- Reads spread over members: a server (or the client) balances reads over
+  the members that meet the requested consistency.
+- Large read queries split across members: every member holds all the data,
+  so a query whose start is large (12.2's parallel scans, 12.4's frontiers)
+  is cut into ranges of anchor ids; each member runs its ranges at the same
+  log position (it waits until it has applied it) and returns partial
+  results, 12.3's accumulators made mergeable (counts, integer sums, min,
+  max, `collect` in range order; floating-point sums and averages with a
+  summation that does not depend on the order, decided in this step so that
+  results equal one server's), and the coordinator merges them in range
+  order. Queries that return rows stream them back in range order.
+- Graph algorithms that already parallelize (PageRank, components) stay on
+  one member; distributing them is a separate decision.
+- Done when: every query of the conformance and planner suites returns the
+  same rows on one server and split across three; speed-up measured for
+  scans, two-hop traversals and aggregates with 1, 3 and 5 members.
+
+**13.5 More than one group: namespaces placed on different servers.**
+
+- Write throughput is still one leader's. To go beyond it, a cluster can run
+  several Raft groups, each owning whole namespaces (multi-Raft), with a
+  small replicated directory saying which group owns which namespace; any
+  member routes a request to the right group.
+- Moving a namespace between groups without stopping it: snapshot, catch up
+  with its change log, a short write pause, switch in the directory.
+- Queries that span namespaces (only those that ask, as today) run on each
+  owner and merge as in 13.4.
+- Done when: write throughput measured with one, two and three groups, and a
+  namespace moved under load without losing or duplicating a write.
+
+**13.6 Operating a cluster.**
+
+- Status and metrics per member (role, term, commit and applied positions,
+  lag, elections, snapshot transfers) in `/metrics`, `grafeno cluster
+  status` and a cluster view in the Studio and the Desktop app.
+- Rolling upgrades: members of two consecutive versions coexist; entries
+  and snapshots carry their format version, and a leader never writes a
+  format a follower cannot read; layout upgrades happen member by member.
+- Backups from a follower, restore into a new cluster, and adding a member
+  from a backup.
+- Installation: a three-member docker compose, systemd units and the
+  Windows service with `[cluster]`, and runbooks for losing one member,
+  losing a majority, and replacing a disk.
+- Done when: a rolling upgrade and every runbook have been run on the
+  compose under load, with the linearizability checker watching.
+
+**Measures for the phase** (in `docs/benchmarks.md` and `docs/performance.md`,
+against one server): write latency and throughput with three and five
+members on one machine and over a real network; failover time; reads per
+second with one to five members; speed-up of split queries; time to add a
+member from a snapshot of 1 M nodes and 10 M edges; memory per member.
+
 ## Measurements and test environments
 
 What Grafeno has been measured to do, where, and how; the base for the
@@ -1879,3 +2057,7 @@ docker run --rm --memory 512m --memory-swap 512m -e CACHE_MB=128 -e PROJECTION_C
   the application in front, as Grafito does).
 - On Windows, building needs the MSVC toolchain (Visual Studio Build Tools):
   tokio's `windows-sys` does not build with the self-contained GNU toolchain.
+- Phase 13: `openraft` or a Raft of our own; the cluster transport (HTTP/2
+  with the existing stack, or gRPC); the default read consistency
+  (linearizable or bounded); and how floating-point aggregates merge across
+  members so that results equal one server's.

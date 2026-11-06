@@ -173,6 +173,11 @@ measured speed, memory and limits, with charts, in
   int8 copies and rescore exactly, at the same recall (1 M vectors in 512
   MiB: about 5 ms to 3.5 to 4.2 ms a search).
 
+Next, phase 13: distributed operation (servers kept in sync by a
+replicated log with Raft, failover, reads and large queries spread over
+the servers); then integrations (Grafito, Python bindings). The plan is in
+[DESIGN.md](DESIGN.md).
+
 ## Installing
 
 **Grafeno Desktop**, the desktop application (database files with the
