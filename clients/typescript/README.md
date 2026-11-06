@@ -34,7 +34,12 @@ const cluster = new Grafeno({ url: ["http://10.0.0.1:7810", "http://10.0.0.2:781
 const ns = cluster.namespace("vault-123");
 await ns.query("CREATE (:Note {title: $t})", { t: "hi" }, { idempotencyKey: crypto.randomUUID() });
 await ns.query("MATCH (n:Note) RETURN count(n)", {}, { consistency: "linearizable" });
+// Split a costly read across the members (`split` in the result says so).
+await ns.query("MATCH (p:Person) RETURN p.city, count(*)", {}, { split: "on" });
 ```
+
+`spread: true` starts each request on the next member, spreading reads
+over the cluster.
 
 Field names follow the API (snake_case); see
 [the server README](../../crates/grafeno-server/README.md) for every endpoint.

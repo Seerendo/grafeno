@@ -196,7 +196,14 @@ writes). A GQ write sent with an `Idempotency-Key` header runs once,
 however many times it is retried. The shell (`--url` with several
 addresses, comma-separated) and the TypeScript client (`url: [...]`)
 move to another member when one fails and read their own writes. When
-the leader dies, writes resume in about half a second. `grafeno cluster status --url http://10.0.0.1:7810 --token …`
+the leader dies, writes resume in about half a second.
+
+A costly read (estimated cost from `split_cost` in `[cluster]`, 200 000
+by default, as `EXPLAIN` shows it) is split across the members: each
+runs a share at the same position, and the member asked merges the
+parts into the same rows one server returns. `x-grafeno-split: on`
+splits a read whenever its shape allows, `off` never. Members that
+may take parts need `api` in `peers`. `grafeno cluster status --url http://10.0.0.1:7810 --token …`
 shows a member's view; `grafeno cluster voters 1 2 3 4` (on the leader)
 changes the members, the new one listed in every member's `peers` and
 started with `voters = []`; `grafeno cluster compact` snapshots a member's

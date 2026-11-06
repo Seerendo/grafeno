@@ -188,6 +188,11 @@ measured speed, memory and limits, with charts, in
   injection (members cut off, restarted and killed) checked by a
   linearizability checker found no anomaly; writes resume about half a
   second after the leader dies.
+- **Phase 13.4, parallel queries:** a costly read is split across the
+  members, each taking a share of its start at the same log position,
+  and merged into exactly the rows one server returns (sums no longer
+  depend on row order); aggregates over 200 000 people run 2.9 times
+  faster on five members of three threads than on one.
 
 Next, the rest of phase 13: distributed operation (servers kept in sync by a
 replicated log with Raft, failover, reads and large queries spread over

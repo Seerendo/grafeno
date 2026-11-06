@@ -324,7 +324,10 @@ Besides `count`, `sum`, `avg`, `min`, `max` and `collect`:
 
 They skip `null`s, take `DISTINCT` (`stdev(DISTINCT x)`), and give `null`
 over no values (the spread of one value is 0). `sum` and `avg` also add up
-durations.
+durations. Their result does not depend on the order of the rows:
+integers add in 128 bits (only a total outside 64 bits is an overflow)
+and floats exactly, rounded once (`sum` of 0.1, 0.2 and 0.3 is 0.6), so a
+query split across cluster members returns what one server does.
 
 ```text
 MATCH (p:Person)

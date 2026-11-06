@@ -392,7 +392,7 @@ without a current user. They remain possible for embedded use.
     Cypher and tool compatibility, query optimization under concurrency,
     batched execution, batched and parallel traversal, compact storage and
     vector quantization.
-13. **Distributed operation** (in progress, 13.1 to 13.3 done; six steps; see below): several
+13. **Distributed operation** (in progress, 13.1 to 13.4 done; six steps; see below): several
     servers holding the same data, kept in sync by a replicated log with
     Raft; a leader elected among them coordinates writes, the others take
     over when it fails, and reads and large queries spread over all of
@@ -2043,7 +2043,7 @@ client):
   `clients/typescript/test/cluster.test.ts` (the client across three
   processes, the member it uses killed).
 
-**13.4 Queries in parallel across instances.**
+**13.4 Queries in parallel across instances** (done).
 
 - Reads spread over members: a server (or the client) balances reads over
   the members that meet the requested consistency.
@@ -2061,6 +2061,75 @@ client):
 - Done when: every query of the conformance and planner suites returns the
   same rows on one server and split across three; speed-up measured for
   scans, two-hop traversals and aggregates with 1, 3 and 5 members.
+
+As built (`crates/grafeno-query/src/split.rs`, `grafeno-cluster`,
+`grafeno-server/src/cluster.rs`, the TypeScript client):
+
+- What splits: a read whose first clause is a `MATCH`, whose clauses up
+  to the final `RETURN` work row by row (`MATCH`, `OPTIONAL MATCH`,
+  `UNWIND`, a `WITH` that neither aggregates, sorts, drops duplicates nor
+  limits), with no `UNION`, procedure or volatile function (`rand()`,
+  `randomUUID()`, the clock). Anything else runs on one member.
+- Parts (`execute_part`): part `k` of `n` takes the `k`th share of the
+  first pattern's candidates, by position in the order one server visits
+  them (a label's ids, an index lookup's, or a scan's pages), so the
+  parts' rows end to end are one server's rows; a part large enough
+  still scans on several threads (12.2). Every part plans with the
+  coordinator's plan information, statistics included
+  (`PlannerStats::to_wire` carries their encoded buckets), so all make the
+  same plan: statistics in memory can differ from member to member. With
+  aggregates a part returns its groups unfinished; without, its projected
+  rows (distinct with `DISTINCT`, sorted by their `ORDER BY` keys, which
+  it sends along, cut to `SKIP + LIMIT` when that is enough). Values
+  travel exactly (`Value::to_wire`: floats by their bits, nodes, edges
+  and paths whole).
+- Merging (`merge_parts`): groups merge in part order (a group seen
+  before merges its accumulators; a new one goes after), then finish as
+  on one server; rows go end to end, lose duplicates, are sorted stably
+  (ties keep the order one server found them in), then `SKIP` and
+  `LIMIT`. The decision this step was to make: sums do not depend on the
+  order of the rows, on one server too. Integers add in 128 bits (only a
+  total that does not fit 64 is an overflow: `max + 1 - 5` is no longer
+  an error), floats exactly (Shewchuk's partials, as Python's
+  `math.fsum`: the exact sum rounded once, so `0.1 + 0.2 + 0.3` sums to
+  0.6). `count`, `min`, `max` merge directly; `DISTINCT` aggregates carry
+  their distinct values; `collect`, percentiles, `stdev`, `variance` and
+  `mode` carry their values in row order.
+- One position: a member keeps a snapshot after each applied entry for
+  5 s (`Node::snapshot_at`). The member that splits a read takes its
+  latest position; the others wait until they reach it (up to 5 s) and
+  read their snapshot at exactly that position.
+- The server: a read on a cluster member splits when the plan's
+  estimated cost (as `EXPLAIN` shows it) reaches `split_cost` in
+  `[cluster]` (200 000 by default), or always with `x-grafeno-split: on`
+  (`off` never). The member runs its own part and asks each other member
+  for one (`POST /v1/{ns}/query/part`, with the caller's credentials, so
+  the same grants apply); a member that does not answer has its part run
+  here. The answer says `split: {parts, here}`.
+- Reads spread: the TypeScript client with `spread: true` starts each
+  request on the next member (writes are forwarded, and read-your-writes
+  holds through positions). No server-side balancing.
+- Equality: the conformance, planner, Cypher, query, traversal and batch
+  suites check every read that can be split, whole against 2, 3 and 5
+  parts sent through JSON (70 of the 146 conformance scenarios split; the
+  others write, or start without a `MATCH`); a control that merges the
+  parts in the wrong order fails at once. `grafeno-server/tests/split.rs`
+  compares eight reads split across three processes, from a follower and
+  from the leader, with `here` equal to 1, and again with a member down
+  (`here` 2).
+- Measured (`split_bench`, 200 000 people, 3 scan threads per member to
+  stand for a machine of that size; every member on this laptop's 8
+  cores): a scan 233 → 129 → 112 ms with 1, 3 and 5 members (2.1 times),
+  an aggregate by city 412 → 176 → 141 ms (2.9), the top 20 by score 745 →
+  337 → 250 ms (3.0), two hops 2.54 → 1.83 → 1.77 s (1.4). For context,
+  one server with 9 threads on the same machine: 115, 255, 546 and
+  1 364 ms. Two hops land on random nodes, so every member reads the whole
+  graph and on one machine each process needs its own cache of it; on
+  separate machines that is not shared, and the measure here is a floor.
+- Not built in this step: server-side balancing of reads, splitting a
+  query whose aggregating `WITH` comes before more clauses (it runs on one
+  member), streaming rows back as parts finish (parts answer whole), and
+  measuring on separate machines.
 
 **13.5 More than one group: namespaces placed on different servers.**
 
@@ -2488,6 +2557,7 @@ spinning disk, on ARM, or for days at a time.
 | Vector search, 1 M vectors in 512 MiB, int8 copies (12.5) | 3.5 to 4.2 ms (4.9 to 5.2 ms before), same resident memory | E2 | `vector_search_int8.csv` |
 | Replication log (13.1) | writes at 80% of the speed with the log on; 568 bytes per record; a replica applies 22 300 records/s | E1-mem | `replication_log.csv` |
 | Raft cluster of three (13.2) | 137 sequential writes/s (618 on one server), p50 7.2 ms; a leader replaced in 0.5 to 0.8 s | E1-disk | `cluster.csv` |
+| Reads split across members (13.4) | 200 000 people, 3 threads a member: scans 2.1, aggregates 2.9, top-20 3.0, two hops 1.4 times faster with 5 members | E1-disk | `split.csv` |
 | Faults injected under reads and writes (13.3) | 31 759 operations, all linearizable; writes resume 0.4 s (one process) and 0.5 s (real processes) after the leader fails | E1-disk | `faults.csv` |
 
 ### Guarantees and the tests that hold them
@@ -2523,6 +2593,7 @@ real binary. The ones that carry each guarantee:
 | A replica that applies the log holds the same data | `grafeno/tests/replication.rs`, `model.rs`, `grafeno-query/tests/replication.rs` | every kind of write replayed onto an empty database and compared (exports, counters, change log, constraints and their events, merges, state, principals); idempotence, gaps, catching up from a backup after truncation, group commits with failures; the model's random sequences replayed |
 | Raft never loses an acknowledged write and members agree | `grafeno-raft/tests/simulation.rs`, `grafeno-cluster/tests/cluster.rs`, `grafeno-server/tests/cluster.rs` | random schedules of drops, delays, duplicates, partitions, crashes, membership changes and snapshots checked for one leader per term, one entry per index, no lost acknowledged write and convergence; members in one process and three real processes through failover, restart, joining and leaving |
 | Reads and writes stay linearizable through failures | `grafeno-cluster/tests/linearizable.rs`, `grafeno-server/tests/faults.rs`, `grafeno-cluster/src/check.rs`, `clients/typescript/test/cluster.test.ts` | a register written and read by concurrent clients while members are cut off, restarted, compacted and killed, every history checked by a linearizability checker (which rejects the unsafe control); forwarding, read-your-writes and keyed writes across real processes |
+| A read split across members returns one server's rows | `grafeno-query/tests/common/mod.rs` (used by `conformance.rs`, `planner.rs`, `cypher.rs`, `queries.rs`, `traversal.rs`, `batch.rs`), `grafeno-server/tests/split.rs`, `aggregate.rs` tests | every read of those suites that can be split, whole against 2, 3 and 5 parts through JSON, row order included; exact sums independent of order; three processes, with a member down |
 | Costly queries stop | `grafeno-query/tests/adversarial.rs` | 32 hostile queries within their limits; nesting just under the limit runs on a 2 MiB stack; `max_cost` refuses; procedure rows count against `max_memory` |
 | Nothing a client sends crashes the parser | `grafeno-query/tests/fuzz.rs` | proptest: random tokens, valid queries with random edits, arbitrary text, through the lexer, parser, planner, `EXPLAIN` and executor |
 | The API keeps its contract | `grafeno-server/tests/http.rs`, `mcp.rs`, `shell.rs`, `clients/typescript/test` | every endpoint and MCP tool, limits, conflicts (409 with details), metrics, the CLI shell, and the client against the real binary |
@@ -2551,6 +2622,7 @@ cargo run --release -p grafeno --example replication_bench -- 100000
 cargo test --release -p grafeno-raft --test simulation   # RAFT_SEEDS=3000 for more
 cargo run --release -p grafeno-cluster --example cluster_bench -- 500
 FAULT_SECONDS=30 cargo test --release -p grafeno-cluster --test linearizable -- --nocapture
+cargo run --release -p grafeno-server --example split_bench -- 200000 3 5   # build grafeno first
 FAULT_SECONDS=40 cargo test --release -p grafeno-server --test faults -- --nocapture
 cargo run --release -p grafeno --example changes_bench -- 100000
 cargo run --release -p grafeno-server --example events_bench -- 100000
@@ -2604,11 +2676,10 @@ docker run --rm --memory 512m --memory-swap 512m -e CACHE_MB=128 -e PROJECTION_C
 - On Windows, building needs the MSVC toolchain (Visual Studio Build Tools):
   tokio's `windows-sys` does not build with the self-contained GNU toolchain.
 - Phase 13: TLS between members (13.2 authenticates with a shared secret
-  only); and how
-  floating-point aggregates merge across members so that results equal one
-  server's. (Decided in 13.2: a Raft of our own; HTTP between members. In 13.3: reads
+  only). (Decided in 13.2: a Raft of our own; HTTP between members. In 13.3: reads
   are `local` unless a request asks for more, and linearizable reads use
-  ReadIndex, not leases.)
+  ReadIndex, not leases. In 13.4: sums do not depend on the order
+  of the rows, so split aggregates equal one server's.)
 - Phase 14: whether denials exist (they make exceptions to broad grants
   easy, as in Neo4j, but PostgreSQL does without them); whether hidden
   properties are absent or masked; session tokens signed (stateless,

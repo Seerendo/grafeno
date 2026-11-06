@@ -344,9 +344,13 @@ answers `not_leader` (421) naming the leader. Headers:
 | `x-grafeno-position` | response | the member's applied position (a Raft index, the same on every member) |
 | `x-grafeno-after: N` | request | wait up to 5 s for the member to apply N (503 otherwise): read your writes |
 | `x-grafeno-consistency` | request | `local` (default), `bounded` (to the leader when the member is over 1 000 entries behind) or `linearizable` (through the leader, with ReadIndex) |
+| `x-grafeno-split` | request | `auto` (default: a read splits across members when its estimated cost reaches `split_cost`), `on` (whenever its shape allows) or `off`; a split answer has `split: {parts, here}` |
 | `Idempotency-Key` | request | on `POST /v1/{ns}/query` (or `idempotency_key` in its body): a write with the same key runs once, and later sends return its first result |
 
-Webhooks and background work run on the leader only. Owner routes:
+A split read asks each member for its part with `POST /v1/{ns}/query/part`
+(internal: the member that splits sends the plan and the position, and
+the caller's credentials). Webhooks and background work run on the
+leader only. Owner routes:
 
 | Method | Path | Body | Returns |
 | --- | --- | --- | --- |

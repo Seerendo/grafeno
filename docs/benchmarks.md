@@ -681,6 +681,29 @@ entry is the lever (not built yet). With the leader cut off, another
 member is elected and commits a write in 510 to 831 ms (median 595, five
 runs) with 50 ms ticks (election timeouts of 0.5 to 1 s).
 
+## Reads split across members (`crates/grafeno-server/examples/split_bench.rs`)
+
+200 000 people (name, age, score, city), each working at one of 1 000
+companies and knowing 3 others; every member starts from a copy of the
+same file and may use 3 scan threads, to stand for a machine of that
+size. All members run on this laptop (8 cores, 16 threads), 2026-11-06;
+median of 5 runs after a warm-up, every split answer checked against the
+unsplit one.
+
+| Query | One server, 3 threads | 3 members | 5 members | One server, 9 threads |
+| --- | --- | --- | --- | --- |
+| scan with a text filter | 233 ms | 129 ms (1.8×) | 112 ms (2.1×) | 115 ms |
+| aggregate by city | 412 ms | 176 ms (2.3×) | 141 ms (2.9×) | 255 ms |
+| top 20 by score (`ORDER BY … LIMIT`) | 745 ms | 337 ms (2.2×) | 250 ms (3.0×) | 546 ms |
+| two hops, counted | 2 538 ms | 1 828 ms (1.4×) | 1 775 ms (1.4×) | 1 364 ms |
+
+Scans, aggregates and sorted limits gain most: each member does a share
+and returns little. Two hops land on random nodes, so every member reads
+the whole graph; on one machine each process needs its own cache of it
+and they share the memory bandwidth, which one server with 9 threads
+does not (on separate machines this is not shared). With 15 threads one
+server does no better than with 9 here.
+
 ## Faults under load (`linearizable.rs`, `faults.rs`)
 
 Clients write distinct values to one register and read it with
