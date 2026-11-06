@@ -357,6 +357,14 @@ leader only. Owner routes:
 | `GET` | `/v1/cluster` | | `{id, role, term, leader, commit, applied, last_index, snapshot_index, voters, outgoing}` |
 | `POST` | `/v1/cluster/voters` | `{voters: [ids]}` | `{index}` (on the leader) |
 | `POST` | `/v1/cluster/compact` | | `{snapshot_index}` |
+| `GET` | `/v1/cluster/groups` | | each Raft group: `{id, voters, held, status}` (13.5) |
+| `GET` | `/v1/cluster/placement` | | `[{namespace, group, moving_to}]`: the namespaces placed outside group 0 |
+| `POST` | `/v1/cluster/placement` | `{namespace, group}` | moves it without stopping it: `{from, to, records, catch_up_rounds, paused_ms, …}` |
+
+With several groups, a request for a namespace goes to its group (on any
+member); writes during a move's pause answer `busy` (503) and should be
+retried. Internal routes under `/v1/cluster/groups/{id}/` carry a move's
+copies, fence and directory.
 
 `grafeno cluster status|voters|compact --url … --token …` call them.
 

@@ -193,6 +193,11 @@ measured speed, memory and limits, with charts, in
   and merged into exactly the rows one server returns (sums no longer
   depend on row order); aggregates over 200 000 people run 2.9 times
   faster on five members of three threads than on one.
+- **Phase 13.5, several groups:** a cluster runs more Raft groups, each
+  with its own leader and database, and places namespaces on them (write
+  throughput 109, 153 and 181 a second with one, two and three groups on
+  one machine); a namespace moves between groups while it is written,
+  pausing writes for tens of milliseconds and losing none.
 
 Next, the rest of phase 13: distributed operation (servers kept in sync by a
 replicated log with Raft, failover, reads and large queries spread over

@@ -392,7 +392,7 @@ without a current user. They remain possible for embedded use.
     Cypher and tool compatibility, query optimization under concurrency,
     batched execution, batched and parallel traversal, compact storage and
     vector quantization.
-13. **Distributed operation** (in progress, 13.1 to 13.4 done; six steps; see below): several
+13. **Distributed operation** (in progress, 13.1 to 13.5 done; six steps; see below): several
     servers holding the same data, kept in sync by a replicated log with
     Raft; a leader elected among them coordinates writes, the others take
     over when it fails, and reads and large queries spread over all of
@@ -2095,10 +2095,13 @@ As built (`crates/grafeno-query/src/split.rs`, `grafeno-cluster`,
   0.6). `count`, `min`, `max` merge directly; `DISTINCT` aggregates carry
   their distinct values; `collect`, percentiles, `stdev`, `variance` and
   `mode` carry their values in row order.
-- One position: a member keeps a snapshot after each applied entry for
-  5 s (`Node::snapshot_at`). The member that splits a read takes its
-  latest position; the others wait until they reach it (up to 5 s) and
-  read their snapshot at exactly that position.
+- One position: a member keeps a snapshot after each of the last 64
+  applied entries, for 2 s at most (`Node::snapshot_at`; first built as
+  one per entry for 5 s, which slowed concurrent writes, see 13.5). The
+  member that splits a read takes its latest position; the others wait
+  until they reach it (up to 5 s) and read their snapshot at exactly that
+  position; one that has moved further on has its part run by the member
+  that splits.
 - The server: a read on a cluster member splits when the plan's
   estimated cost (as `EXPLAIN` shows it) reaches `split_cost` in
   `[cluster]` (200 000 by default), or always with `x-grafeno-split: on`
@@ -2131,7 +2134,7 @@ As built (`crates/grafeno-query/src/split.rs`, `grafeno-cluster`,
   member), streaming rows back as parts finish (parts answer whole), and
   measuring on separate machines.
 
-**13.5 More than one group: namespaces placed on different servers.**
+**13.5 More than one group: namespaces placed on different servers** (done).
 
 - Write throughput is still one leader's. To go beyond it, a cluster can run
   several Raft groups, each owning whole namespaces (multi-Raft), with a
@@ -2143,6 +2146,81 @@ As built (`crates/grafeno-query/src/split.rs`, `grafeno-cluster`,
   owner and merge as in 13.4.
 - Done when: write throughput measured with one, two and three groups, and a
   namespace moved under load without losing or duplicating a write.
+
+As built (`grafeno/src/replication.rs`, `grafeno-server/src/groups.rs`,
+`grafeno-server/src/cluster.rs`):
+
+- Groups: `groups = [{ id = 1, voters = [1, 2, 3] }, …]` in `[cluster]`.
+  Group 0 is the cluster of 13.2, held by every member, with the file
+  `db`; each other group has its own voters, database file
+  (`<db>.group-<id>.redb`), Raft state, snapshots and leader, and its
+  members talk on the same port (`/raft/{id}`). A member runs a full
+  server state per group it holds (writer, change streams, webhooks,
+  background work on that group's leader), sharing keys, limits and
+  metrics.
+- The directory lives in group 0 (state `cluster`/`placement`, replicated
+  as any write); a namespace it does not name is in group 0. Any member
+  takes any request: a layer in front of every route looks the
+  namespace up (`/v1/{ns}/…`, `/v1/namespaces/{ns}`) and hands the request
+  to that group's router, whose own layers forward to that group's
+  leader as in 13.3, or, when this member does not hold the group, to a
+  member that does (once: `x-grafeno-group-hop`). `GET /v1/namespaces`
+  merges the groups this member holds; `GET /v1/cluster/groups` lists the
+  groups with this member's view of each; `GET /v1/cluster/placement` the
+  directory.
+- Copying a namespace, in the engine: `ReadTx::namespace_ops` gives every
+  primary record of a namespace as 13.1's effects, its change log
+  included (`Op::Change`: entries with their sequence numbers and clocks);
+  `WriteTx::import_ops` writes effects copied from another database as
+  this one's own writes (noted for its log, so a group's leader
+  replicates them), running no rule and making no change log entry but
+  the copied ones; `Entry::ops_of` filters a log entry to a namespace. The
+  engine test copies a namespace, catches up with later entries and finds
+  the same namespace, sequence numbers included; the copy's own log
+  replays it onto a third database.
+- Moving (`POST /v1/cluster/placement {namespace, group}`, on group 0's
+  leader, which must hold the source group): the directory notes the
+  move; the target drops what an earlier attempt left; the namespace is
+  copied from a snapshot of the source in writes of 2 000 effects; then
+  the source's log entries after that snapshot, filtered to the
+  namespace, and its change log entries after those copied, in batches,
+  round after round while writes go on, until a round finds fewer than 32
+  entries. The pause: a fence written in the source's own log
+  (`fence_namespace`) makes every later write to the namespace there fail
+  as busy; writes are serialized on a leader, so every write before the
+  fence is in the entries before it, and those are copied; the directory
+  switches; 5 s later the source drops what it held and keeps the fence,
+  so a late write is refused, never lost. Clients retry the busy writes
+  of the pause (with idempotency keys, which move with the namespace).
+  Every write of a move is idempotent, so the mover sends again one that
+  meets a change of leader. A move that fails before the switch lifts the
+  fence and restores the directory.
+- Measured (`groups_bench`, three members on one machine and one disk,
+  50 ms ticks, 24 clients writing one node per request to three
+  namespaces): 109, 153 and 181 writes a second with one, two and three
+  groups (p50 218, 116 and 135 ms): each group commits on its own, but the
+  members share this machine's disk and cores. A namespace of 20 000
+  nodes (41 557 effects) moved in 11 s while a client kept writing to it:
+  2 catch-up rounds, a pause of 39 ms with 3 entries copied in it, 2 busy
+  answers retried, and the 264 writes made during the move all there,
+  once. In the end-to-end test, 290 to 340 writes from three clients
+  during a move, on all three members, each exactly once, and the
+  namespace's change log numbered without a gap.
+- Found on the way: the snapshots 13.4 kept (one per applied entry, for
+  5 s) slowed concurrent writes on a leader from 120 a second to 3 within
+  seconds, as redb keeps the pages every open snapshot sees; members now
+  keep the last 64 positions, for 2 s at most.
+- Not built in this step: exports and `SHOW NAMESPACES` across groups
+  (they cover the group the request reaches; listing merges), backups of
+  more than group 0's file (back up each group's file), groups whose
+  members change at run time (voters come from the configuration), moves
+  run by a member that does not hold the source group, and splitting
+  queries over namespaces of several groups (no GQ query spans
+  namespaces; recall and context read one).
+- Tests: `grafeno/tests/replication.rs` (copy and catch-up, the fence),
+  `grafeno-server/tests/groups.rs` (three processes, two more groups:
+  placement through any member, writes and reads routed, listings merged,
+  a move under three writers checked on every member).
 
 **13.6 Operating a cluster.**
 
@@ -2557,6 +2635,7 @@ spinning disk, on ARM, or for days at a time.
 | Vector search, 1 M vectors in 512 MiB, int8 copies (12.5) | 3.5 to 4.2 ms (4.9 to 5.2 ms before), same resident memory | E2 | `vector_search_int8.csv` |
 | Replication log (13.1) | writes at 80% of the speed with the log on; 568 bytes per record; a replica applies 22 300 records/s | E1-mem | `replication_log.csv` |
 | Raft cluster of three (13.2) | 137 sequential writes/s (618 on one server), p50 7.2 ms; a leader replaced in 0.5 to 0.8 s | E1-disk | `cluster.csv` |
+| Several Raft groups (13.5) | 109, 153 and 181 writes/s with 1, 2 and 3 groups; 20 000 nodes moved under writes in 11 s with a 39 ms pause, no write lost or doubled | E1-disk | `groups.csv`, `namespace_move.csv` |
 | Reads split across members (13.4) | 200 000 people, 3 threads a member: scans 2.1, aggregates 2.9, top-20 3.0, two hops 1.4 times faster with 5 members | E1-disk | `split.csv` |
 | Faults injected under reads and writes (13.3) | 31 759 operations, all linearizable; writes resume 0.4 s (one process) and 0.5 s (real processes) after the leader fails | E1-disk | `faults.csv` |
 
@@ -2594,6 +2673,7 @@ real binary. The ones that carry each guarantee:
 | Raft never loses an acknowledged write and members agree | `grafeno-raft/tests/simulation.rs`, `grafeno-cluster/tests/cluster.rs`, `grafeno-server/tests/cluster.rs` | random schedules of drops, delays, duplicates, partitions, crashes, membership changes and snapshots checked for one leader per term, one entry per index, no lost acknowledged write and convergence; members in one process and three real processes through failover, restart, joining and leaving |
 | Reads and writes stay linearizable through failures | `grafeno-cluster/tests/linearizable.rs`, `grafeno-server/tests/faults.rs`, `grafeno-cluster/src/check.rs`, `clients/typescript/test/cluster.test.ts` | a register written and read by concurrent clients while members are cut off, restarted, compacted and killed, every history checked by a linearizability checker (which rejects the unsafe control); forwarding, read-your-writes and keyed writes across real processes |
 | A read split across members returns one server's rows | `grafeno-query/tests/common/mod.rs` (used by `conformance.rs`, `planner.rs`, `cypher.rs`, `queries.rs`, `traversal.rs`, `batch.rs`), `grafeno-server/tests/split.rs`, `aggregate.rs` tests | every read of those suites that can be split, whole against 2, 3 and 5 parts through JSON, row order included; exact sums independent of order; three processes, with a member down |
+| A namespace moves between groups without losing or doubling a write | `grafeno/tests/replication.rs` (copy, catch-up, fence), `grafeno-server/tests/groups.rs` | a namespace copied and caught up equals the source, change log numbers included; a fenced namespace refuses writes; three processes with two more groups, writes routed through any member, a move under three writers retrying busy answers, every acknowledged write found once on every member |
 | Costly queries stop | `grafeno-query/tests/adversarial.rs` | 32 hostile queries within their limits; nesting just under the limit runs on a 2 MiB stack; `max_cost` refuses; procedure rows count against `max_memory` |
 | Nothing a client sends crashes the parser | `grafeno-query/tests/fuzz.rs` | proptest: random tokens, valid queries with random edits, arbitrary text, through the lexer, parser, planner, `EXPLAIN` and executor |
 | The API keeps its contract | `grafeno-server/tests/http.rs`, `mcp.rs`, `shell.rs`, `clients/typescript/test` | every endpoint and MCP tool, limits, conflicts (409 with details), metrics, the CLI shell, and the client against the real binary |
@@ -2623,6 +2703,7 @@ cargo test --release -p grafeno-raft --test simulation   # RAFT_SEEDS=3000 for m
 cargo run --release -p grafeno-cluster --example cluster_bench -- 500
 FAULT_SECONDS=30 cargo test --release -p grafeno-cluster --test linearizable -- --nocapture
 cargo run --release -p grafeno-server --example split_bench -- 200000 3 5   # build grafeno first
+cargo run --release -p grafeno-server --example groups_bench -- 10 8 20000
 FAULT_SECONDS=40 cargo test --release -p grafeno-server --test faults -- --nocapture
 cargo run --release -p grafeno --example changes_bench -- 100000
 cargo run --release -p grafeno-server --example events_bench -- 100000

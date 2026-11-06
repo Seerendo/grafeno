@@ -681,6 +681,27 @@ entry is the lever (not built yet). With the leader cut off, another
 member is elected and commits a write in 510 to 831 ms (median 595, five
 runs) with 50 ms ticks (election timeouts of 0.5 to 1 s).
 
+## Several Raft groups (`crates/grafeno-server/examples/groups_bench.rs`)
+
+Three members on this laptop (one NVMe disk), 50 ms ticks, immediate
+durability; 24 clients, 8 for each of three namespaces, writing one node
+per request through all members for 10 s, 2026-11-06. With one group the
+three namespaces share it; with three, each has its own.
+
+| Groups | Writes/s | p50 | p99 |
+| --- | --- | --- | --- |
+| 1 | 109 | 218 ms | 907 ms |
+| 2 | 153 | 116 ms | 227 ms |
+| 3 | 181 | 135 ms | 156 ms |
+
+A group commits one write at a time (each waits for a majority's fsync
+and its own apply), so more groups commit more at once; here they share
+one disk and eight cores, which caps the gain. Moving a namespace of
+20 000 nodes (41 557 effects) to another group while a client writes to
+it took 11 s, with 2 catch-up rounds and a pause of 39 ms (3 entries
+copied under the fence); the client's 264 writes were all there, once,
+after retrying 2 busy answers.
+
 ## Reads split across members (`crates/grafeno-server/examples/split_bench.rs`)
 
 200 000 people (name, age, score, city), each working at one of 1 000

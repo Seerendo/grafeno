@@ -203,7 +203,28 @@ by default, as `EXPLAIN` shows it) is split across the members: each
 runs a share at the same position, and the member asked merges the
 parts into the same rows one server returns. `x-grafeno-split: on`
 splits a read whenever its shape allows, `off` never. Members that
-may take parts need `api` in `peers`. `grafeno cluster status --url http://10.0.0.1:7810 --token …`
+may take parts need `api` in `peers`.
+
+Writes of one group go through one leader at a time. To write more, run
+more groups, each with its own leader and database file
+(`<db>.group-<id>.redb`) on its voters:
+
+```toml
+[cluster]
+# … as above, then:
+groups = [{ id = 1, voters = [1, 2, 3] }, { id = 2, voters = [1, 2, 3] }]
+```
+
+Namespaces live in group 0 until placed elsewhere:
+
+```bash
+curl -X POST http://10.0.0.1:7810/v1/cluster/placement -H "Authorization: Bearer …" -H 'content-type: application/json' -d '{"namespace": "vault", "group": 1}'
+```
+
+A namespace that already has data moves while it keeps serving: its
+writes pause for tens of milliseconds (they answer busy; clients retry)
+and none is lost. Any member takes requests for any namespace. Back up
+each group's file. `grafeno cluster status --url http://10.0.0.1:7810 --token …`
 shows a member's view; `grafeno cluster voters 1 2 3 4` (on the leader)
 changes the members, the new one listed in every member's `peers` and
 started with `voters = []`; `grafeno cluster compact` snapshots a member's
