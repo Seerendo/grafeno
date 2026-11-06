@@ -440,8 +440,18 @@ pub(crate) fn plan_anchor<'q>(
     value_of: ValueOf,
 ) -> (usize, Source<'q>, f64) {
     let nodes = pattern.nodes();
+    // A node whose properties need a variable not bound yet (`(q {team:
+    // p.team})`) cannot start the pattern, unless no node can.
+    let ready = |node: &NodePattern| {
+        node.var.as_deref().is_some_and(is_bound)
+            || node.props.iter().all(|(_, expr)| evaluable(expr, is_bound))
+    };
+    let any_ready = nodes.iter().any(|node| ready(node));
     let mut best: Option<(usize, Source<'q>, f64)> = None;
     for (index, node) in nodes.iter().enumerate() {
+        if any_ready && !ready(node) {
+            continue;
+        }
         let source = source_for(node, is_bound, conditions, info, value_of);
         let cost = pattern_cost(pattern, &nodes, index, &source, is_bound, info);
         let wins = best.as_ref().is_none_or(|(_, current, current_cost)| {

@@ -671,6 +671,12 @@ DROP CONSTRAINT Person_email_unique IF EXISTS;
   free runs on its own.
 - `MATCH … RETURN … LIMIT n` without `ORDER BY`, `DISTINCT` or aggregates
   stops after the rows it needs.
+- A match grows from up to 64 starts at a time, one step at a time, and
+  reads each node, edge list and edge record once for all the branches
+  that reach it (so `PROFILE` counts fewer reads than rows); a step with
+  more than 4 096 partial matches goes on in slices, spread over the
+  shared threads in a read-only query. Rows come out in the same order as
+  one start at a time. With a `LIMIT` right after, starts go one at a time.
 - A `MATCH` followed by a `RETURN` or `WITH` with aggregates folds its
   rows into the groups as it finds them, a batch of up to 1 024 at a time,
   instead of holding them all: `count`, `sum`, `avg`, `min` and `max` keep

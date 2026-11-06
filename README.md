@@ -163,8 +163,12 @@ measured speed, memory and limits, with charts, in
 - **Phase 12.3, batched execution:** a match feeds its aggregates in
   batches turned into columns, folding into one accumulator per group
   instead of holding rows (2.3 to 2.9 times faster grouped; millions of
-  matches counted within the limits). Next: batched and parallel traversal
-  (12.4), compact storage and int8 vectors (12.5).
+  matches counted within the limits).
+- **Phase 12.4, batched and parallel traversal:** patterns grow from batches
+  of starts one step at a time, reading each node, edge list and record
+  once for every branch, with large frontiers spread over the cores (two
+  hops from every company 9.5 → 2.9 s). Next: compact storage and int8
+  vectors (12.5).
 
 ## Installing
 

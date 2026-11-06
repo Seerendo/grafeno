@@ -19,8 +19,6 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use grafeno::NodeId;
-
 use crate::QueryError;
 use crate::eval::Context;
 
@@ -114,19 +112,21 @@ impl<T> Delivery<'_, T> {
     }
 }
 
-/// Runs `work` on chunks of `ids` on this thread and the workers it can
+/// Runs `work` on chunks of `items` (candidate ids, or the partial
+/// matches of a large frontier) on this thread and the workers it can
 /// get, and hands each chunk's result to `take` in chunk order, as soon as
 /// the chunks before it are done (so results do not pile up). The first
 /// error, in chunk order, stops the rest.
-pub(crate) fn map_chunks<T, F>(
+pub(crate) fn map_chunks<I, T, F>(
     ctx: &Context,
-    ids: &[NodeId],
+    ids: &[I],
     work: F,
     take: &mut (dyn FnMut(T) -> Result<(), QueryError> + Send),
 ) -> Result<(), QueryError>
 where
+    I: Sync,
     T: Send,
-    F: Fn(&Context, &[NodeId]) -> Result<T, QueryError> + Sync,
+    F: Fn(&Context, &[I]) -> Result<T, QueryError> + Sync,
 {
     let wanted = (ids.len() / MIN_CHUNK).saturating_sub(1);
     let reserved = Reserved(if ids.len() >= MIN_CANDIDATES {
@@ -144,7 +144,7 @@ where
     let threads = reserved.0 + 1;
     // Several chunks per thread, so a slow chunk does not hold the rest.
     let size = ids.len().div_ceil(threads * 8).max(MIN_CHUNK);
-    let chunks: Vec<&[NodeId]> = ids.chunks(size).collect();
+    let chunks: Vec<&[I]> = ids.chunks(size).collect();
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
     let delivery = Mutex::new(Delivery {

@@ -54,6 +54,7 @@ mod plan;
 mod procedures;
 mod temporal;
 mod textfns;
+mod traverse;
 mod value;
 
 use std::fmt;

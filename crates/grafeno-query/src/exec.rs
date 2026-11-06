@@ -1,6 +1,6 @@
 //! Query execution: a pipeline of clauses over rows of variables.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -23,6 +23,7 @@ use crate::plan::{
     seek_ranges,
 };
 use crate::procedures;
+use crate::traverse::{ANCHORS, Caches, Start};
 use crate::value::{Value, equals, sort_order};
 
 /// Variable-length paths (`*`) stop at this many hops.
@@ -1313,52 +1314,6 @@ pub(crate) fn exists(
 
 // ---------------------------------------------------------------- matching
 
-#[derive(Clone)]
-struct Partial {
-    row: Row,
-    /// Edges used by this match: an edge appears at most once per pattern.
-    used: Vec<EdgeId>,
-    /// The node bound at each position of the pattern.
-    nodes: Vec<Option<NodeId>>,
-    /// The edges of each step, from its left node to its right one (kept
-    /// only when the pattern has a path variable).
-    steps: Vec<Vec<EdgeId>>,
-}
-
-/// The path a match went through: nodes and edges in written order.
-fn build_path(
-    ctx: &Context,
-    nodes: &[Option<NodeId>],
-    steps: &[Vec<EdgeId>],
-) -> Result<Value, QueryError> {
-    let start = nodes[0].expect("every position is bound after a match");
-    let node = |id: NodeId| -> Result<Arc<Node>, QueryError> {
-        ctx.node(id)?
-            .map(Arc::new)
-            .ok_or_else(|| QueryError::runtime(format!("node {id} disappeared during the query")))
-    };
-    let mut path = crate::value::Path {
-        nodes: vec![node(start)?],
-        edges: Vec::new(),
-    };
-    let mut current = start;
-    for step in steps {
-        for &edge_id in step {
-            let edge = ctx
-                .edge(edge_id)?
-                .ok_or_else(|| QueryError::runtime(format!("edge {edge_id} disappeared")))?;
-            current = if edge.from == current {
-                edge.to
-            } else {
-                edge.from
-            };
-            path.edges.push(Arc::new(edge));
-            path.nodes.push(node(current)?);
-        }
-    }
-    Ok(Value::Path(Arc::new(path)))
-}
-
 /// What a match may use besides the pattern: the `WHERE` conditions (to
 /// pick an index and to drop anchors early), the filter for complete rows,
 /// and how many rows are needed.
@@ -1449,6 +1404,8 @@ fn match_pattern_into<T: Send>(
             early: &early,
             filter: matcher.filter,
         };
+        let ops = start.ops(ctx);
+        let caches = Caches::new(ops.len());
         if let Some(ids) = parallel_candidates(ctx, &source, &row, matcher)? {
             if !out.is_empty() {
                 take((emit.prepare)(ctx, std::mem::take(&mut out))?)?;
@@ -1456,16 +1413,20 @@ fn match_pattern_into<T: Send>(
             crate::parallel::map_chunks(
                 ctx,
                 &ids,
-                |ctx, chunk| -> Result<T, QueryError> {
+                |ctx, chunk: &[NodeId]| -> Result<T, QueryError> {
                     let mut rows = Vec::new();
-                    for id in chunk {
-                        let Some(node) = ctx.node(*id)? else {
-                            continue;
-                        };
-                        let node = Arc::new(node);
-                        if node_fits(ctx, &node, nodes[anchor], &row)? {
-                            start.extend(ctx, &row, node, &mut rows, None)?;
+                    for ids in chunk.chunks(ANCHORS) {
+                        let mut anchors = Vec::with_capacity(ids.len());
+                        for id in ids {
+                            let Some(node) = ctx.node(*id)? else {
+                                continue;
+                            };
+                            let node = Arc::new(node);
+                            if node_fits(ctx, &node, nodes[anchor], &row)? {
+                                anchors.push(node);
+                            }
                         }
+                        start.extend_batch(ctx, &row, &ops, anchors, &mut rows, None, &caches)?;
                     }
                     ctx.budget.rows(rows.len())?;
                     (emit.prepare)(ctx, rows)
@@ -1475,10 +1436,15 @@ fn match_pattern_into<T: Send>(
             continue;
         }
         let mut cursor = None;
+        // With a row cap, one anchor at a time, so that no more is read
+        // than the rows need.
+        let batch = if matcher.cap.is_some() { 1 } else { ANCHORS };
         loop {
             let (page, next) = candidates(ctx, nodes[anchor], &source, &row, cursor)?;
-            for node in page {
-                if start.extend(ctx, &row, node, &mut out, matcher.cap)? {
+            let mut page = page.into_iter().peekable();
+            while page.peek().is_some() {
+                let anchors: Vec<Arc<Node>> = page.by_ref().take(batch).collect();
+                if start.extend_batch(ctx, &row, &ops, anchors, &mut out, matcher.cap, &caches)? {
                     return take((emit.prepare)(ctx, out)?);
                 }
                 if matcher.cap.is_none() && out.len() >= crate::aggregate::BATCH {
@@ -1496,102 +1462,6 @@ fn match_pattern_into<T: Send>(
         take((emit.prepare)(ctx, out)?)?;
     }
     Ok(())
-}
-
-/// A pattern bound at its anchor, ready to grow from each candidate.
-struct Start<'s, 'q> {
-    pattern: &'q Pattern,
-    nodes: &'s [&'q NodePattern],
-    anchor: usize,
-    /// Conditions that need only the anchor (and earlier variables).
-    early: &'s [&'q Expr],
-    /// The filter for complete rows.
-    filter: Option<&'q Expr>,
-}
-
-impl Start<'_, '_> {
-    /// Every match of the pattern with its anchor at `node`, appended to
-    /// `out`; whether `out` reached `cap`.
-    fn extend(
-        &self,
-        ctx: &Context,
-        row: &Row,
-        node: Arc<Node>,
-        out: &mut Vec<Row>,
-        cap: Option<usize>,
-    ) -> Result<bool, QueryError> {
-        let (pattern, nodes, anchor) = (self.pattern, self.nodes, self.anchor);
-        let mut start = Partial {
-            row: row.clone(),
-            used: Vec::new(),
-            nodes: vec![None; nodes.len()],
-            steps: vec![Vec::new(); pattern.steps.len()],
-        };
-        start.nodes[anchor] = Some(node.id);
-        if let Some(var) = nodes[anchor].var.as_deref() {
-            start.row.insert(var.to_owned(), Value::Node(node));
-        }
-        if !self.early.is_empty() && !all_true(ctx, self.early, &start.row)? {
-            return Ok(false);
-        }
-        let mut states = vec![start];
-        // Right of the anchor, in the written direction…
-        for step in anchor..pattern.steps.len() {
-            let (rel, target) = &pattern.steps[step];
-            let mut next = Vec::new();
-            for state in states {
-                let from = state.nodes[step].expect("bound while extending");
-                next.extend(expand(
-                    ctx,
-                    state,
-                    from,
-                    rel,
-                    rel.direction,
-                    target,
-                    step + 1,
-                    (step, false),
-                )?);
-            }
-            ctx.budget.rows(next.len())?;
-            states = next;
-        }
-        // …and left of it, against the written direction.
-        for step in (0..anchor).rev() {
-            let (rel, _) = &pattern.steps[step];
-            let mut next = Vec::new();
-            for state in states {
-                let from = state.nodes[step + 1].expect("bound while extending");
-                next.extend(expand(
-                    ctx,
-                    state,
-                    from,
-                    rel,
-                    reverse(rel.direction),
-                    nodes[step],
-                    step,
-                    (step, true),
-                )?);
-            }
-            ctx.budget.rows(next.len())?;
-            states = next;
-        }
-        for mut state in states {
-            if let Some(var) = &pattern.path {
-                let path = build_path(ctx, &state.nodes, &state.steps)?;
-                state.row.insert(var.clone(), path);
-            }
-            if let Some(filter) = self.filter
-                && truth(&eval(ctx, filter, Scope::Row(&state.row))?)? != Some(true)
-            {
-                continue;
-            }
-            out.push(state.row);
-            if cap.is_some_and(|cap| out.len() >= cap) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
 }
 
 /// The candidates of a start worth splitting across threads: a read-only
@@ -1638,7 +1508,7 @@ fn parallel_candidates(
     Ok(Some(ids))
 }
 
-fn all_true(ctx: &Context, conditions: &[&Expr], row: &Row) -> Result<bool, QueryError> {
+pub(crate) fn all_true(ctx: &Context, conditions: &[&Expr], row: &Row) -> Result<bool, QueryError> {
     for condition in conditions {
         if truth(&eval(ctx, condition, Scope::Row(row))?)? != Some(true) {
             return Ok(false);
@@ -1647,7 +1517,7 @@ fn all_true(ctx: &Context, conditions: &[&Expr], row: &Row) -> Result<bool, Quer
     Ok(true)
 }
 
-fn reverse(direction: Direction) -> Direction {
+pub(crate) fn reverse(direction: Direction) -> Direction {
     match direction {
         Direction::Out => Direction::In,
         Direction::In => Direction::Out,
@@ -1770,7 +1640,7 @@ pub(crate) fn uuid_from_text(text: &str) -> Option<NodeId> {
     u128::from_str_radix(&hex, 16).ok().map(NodeId::from_u128)
 }
 
-fn props_fit(
+pub(crate) fn props_fit(
     ctx: &Context,
     target: &Value,
     props: &[(Key, Expr)],
@@ -1786,7 +1656,7 @@ fn props_fit(
     Ok(true)
 }
 
-fn node_fits(
+pub(crate) fn node_fits(
     ctx: &Context,
     node: &Arc<Node>,
     pattern: &NodePattern,
@@ -1796,157 +1666,6 @@ fn node_fits(
         return Ok(false);
     }
     props_fit(ctx, &Value::Node(node.clone()), &pattern.props, row)
-}
-
-/// The node at `id` if it fits `pattern` (and the row's binding of its
-/// variable, if any).
-fn target_node(
-    ctx: &Context,
-    id: NodeId,
-    pattern: &NodePattern,
-    row: &Row,
-) -> Result<Option<Arc<Node>>, QueryError> {
-    if let Some(var) = &pattern.var
-        && let Some(bound) = row.get(var)
-    {
-        return match bound {
-            Value::Node(node) if node.id == id && node_fits(ctx, node, pattern, row)? => {
-                Ok(Some(node.clone()))
-            }
-            _ => Ok(None),
-        };
-    }
-    let Some(node) = ctx.node(id)? else {
-        return Ok(None);
-    };
-    let node = Arc::new(node);
-    Ok(node_fits(ctx, &node, pattern, row)?.then_some(node))
-}
-
-/// Extends a partial match by one step of the pattern. `(step, leftwards)`
-/// says which step it is and whether it is walked against the written
-/// order (from its right node), so paths keep the written order.
-#[allow(clippy::too_many_arguments)]
-fn expand(
-    ctx: &Context,
-    state: Partial,
-    from: NodeId,
-    rel: &RelPattern,
-    direction: Direction,
-    target: &NodePattern,
-    target_index: usize,
-    (step, leftwards): (usize, bool),
-) -> Result<Vec<Partial>, QueryError> {
-    let mut filter = ctx.edges.clone();
-    for label in &rel.labels {
-        filter = filter.label(label);
-    }
-    let mut out = Vec::new();
-    let Some((min, max)) = rel.length else {
-        for (edge_id, other) in ctx.neighbor_ids(from, direction, &filter)? {
-            if state.used.contains(&edge_id) {
-                continue;
-            }
-            let edge = if rel.var.is_some() || !rel.props.is_empty() {
-                let Some(edge) = ctx.edge(edge_id)? else {
-                    continue;
-                };
-                let edge = Arc::new(edge);
-                if !props_fit(ctx, &Value::Edge(edge.clone()), &rel.props, &state.row)? {
-                    continue;
-                }
-                if let Some(var) = &rel.var
-                    && let Some(bound) = state.row.get(var)
-                    && !matches!(bound, Value::Edge(existing) if existing.id == edge_id)
-                {
-                    continue;
-                }
-                Some(edge)
-            } else {
-                None
-            };
-            let Some(node) = target_node(ctx, other, target, &state.row)? else {
-                continue;
-            };
-            let mut next = state.clone();
-            next.used.push(edge_id);
-            next.steps[step] = vec![edge_id];
-            next.nodes[target_index] = Some(other);
-            if let Some(var) = &target.var {
-                next.row.insert(var.clone(), Value::Node(node));
-            }
-            if let (Some(var), Some(edge)) = (&rel.var, edge) {
-                next.row.insert(var.clone(), Value::Edge(edge));
-            }
-            out.push(next);
-        }
-        return Ok(out);
-    };
-
-    if !rel.props.is_empty() {
-        return Err(QueryError::runtime(
-            "properties on a variable-length edge pattern are not supported",
-        ));
-    }
-    let max = max.unwrap_or(MAX_PATH_LENGTH).min(MAX_PATH_LENGTH);
-    // Breadth-first: each node is reached once, at its shortest distance.
-    let mut parent: HashMap<NodeId, (NodeId, EdgeId)> = HashMap::new();
-    let mut distance = HashMap::from([(from, 0u32)]);
-    let mut queue = VecDeque::from([from]);
-    let mut reached = Vec::new();
-    if min == 0 {
-        reached.push(from);
-    }
-    while let Some(current) = queue.pop_front() {
-        let depth = distance[&current];
-        if depth == max {
-            continue;
-        }
-        for (edge_id, other) in ctx.neighbor_ids(current, direction, &filter)? {
-            if distance.contains_key(&other) {
-                continue;
-            }
-            distance.insert(other, depth + 1);
-            parent.insert(other, (current, edge_id));
-            if depth + 1 >= min {
-                reached.push(other);
-            }
-            queue.push_back(other);
-        }
-    }
-    for end in reached {
-        let Some(node) = target_node(ctx, end, target, &state.row)? else {
-            continue;
-        };
-        let mut next = state.clone();
-        next.nodes[target_index] = Some(end);
-        // The edges from `from` to `end`.
-        let mut ids = Vec::new();
-        let mut current = end;
-        while let Some(&(previous, edge_id)) = parent.get(&current) {
-            ids.push(edge_id);
-            current = previous;
-        }
-        ids.reverse();
-        if let Some(var) = &rel.var {
-            let mut edges = Vec::new();
-            for &edge_id in &ids {
-                if let Some(edge) = ctx.edge(edge_id)? {
-                    edges.push(Value::Edge(Arc::new(edge)));
-                }
-            }
-            next.row.insert(var.clone(), Value::List(edges));
-        }
-        if leftwards {
-            ids.reverse();
-        }
-        next.steps[step] = ids;
-        if let Some(var) = &target.var {
-            next.row.insert(var.clone(), Value::Node(node));
-        }
-        out.push(next);
-    }
-    Ok(out)
 }
 
 // ---------------------------------------------------------------- writes

@@ -43,6 +43,7 @@ build unless the file says otherwise; on E1, runs vary by about ±20%.
 | `parallel_scan.csv` | A scan of 200 000 people on one thread and on 16, before and after 12.2 | `planner_bench.rs` | E1-mem | 2026-11-05 | bars |
 | `read_concurrency.csv` | Read queries per second and latency with 1 to 16 readers, without and with a busy writer, before and after 12.2 (best of three runs) | `planner_bench.rs readers` | E1-mem | 2026-11-05 | queries per second against readers, a line per build and writer |
 | `batch_aggregation.csv` | Scans, filters and aggregates over 200 000 people, before and after 12.3 (best of two runs each) | `crates/grafeno-query/examples/batch_bench.rs` | E1-mem | 2026-11-05 | paired bars, log scale |
+| `traversal.csv` | Traversals from many starts (two hops, friends of friends, variable length), time and records read, before and after 12.4 | `crates/grafeno-query/examples/traversal_bench.rs` | E1-mem | 2026-11-05 | paired bars, log scale |
 
 `python docs/charts/build.py` draws the charts of
 [performance](../performance.md) from these files (light and dark SVG in

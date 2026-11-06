@@ -383,7 +383,7 @@ without a current user. They remain possible for embedded use.
     extraction and reconciliation of entities, automatic invalidation of
     contradicting facts, hierarchical community summaries, continuous
     ingestion and events.
-12. **Compatibility and speed** (in progress, in five steps): wider
+12. **Compatibility and speed** (in progress, in five steps; 12.1 to 12.4 done): wider
     Cypher and tool compatibility, query optimization under concurrency,
     batched execution, batched and parallel traversal, compact storage and
     vector quantization.
@@ -1545,9 +1545,55 @@ As built:
   54 → 23 ms; two hops counting 1 990 000 rows 6 309 → 4 825 ms, and with
   the standard limits it now completes instead of failing on `max_rows`.
 
-**12.4 Batched and parallel traversal.**
+**12.4 Batched and parallel traversal** (done).
 
-Researched with 12.3, not built. Today a match grows from one anchor at a
+As built:
+
+- `crates/grafeno-query/src/traverse.rs`. A pattern grows from batches of
+  64 anchors (one at a time under a row cap, so a `LIMIT` reads no more
+  than it needs), step by step: the partial matches of a batch are a
+  frontier, and `step` reads the distinct nodes it stands on once, sorted
+  by id, then extends every partial match in order. What a step reads is
+  kept for the rest of the traversal from that input row: each node's
+  edges for that step (already filtered by label, direction and time),
+  each target node decoded once, each edge record once, each node's reach
+  for a variable-length step (a breadth-first search per source, run once
+  however many partial matches stand there).
+- The caches are shared by every thread working on the traversal: maps in
+  32 shards behind read-write locks, bounded (2^20 edges listed per step,
+  2^18 nodes and edge records) and emptied past the bound; a read that
+  misses after that reads again. At first each chunk of a parallel scan had
+  caches of its own, and nothing was shared: 512 consecutive uids work at
+  512 different companies. Shared, the reads of the two-hop count fell from
+  4.03 M to 1.12 M.
+- Parallel traversal: a frontier over 4 096 partial matches with steps
+  left goes on in slices of that size; in a read-only query without a row
+  cap, `parallel::map_chunks` (now generic over what it splits) spreads the
+  slices over the shared threads and joins their rows in slice order. This
+  is what lets one company, or a thousand, with hundreds of employees each
+  use every core, where 12.2 only split large sets of anchors.
+- Rows and their order equal growing one anchor at a time: each partial
+  match's branches stay together and in order, and slices are joined in
+  order. `tests/traversal.rs` checks this against the row-capped path
+  (which grows one anchor at a time) on eight pattern shapes, and parallel
+  against one thread.
+- Found on the way, in 12.2's planner: a node whose inline properties read
+  another variable of the pattern (`(q {team: p.team})`) could be chosen to
+  start it, and failed with an unknown variable. Such nodes no longer start
+  a pattern while another node can.
+- Not built from the plan: partial matches are still row maps, not
+  columns (rows built only at the end), and variable-length steps search
+  per source rather than 64 sources per machine word. Rows returned whole
+  share nothing between branches and gain nothing (1.5 s either way for
+  199 000 rows); the gains are where branches meet.
+- Measured (`examples/traversal_bench.rs`, 200 000 people, 1 000 companies,
+  5 acquaintances each, against 12.3 in the same session, best of several
+  runs): colleagues of 10 000 people counted 5.6 → 2.7 s (reads 4.03 M →
+  1.12 M); two hops from every company grouped 9.5 → 2.9 s; reach within 3
+  hops of 2 000 people 2.3 → 2.0 s; friends of friends of 20 000 people
+  unchanged at 1.1 to 1.2 s, though with 42% fewer reads.
+
+The research that led here: today a match grows from one anchor at a
 time: each candidate expands step by step (its partial matches breadth
 first, but alone), so 200 000 people who work at 1 000 companies read
 those companies' adjacency 200 000 times, decode each company again for
@@ -1676,6 +1722,7 @@ spinning disk, on ARM, or for days at a time.
 | Queries a planner without statistics got wrong (200 000 people) | 355 ms → 11 ms, 1.8 s → 2.7 ms, 2.6 s → 1.8 ms; a scan 4.4 times faster on 16 threads | E1-mem | `planner_plans.csv`, `parallel_scan.csv` |
 | Read queries with 16 readers and a busy writer | 9 200 a second alone, 8 000 with 10 500 writes a second; p99 under 9 ms | E1-mem | `read_concurrency.csv` |
 | Aggregates over 200 000 rows, folded as they come (12.3) | 2.3 to 2.9 times faster grouped; 2 M rows counted within the standard limits (failed before) | E1-mem | `batch_aggregation.csv` |
+| Traversals from many starts, batched and parallel (12.4) | two hops from 10 000 people 5.6 → 2.7 s, from every company 9.5 → 2.9 s; reads down 30 to 72% | E1-mem | `traversal.csv` |
 
 ### Guarantees and the tests that hold them
 
@@ -1705,6 +1752,7 @@ real binary. The ones that carry each guarantee:
 | GQ follows Cypher | `grafeno-query/tests/cypher.rs`, `queries.rs`, `statistics.rs`, `indexes.rs`, `algorithms.rs` | clauses, functions, aggregates, indexes, planner choices and algorithms on known graphs |
 | The planner estimates from the data, and parallel scans change nothing | `grafeno-query/tests/planner.rs` | statistics against known distributions and degrees; starts chosen by value distribution, parameters and pattern cost; join order; statistics rebuilt after drift and index changes; a cached statement after its index is dropped; parallel rows and order equal one thread's, and limits hold across threads |
 | Folded aggregates equal row-at-a-time ones and hold no rows | `grafeno-query/tests/batch.rs` | every aggregate with DISTINCT, nesting, ties, empty groups, overflow and duration sums; 90 000 rows counted under a `max_rows` of 2 000; parallel folds equal to one thread's |
+| Batched and parallel traversal give the same rows in the same order | `grafeno-query/tests/traversal.rs` | eight pattern shapes (both directions from a middle anchor, edge variables and properties, targets filtered by earlier nodes, edge uniqueness, variable length with paths, bound nodes, row filters) against one anchor at a time; a hub's 12 000 two-hop rows on one and four threads; shared nodes read once; `max_rows` across slices |
 | Costly queries stop | `grafeno-query/tests/adversarial.rs` | 32 hostile queries within their limits; nesting just under the limit runs on a 2 MiB stack; `max_cost` refuses; procedure rows count against `max_memory` |
 | Nothing a client sends crashes the parser | `grafeno-query/tests/fuzz.rs` | proptest: random tokens, valid queries with random edits, arbitrary text, through the lexer, parser, planner, `EXPLAIN` and executor |
 | The API keeps its contract | `grafeno-server/tests/http.rs`, `mcp.rs`, `shell.rs`, `clients/typescript/test` | every endpoint and MCP tool, limits, conflicts (409 with details), metrics, the CLI shell, and the client against the real binary |
@@ -1727,6 +1775,7 @@ cargo run --release -p grafeno-memory --example community_bench -- 1000 50
 cargo run --release -p grafeno --example interchange_bench -- 100000
 cargo run --release -p grafeno-query --example planner_bench -- 200000
 cargo run --release -p grafeno-query --example batch_bench -- 200000
+cargo run --release -p grafeno-query --example traversal_bench -- 200000
 cargo run --release -p grafeno --example changes_bench -- 100000
 cargo run --release -p grafeno-server --example events_bench -- 100000
 cargo test --release -p grafeno-query --test adversarial -- --nocapture
@@ -1747,8 +1796,8 @@ docker run --rm --memory 512m --memory-swap 512m -e CACHE_MB=128 -e PROJECTION_C
 
 - Counting every edge of 10 M in GQ took longer than the 30 s limit.
   Since 12.3 aggregates fold as rows come and hold none, but each edge is
-  still matched one at a time; this was not measured again in E2 (12.4's
-  batched traversal is the lever).
+  each edge was matched one at a time; 12.4 batches the traversal and
+  shares its reads. Not measured again in E2.
 - Vector inserts slow down as the index grows: each 100 000 took 96 s at
   first and 809 s at the millionth (E2); a vector cache that keeps the
   most used entries, larger transactions and quantization (12.3) are the

@@ -588,6 +588,30 @@ group's rows again. Now rows fold into one accumulator per group as the
 match makes them. The two-hop count gains least: its time is the
 expansion, one anchor at a time, which 12.4 batches.
 
+## Batched and parallel traversal (`crates/grafeno-query/examples/traversal_bench.rs`)
+
+200 000 `:Person` nodes working at 1 000 companies (200 each), each knowing
+5 people at random; in memory, release build, 2026-11-05. "Before" is 12.3
+built in the same session, alternating; best of four runs before and two
+after. Reads are the records counted by `PROFILE`.
+
+| Query | Before 12.4 | After | Reads before → after |
+| --- | --- | --- | --- |
+| colleagues of 10 000 people (`p.uid < 10000`), 1 990 000 rows counted | 5 590 ms | 2 705 ms | 4 030 002 → 1 115 305 |
+| two hops from every company (`(c)<-[:works_at]-(p)-[:knows]->(f)`), grouped | 9 486 ms | 2 884 ms | 2 401 000 → 1 401 959 |
+| friends of friends of 20 000 people, distinct | 1 139 ms | 1 180 ms | 1 240 002 → 714 714 |
+| reach within 3 hops (`*1..3`) of 2 000 people | 2 328 ms | 2 017 ms | 623 873 → 459 521 |
+| colleagues of 1 000 people returned whole, 199 000 rows | 1 468 ms | 1 509 ms | 403 002 → 403 002 |
+
+Before, every partial match read its node's edges and decoded each target
+again: a company's 200 employees were read once per colleague who reached
+it. Now each is read once per traversal, and a frontier of thousands of
+partial matches is split across threads (the company query, whose 1 000
+anchors were too few for 12.2's parallel scans). Friends of friends reads
+42% less but takes as long: its 20 000 anchors were already split across
+threads, and its time is building and comparing rows. Rows returned whole
+share nothing.
+
 ## Remaining limits
 
 - **Vector search reads each visited vector from redb** (about 0.4 µs per

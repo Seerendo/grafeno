@@ -568,6 +568,14 @@ def main():
           ' ms', log=True, series=['before 12.3', 'after 12.3'],
           note='With the standard limits, the two-hop count failed before 12.3 (over max_rows). Data: docs/data/batch_aggregation.csv')
 
+    # Batched and parallel traversal.
+    rows = read('traversal.csv')
+    hbars('traversal', 'Traversals from many starts, before and after batching',
+          'Milliseconds, log scale; 200 000 people, 1 000 companies, 5 acquaintances each; best of several runs. E1-mem.',
+          [(r['query'], [num(r['before_ms']), num(r['after_ms'])], None) for r in rows],
+          ' ms', log=True, series=['before 12.4', 'after 12.4'],
+          note='Rows returned whole share nothing between branches and gain nothing. Data: docs/data/traversal.csv')
+
     print('charts written to', OUT)
 
 

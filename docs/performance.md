@@ -29,6 +29,7 @@ test environments").
 | Planning by value distribution (200 000 people) | 355 ms → 11 ms where the rare condition was written second |
 | Reads with 16 readers and a busy writer | 8 000 queries/s, p99 under 9 ms |
 | Grouping 200 000 rows | 233 ms (609 ms before 12.3); 2 million matches counted within the limits |
+| Two hops from 10 000 starts, 2 million matches | 2.7 s (5.6 s before 12.4), 72% fewer reads |
 
 ## Test environments
 
@@ -215,6 +216,18 @@ A `MATCH` followed by aggregates folds its rows into the groups as it finds
 them, a batch at a time, instead of holding every row: grouping 200 000
 people is 2.6 times faster, and counting two million matches fits the
 server's limits.
+
+## Traversals from many starts
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/charts/traversal-dark.svg">
+  <img alt="Two hops from 10 000 people 5.6 s to 2.7 s, two hops from every company 9.5 s to 2.9 s, reach within 3 hops 2.3 s to 2.0 s" src="assets/charts/traversal-light.svg">
+</picture>
+
+A pattern grows from many starts at once, one step at a time, and every
+node, edge list and record it reads is read once for all the branches that
+reach it; large frontiers spread over the cores. Two hops from every
+company go from 9.5 s to 2.9 s. The rows are the same, in the same order.
 
 ## Moving graphs in and out
 

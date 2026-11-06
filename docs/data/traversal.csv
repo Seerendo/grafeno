@@ -1,0 +1,6 @@
+query,before_ms,after_ms,before_reads,after_reads,rows
+"two hops: colleagues of 10 000 people, counted",5590,2705,4030002,1115305,1990000
+"two hops from every company, grouped",9486,2884,2401000,1401959,1000
+"friends of friends of 20 000 people, distinct",1139,1180,1240002,714714,172112
+"reach within 3 hops of 2 000 people",2328,2017,623873,459521,309876
+"colleagues of 1 000 people returned whole",1468,1509,403002,403002,199000
