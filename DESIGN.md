@@ -2095,7 +2095,7 @@ upgrades that protect the data, a guided Windows setup, and signatures.
   unit (`grafeno@<name>.service`), each instance with its own data
   directory, configuration, port and logs; `grafeno instances` lists them.
 - Upgrades that protect the data: the package's upgrade backs up each
-  instance (14's `backup`) before a new version opens it and upgrades its
+  instance (phase 4's `backup`) before a new version opens it and upgrades its
   layout, keeps the backup until the first clean start, and can roll back
   to the previous version with it. Removing the package keeps the data;
   purging (`apt purge`, an explicit `--purge`) removes it.
