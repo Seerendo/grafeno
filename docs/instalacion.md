@@ -285,8 +285,20 @@ Los roles (14.2) agrupan privilegios: define uno con `PUT /v1/roles/{name}`
 (por ejemplo, leer todos los espacios `team-*` menos `team-secret`, o ver solo
 métricas, para un agente de monitorización) y asígnalo a cuentas con
 `PATCH /v1/accounts/{name}` y `{"roles": [...]}`. Un rol llamado `public` es de
-todos. El README del servidor lista los privilegios; `GRANT` y `REVOKE` en GQ
-llegan con 14.3.
+todos. El README del servidor lista los privilegios.
+
+Lo mismo en GQ (14.3), desde la shell o la vista Scripts de Studio, con una
+cuenta que pueda gestionar roles:
+
+```cypher
+CREATE ROLE team_reader;
+GRANT read, export ON NAMESPACE 'team-*' TO team_reader;
+DENY read ON NAMESPACE 'team-secret' TO team_reader;
+GRANT ROLE team_reader TO ana;
+```
+
+o desde la línea de comandos (`grafeno grants grant read --on namespace:team-* --to team_reader`,
+`grafeno roles show team_reader`), y en la vista Access de Studio.
 
 ## Respaldos
 
