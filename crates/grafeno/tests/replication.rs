@@ -311,3 +311,165 @@ fn without_the_log_nothing_is_written() {
             .is_empty()
     );
 }
+
+/// Everything a reader can see of one namespace.
+fn namespace_snapshot(db: &Grafeno, ns: &str) -> String {
+    let read = db.begin_read().unwrap();
+    let mut out = Vec::new();
+    read.export(&[ns.to_owned()], &mut out).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    let mut lines: Vec<String> = text.lines().skip(1).map(str::to_owned).collect();
+    lines.push(format!("{:?}", read.namespace(ns).unwrap()));
+    lines.push(format!("{:?}", read.stats(ns).unwrap()));
+    lines.push(format!("{:?}", read.constraints(ns).unwrap()));
+    lines.push(format!("{:?}", read.match_rules(ns).unwrap()));
+    lines.push(format!("{:?}", read.merges(ns, None).unwrap()));
+    lines.push(format!("{:?}", read.indexes(ns).unwrap()));
+    lines.push(format!(
+        "{:?}",
+        read.state_entries(ns, "", "", usize::MAX).unwrap()
+    ));
+    lines.push(format!("{:?}", read.changes(ns, 0, usize::MAX).unwrap()));
+    lines.join("\n")
+}
+
+/// Phase 13.5: a namespace copied to another database (as a namespace
+/// moving between cluster groups is): its records and change log at one
+/// position, then the effects on it of the entries after, give the same
+/// namespace, change log sequence numbers included; the copy's own log
+/// replays it onto a third database.
+#[test]
+fn a_namespace_copies_to_another_database_and_catches_up() {
+    let source = Grafeno::in_memory().unwrap();
+    source.enable_replication_log().unwrap();
+    write_everything(&source);
+    let copied_at = source.begin_read().unwrap().log_position().unwrap().last;
+
+    let target = Grafeno::in_memory().unwrap();
+    target.enable_replication_log().unwrap();
+    // Another namespace already there stays as it is.
+    target
+        .write(|tx| tx.create_node("other", NewNode::new("Kept")).map(|_| ()))
+        .unwrap();
+    let read = source.begin_read().unwrap();
+    let mut chunks = Vec::new();
+    read.namespace_ops(NS, 7, |ops| {
+        chunks.push(ops);
+        Ok(())
+    })
+    .unwrap();
+    drop(read);
+    assert!(chunks.len() > 2, "copied in {} chunks", chunks.len());
+    for ops in &chunks {
+        assert!(ops.iter().all(|op| op.namespace() == Some(NS)));
+        target
+            .write(|tx| tx.import_ops(ops, Vec::new(), None))
+            .unwrap();
+    }
+    assert_eq!(namespace_snapshot(&target, NS), {
+        // The source as it was when copied.
+        namespace_snapshot(&source, NS)
+    });
+
+    // Writes go on at the source while the copy catches up.
+    let made = source
+        .write(|tx| {
+            let a = tx.create_node(
+                NS,
+                NewNode::new("Person")
+                    .prop("name", "Zoe")
+                    .text("Zoe writes"),
+            )?;
+            let b = tx.create_node("implicit", NewNode::new("Elsewhere"))?;
+            tx.create_edge(NS, NewEdge::new(a, "knows", a))?;
+            Ok((a, b))
+        })
+        .unwrap();
+    source
+        .write(|tx| {
+            tx.set_embedding(NS, made.0, &[0.5, 0.5, 0.0])?;
+            tx.put_state(NS, "app", "cursor", b"42")?;
+            Ok(())
+        })
+        .unwrap();
+    source
+        .write(|tx| tx.delete_node(NS, made.0).map(|_| ()))
+        .unwrap();
+    let entries = source
+        .begin_read()
+        .unwrap()
+        .log_entries(copied_at, usize::MAX)
+        .unwrap();
+    assert_eq!(entries.len(), 3);
+    for (_, entry) in &entries {
+        target
+            .write(|tx| tx.import_ops(&entry.ops_of(NS), entry.changes_of(NS), Some(entry.at)))
+            .unwrap();
+    }
+    assert_eq!(
+        namespace_snapshot(&target, NS),
+        namespace_snapshot(&source, NS)
+    );
+    assert!(target.begin_read().unwrap().check(NS).unwrap().is_ok());
+    assert_eq!(
+        target.begin_read().unwrap().stats("other").unwrap().nodes,
+        1
+    );
+    // The change log goes on from the same sequence number.
+    let last = |db: &Grafeno| {
+        db.begin_read()
+            .unwrap()
+            .changes(NS, 0, usize::MAX)
+            .unwrap()
+            .last
+    };
+    assert_eq!(last(&target), last(&source));
+
+    // What the copy logged replays it onto a third database.
+    let third = Grafeno::in_memory().unwrap();
+    replay(&target, &third, 0);
+    assert_eq!(
+        namespace_snapshot(&third, NS),
+        namespace_snapshot(&source, NS)
+    );
+}
+
+/// Phase 13.5: a fenced namespace refuses writes (busy) while the others
+/// take them; the move's own writes pass, and a dropped moved namespace
+/// keeps refusing late writes.
+#[test]
+fn a_fenced_namespace_refuses_writes() {
+    let db = Grafeno::in_memory().unwrap();
+    db.enable_replication_log().unwrap();
+    db.write(|tx| tx.create_node(NS, NewNode::new("N")).map(|_| ()))
+        .unwrap();
+    db.write(|tx| tx.fence_namespace(NS, "2")).unwrap();
+    let refused = db
+        .write(|tx| tx.create_node(NS, NewNode::new("N")).map(|_| ()))
+        .unwrap_err();
+    assert!(matches!(refused, grafeno::Error::Busy(_)), "{refused}");
+    assert!(refused.to_string().contains("moving"));
+    db.write(|tx| tx.create_node("other", NewNode::new("N")).map(|_| ()))
+        .unwrap();
+    assert_eq!(db.begin_read().unwrap().stats(NS).unwrap().nodes, 1);
+    // The move's own writes go through: copies into it, and dropping it.
+    let mut ops = Vec::new();
+    db.begin_read()
+        .unwrap()
+        .namespace_ops(NS, 100, |chunk| {
+            ops.extend(chunk);
+            Ok(())
+        })
+        .unwrap();
+    db.write(|tx| tx.import_ops(&ops, Vec::new(), None))
+        .unwrap();
+    db.write(|tx| tx.drop_moved_namespace(NS, "2")).unwrap();
+    assert_eq!(db.begin_read().unwrap().stats(NS).unwrap().nodes, 0);
+    assert!(
+        db.write(|tx| tx.create_node(NS, NewNode::new("N")).map(|_| ()))
+            .is_err()
+    );
+    db.write(|tx| tx.unfence_namespace(NS)).unwrap();
+    db.write(|tx| tx.create_node(NS, NewNode::new("N")).map(|_| ()))
+        .unwrap();
+}

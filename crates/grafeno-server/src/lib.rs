@@ -7,6 +7,7 @@ pub mod auth;
 pub mod cluster;
 pub mod config;
 pub mod events;
+pub mod groups;
 pub mod http;
 pub mod keys;
 pub mod mcp;

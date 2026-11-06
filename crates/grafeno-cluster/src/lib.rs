@@ -163,15 +163,21 @@ struct Inner {
     changed: Condvar,
     writes: Mutex<()>,
     options: NodeOptions,
-    /// A snapshot after each applied entry, kept for [`SNAPSHOTS_KEPT`],
-    /// so a query split across members reads every part at one position.
+    /// A snapshot after each of the last [`MAX_SNAPSHOTS`] applied entries,
+    /// kept for [`SNAPSHOTS_KEPT`] at most, so a query split across members
+    /// reads every part at one position.
     snapshots: Mutex<BTreeMap<Index, (Instant, Arc<ReadTx>)>>,
 }
 
-/// How long snapshots of past positions are kept.
-pub const SNAPSHOTS_KEPT: Duration = Duration::from_secs(5);
-/// Snapshots kept at most, however recent.
-const MAX_SNAPSHOTS: usize = 4096;
+/// How long snapshots of past positions are kept at most.
+pub const SNAPSHOTS_KEPT: Duration = Duration::from_secs(2);
+/// Snapshots kept at most, however recent. Every open snapshot makes redb
+/// keep the pages it sees: with hundreds of them (one per write for 5 s,
+/// as first built), concurrent writes slowed from 120 a second to 3 within
+/// seconds; with 64 they keep their pace. A member that has moved further
+/// past a split read's position has its part run by the member that
+/// splits it.
+pub const MAX_SNAPSHOTS: usize = 64;
 
 impl Inner {
     /// Keeps `read`, a snapshot at `index`, and lets old ones go (the
@@ -374,7 +380,8 @@ impl Node {
 
     /// A snapshot of the database at exactly `index`: waits up to
     /// `timeout` for the member to apply it, and fails if the member has
-    /// moved past it for longer than [`SNAPSHOTS_KEPT`].
+    /// moved past it by more than [`MAX_SNAPSHOTS`] entries or for longer
+    /// than [`SNAPSHOTS_KEPT`].
     pub fn snapshot_at(&self, index: Index, timeout: Duration) -> Result<Arc<ReadTx>, Error> {
         self.wait_for(timeout, |s| s.applied >= index)
             .ok_or(Error::Timeout)?;

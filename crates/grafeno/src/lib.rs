@@ -64,9 +64,9 @@ pub use merge::{
     Conflict, ConflictKind, DEFAULT_STRONG_KEYS, MergeOptions, MergeRecord, MergeReport,
     NodeSnapshot, node_conflicts,
 };
-pub use namespace::{DropStats, MAX_NAMESPACE_LENGTH, check_new_namespace};
+pub use namespace::{DropStats, MAX_NAMESPACE_LENGTH, RESERVED, check_new_namespace};
 pub use planstats::{BUCKETS, COMMON_VALUES, EdgeLabelStats, IndexStats, PlannerStats};
-pub use replication::{Bulk, ENTRY_FORMAT, Entry, LogPosition, Op};
+pub use replication::{Bulk, ENTRY_FORMAT, Entry, FENCE, LogPosition, Op};
 pub use resolve::{Decision, FieldRule, FieldScore, Match, MatchRule, Probe, SCAN_LIMIT, score};
 pub use stats::{NamespaceInfo, NamespaceStats};
 pub use text::tokenize;

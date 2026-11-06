@@ -76,6 +76,9 @@ pub struct ClusterConfig {
     /// default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split_cost: Option<u64>,
+    /// More Raft groups (13.5), each with its own voters and database.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<crate::groups::GroupConfig>,
 }
 
 /// A message for a peer, with a snapshot's bytes.
@@ -88,10 +91,20 @@ pub struct HttpTransport {
 
 impl HttpTransport {
     pub fn new(config: &ClusterConfig) -> Self {
+        Self::for_group(config, 0)
+    }
+
+    /// The transport of group `group` (`/raft` for group 0, `/raft/{id}`
+    /// for the others) to every other member.
+    pub fn for_group(config: &ClusterConfig, group: u64) -> Self {
         let mut peers = HashMap::new();
         for peer in config.peers.iter().filter(|peer| peer.id != config.id) {
             let (sender, receiver) = sync_channel::<Outgoing>(1024);
-            let url = format!("http://{}/raft", peer.addr);
+            let url = if group == 0 {
+                format!("http://{}/raft", peer.addr)
+            } else {
+                format!("http://{}/raft/{group}", peer.addr)
+            };
             let secret = config.secret.clone();
             std::thread::Builder::new()
                 .name(format!("grafeno-raft-send-{}", peer.id))
@@ -148,7 +161,20 @@ fn same_secret(given: &[u8], expected: &[u8]) -> bool {
 #[derive(Clone)]
 struct Listener {
     node: Arc<Node>,
+    nodes: Arc<HashMap<u64, Arc<Node>>>,
     secret: Arc<str>,
+}
+
+async fn receive_group(
+    State(state): State<Listener>,
+    axum::extract::Path(group): axum::extract::Path<u64>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> StatusCode {
+    match state.nodes.get(&group).cloned() {
+        Some(node) => receive(State(Listener { node, ..state }), headers, body).await,
+        None => StatusCode::NOT_FOUND,
+    }
 }
 
 async fn receive(State(state): State<Listener>, headers: HeaderMap, body: Bytes) -> StatusCode {
@@ -186,6 +212,25 @@ pub fn start(
     db_path: Option<&std::path::Path>,
     config: &ClusterConfig,
 ) -> Result<Arc<Node>, Box<dyn std::error::Error>> {
+    start_group(db, db_path, config, 0, &config.voters)
+}
+
+/// The database file of group `group` beside the main one.
+pub fn group_db_path(db_path: &std::path::Path, group: u64) -> PathBuf {
+    let mut path = db_path.as_os_str().to_owned();
+    path.push(format!(".group-{group}.redb"));
+    PathBuf::from(path)
+}
+
+/// Starts this member of group `group` on `db` (its Raft state and
+/// snapshots beside `db_path`).
+pub fn start_group(
+    db: Arc<grafeno::Grafeno>,
+    db_path: Option<&std::path::Path>,
+    config: &ClusterConfig,
+    group: u64,
+    voters: &[NodeId],
+) -> Result<Arc<Node>, Box<dyn std::error::Error>> {
     let (storage, snapshots) = match db_path {
         Some(path) => {
             let mut raft = path.as_os_str().to_owned();
@@ -199,32 +244,42 @@ pub fn start(
         }
         None => (
             Storage::in_memory()?,
-            std::env::temp_dir().join(format!("grafeno-snapshots-{}", config.id)),
+            std::env::temp_dir().join(format!("grafeno-snapshots-{}-{group}", config.id)),
         ),
     };
     let mut options = NodeOptions::new(config.id, snapshots);
     if let Some(tick) = config.tick_ms {
         options.tick = Duration::from_millis(tick.max(1));
     }
-    let transport = Arc::new(HttpTransport::new(config));
+    let transport = Arc::new(HttpTransport::for_group(config, group));
     Ok(Arc::new(Node::start(
-        db,
-        storage,
-        transport,
-        &config.voters,
-        options,
+        db, storage, transport, voters, options,
     )?))
 }
 
 /// Serves other members' messages on `[cluster] addr` until the process
 /// ends.
 pub async fn listen(node: Arc<Node>, config: &ClusterConfig) -> std::io::Result<()> {
+    listen_groups(node, HashMap::new(), config).await
+}
+
+/// [`listen`], for group 0's member and those of more groups.
+pub async fn listen_groups(
+    node: Arc<Node>,
+    nodes: HashMap<u64, Arc<Node>>,
+    config: &ClusterConfig,
+) -> std::io::Result<()> {
     let state = Listener {
         node,
+        nodes: Arc::new(nodes),
         secret: Arc::from(config.secret.as_str()),
     };
     let app = Router::new()
         .route("/raft", post(receive).layer(DefaultBodyLimit::disable()))
+        .route(
+            "/raft/{group}",
+            post(receive_group).layer(DefaultBodyLimit::disable()),
+        )
         .route("/status", get(status))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
@@ -295,9 +350,13 @@ pub const NOT_LEADER_MESSAGE: &str = "this member is not the cluster's leader";
 /// A `bounded` read is forwarded when this member is more entries behind.
 const MAX_LAG: u64 = 1_000;
 /// Bodies a member buffers to forward them.
-const MAX_FORWARDED_BODY: usize = 64 * 1024 * 1024;
+pub const MAX_FORWARDED_BODY: usize = 64 * 1024 * 1024;
 
-fn refuse(status: axum::http::StatusCode, code: &str, message: &str) -> axum::response::Response {
+pub fn refuse(
+    status: axum::http::StatusCode,
+    code: &str,
+    message: &str,
+) -> axum::response::Response {
     use axum::response::IntoResponse;
     (
         status,
@@ -314,6 +373,26 @@ fn forward(
     uri: &axum::http::Uri,
     headers: &HeaderMap,
     body: Bytes,
+) -> axum::response::Response {
+    send_on(
+        api,
+        method,
+        uri,
+        headers,
+        body,
+        (FORWARDED, from.to_string()),
+    )
+}
+
+/// Sends a request on to another member's API, marked with `mark`, and
+/// returns its answer.
+pub fn send_on(
+    api: &str,
+    method: &axum::http::Method,
+    uri: &axum::http::Uri,
+    headers: &HeaderMap,
+    body: Bytes,
+    mark: (&str, String),
 ) -> axum::response::Response {
     let url = format!(
         "http://{api}{}",
@@ -335,7 +414,7 @@ fn forward(
             builder = builder.header(name, value.as_bytes());
         }
     }
-    builder = builder.header(FORWARDED, from.to_string());
+    builder = builder.header(mark.0, mark.1);
     let Ok(request) = builder.body(body.to_vec()) else {
         return refuse(
             axum::http::StatusCode::BAD_GATEWAY,

@@ -1,0 +1,3 @@
+nodes,effects_copied,total_ms,catch_up_rounds,entries_in_pause,paused_ms,writes_during,busy_retries,writes_found
+20000,41557,11062,2,3,39.2,264,2,264
+340 writes test,535,134,1,5,47.3,340,3,340

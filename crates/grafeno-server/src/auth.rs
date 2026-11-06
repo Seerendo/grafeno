@@ -143,6 +143,11 @@ pub enum Need {
     Namespace(String, Role),
 }
 
+/// A percent-encoded path segment, decoded.
+pub fn decode_segment(segment: &str) -> String {
+    decode(segment)
+}
+
 fn decode(segment: &str) -> String {
     let hex = |byte: u8| (byte as char).to_digit(16).map(|digit| digit as u8);
     let bytes = segment.as_bytes();

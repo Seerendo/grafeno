@@ -40,12 +40,12 @@ toml = "0.9"
 getrandom = "0.3"
 sha2 = "0.10"
 futures-util = { version = "0.3", default-features = false }
+tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"
 
 [dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 
 # `cargo deb` (packaging/linux/Dockerfile builds it). The scripts create the

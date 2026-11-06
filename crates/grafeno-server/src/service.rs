@@ -121,10 +121,10 @@ pub fn run(
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
+    let mut more_groups: Vec<AppState> = Vec::new();
     if let Some(cluster) = &settings.cluster {
         let node = crate::cluster::start(db, settings.db.as_deref(), cluster)?;
-        runtime.block_on(crate::cluster::listen(node.clone(), cluster))?;
-        let apis = cluster
+        let apis: std::collections::HashMap<u64, String> = cluster
             .peers
             .iter()
             .filter_map(|peer| peer.api.clone().map(|api| (peer.id, api)))
@@ -132,8 +132,73 @@ pub fn run(
         let split_cost = cluster
             .split_cost
             .map_or(crate::cluster::DEFAULT_SPLIT_COST, |cost| cost as f64);
-        state = state.with_cluster(node, apis, split_cost);
+        state = state.with_cluster(node.clone(), apis.clone(), split_cost);
+        // More groups (13.5): the ones this member votes in.
+        let mut nodes = std::collections::HashMap::new();
+        for group in &cluster.groups {
+            if !group.voters.contains(&cluster.id) {
+                continue;
+            }
+            let group_db = Arc::new(match &settings.db {
+                Some(path) => Grafeno::open_with(
+                    crate::cluster::group_db_path(path, group.id),
+                    &settings.memory,
+                )?,
+                None => Grafeno::in_memory()?,
+            });
+            group_db.set_durability(settings.durability);
+            group_db.set_change_retention(settings.changes);
+            let group_path = settings
+                .db
+                .as_deref()
+                .map(|path| crate::cluster::group_db_path(path, group.id));
+            let group_node = crate::cluster::start_group(
+                group_db.clone(),
+                group_path.as_deref(),
+                cluster,
+                group.id,
+                &group.voters,
+            )?;
+            nodes.insert(group.id, group_node.clone());
+            let group_apis = apis
+                .iter()
+                .filter(|(id, _)| group.voters.contains(id))
+                .map(|(id, api)| (*id, api.clone()))
+                .collect();
+            more_groups.push(state.for_group(group.id, group_db, group_node, group_apis));
+        }
+        runtime.block_on(crate::cluster::listen_groups(node, nodes, cluster))?;
+        if !cluster.groups.is_empty() {
+            let mut voters = std::collections::BTreeMap::new();
+            voters.insert(0, cluster.voters.clone());
+            for group in &cluster.groups {
+                voters.insert(group.id, group.voters.clone());
+            }
+            let mut states = std::collections::BTreeMap::new();
+            states.insert(0, state.clone());
+            for group in &more_groups {
+                states.insert(group.group, group.clone());
+            }
+            let routers = states
+                .iter()
+                .map(|(id, group)| (*id, http::router_with(group.clone(), &settings.options)))
+                .collect();
+            let registry = Arc::new(crate::groups::Registry {
+                states,
+                routers,
+                voters,
+                apis: apis.into_iter().collect(),
+                me: cluster.id,
+            });
+            let _ = state.groups.set(registry);
+        }
     }
+    // Each group's webhooks and background work (on its own leader).
+    runtime.block_on(async {
+        for group in &more_groups {
+            crate::events::start(group);
+        }
+    });
     runtime.block_on(http::serve_until(
         state,
         settings.addr,

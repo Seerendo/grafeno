@@ -37,6 +37,10 @@ use crate::store::{EDGES, MEMORY, META, NODES, decode, encode, storage};
 pub(crate) const REPLICATION_LOG: TableDefinition<u64, &[u8]> =
     TableDefinition::new("replication_log");
 
+/// The state kind and key that fence a namespace moving to another cluster
+/// group: once written, the namespace refuses every other write here.
+pub const FENCE: (&str, &str) = ("cluster", "moved");
+
 /// The version of [`Entry`]'s format.
 pub const ENTRY_FORMAT: u32 = 1;
 
@@ -60,6 +64,9 @@ pub(crate) enum Touch {
     MatchRule(String, String),
     State(String, String, String),
     Merge(String, u128),
+    /// A change log entry copied as it is (a namespace moving between
+    /// cluster groups keeps its sequence numbers).
+    Change(String, u64),
     Bulk(Bulk),
 }
 
@@ -146,7 +153,57 @@ pub enum Op {
         id: String,
         record: Option<Json>,
     },
+    /// A change log entry with its sequence number.
+    Change {
+        ns: String,
+        seq: u64,
+        change: Option<crate::changes::Change>,
+    },
     Bulk(Bulk),
+}
+
+impl Op {
+    /// The namespace the effect belongs to (`None` for principals).
+    pub fn namespace(&self) -> Option<&str> {
+        match self {
+            Op::Node { ns, .. }
+            | Op::Edge { ns, .. }
+            | Op::Text { ns, .. }
+            | Op::Vector { ns, .. }
+            | Op::Memory { ns, .. }
+            | Op::Index { ns, .. }
+            | Op::Constraint { ns, .. }
+            | Op::Namespace { ns, .. }
+            | Op::MatchRule { ns, .. }
+            | Op::State { ns, .. }
+            | Op::Merge { ns, .. }
+            | Op::Change { ns, .. } => Some(ns),
+            Op::Bulk(Bulk::DropNamespace { ns })
+            | Op::Bulk(Bulk::RebuildIndexes { ns })
+            | Op::Bulk(Bulk::CompactVectors { ns }) => Some(ns),
+            Op::Principal { .. } => None,
+        }
+    }
+
+    /// The key it writes, to note for this database's own log.
+    fn touch(&self) -> Touch {
+        match self {
+            Op::Node { ns, id, .. } => Touch::Node(ns.clone(), id.as_u128()),
+            Op::Edge { ns, id, .. } => Touch::Edge(ns.clone(), id.as_u128()),
+            Op::Text { ns, id, .. } => Touch::Text(ns.clone(), id.as_u128()),
+            Op::Vector { ns, id, .. } => Touch::Vector(ns.clone(), id.as_u128()),
+            Op::Memory { ns, id, .. } => Touch::Memory(ns.clone(), id.as_u128()),
+            Op::Index { ns, name, .. } => Touch::Index(ns.clone(), name.clone()),
+            Op::Constraint { ns, name, .. } => Touch::Constraint(ns.clone(), name.clone()),
+            Op::Principal { name, .. } => Touch::Principal(name.clone()),
+            Op::Namespace { ns, .. } => Touch::Namespace(ns.clone()),
+            Op::MatchRule { ns, label, .. } => Touch::MatchRule(ns.clone(), label.clone()),
+            Op::State { ns, kind, key, .. } => Touch::State(ns.clone(), kind.clone(), key.clone()),
+            Op::Merge { ns, id, .. } => Touch::Merge(ns.clone(), id.parse().unwrap_or(0)),
+            Op::Change { ns, seq, .. } => Touch::Change(ns.clone(), *seq),
+            Op::Bulk(bulk) => Touch::Bulk(bulk.clone()),
+        }
+    }
 }
 
 /// A committed write transaction, as its effects.
@@ -163,6 +220,26 @@ pub struct Entry {
     /// that every member's change log is the same.
     #[serde(default)]
     pub changes: Vec<(String, crate::changes::Change)>,
+}
+
+impl Entry {
+    /// The effects on namespace `ns`, in order.
+    pub fn ops_of(&self, ns: &str) -> Vec<Op> {
+        self.ops
+            .iter()
+            .filter(|op| op.namespace() == Some(ns))
+            .cloned()
+            .collect()
+    }
+
+    /// The change log entries the commit wrote in `ns`, in order.
+    pub fn changes_of(&self, ns: &str) -> Vec<(String, crate::changes::Change)> {
+        self.changes
+            .iter()
+            .filter(|(of, _)| of == ns)
+            .cloned()
+            .collect()
+    }
 }
 
 /// Where a database stands in its replication log.
@@ -206,7 +283,8 @@ impl Touch {
             | Touch::Namespace(ns)
             | Touch::MatchRule(ns, _)
             | Touch::State(ns, _, _)
-            | Touch::Merge(ns, _) => Some(ns),
+            | Touch::Merge(ns, _)
+            | Touch::Change(ns, _) => Some(ns),
             Touch::Principal(_) | Touch::Bulk(_) => None,
         }
     }
@@ -359,8 +437,52 @@ impl WriteTx {
                     .map(|guard| json_of(guard.value()))
                     .transpose()?,
             },
+            Touch::Change(ns, seq) => Op::Change {
+                ns: ns.clone(),
+                seq: *seq,
+                change: tx
+                    .open_table(crate::changes::CHANGES)
+                    .map_err(storage)?
+                    .get((ns.as_str(), *seq))
+                    .map_err(storage)?
+                    .map(|guard| decode(guard.value()))
+                    .transpose()?,
+            },
             Touch::Bulk(bulk) => Op::Bulk(bulk.clone()),
         })
+    }
+
+    /// Writes effects copied from another database (a namespace moving
+    /// between cluster groups): records as they are, derived data rebuilt,
+    /// no rules run and no change log entries made but those copied
+    /// (`Op::Change`) and `changes` (appended as this commit's, numbered
+    /// after the copied ones, stamped `at`: the copied commit's clock).
+    /// Noted for this database's own log, so a cluster's leader replicates
+    /// them as any write.
+    pub fn import_ops(
+        &mut self,
+        ops: &[Op],
+        changes: Vec<(String, crate::changes::Change)>,
+        at: Option<Timestamp>,
+    ) -> Result<()> {
+        if at.is_some() {
+            self.commit_at = at;
+        }
+        self.past_fences = true;
+        let logging = self.log_changes;
+        self.log_changes = false;
+        self.applying = true;
+        let result = ops.iter().try_for_each(|op| {
+            self.note(op.touch());
+            self.apply_op(op)
+        });
+        self.applying = false;
+        self.log_changes = logging;
+        result?;
+        if !changes.is_empty() {
+            self.pending_changes = crate::changes::Pending::from_entries(changes);
+        }
+        Ok(())
     }
 
     /// What this transaction did, as a log entry (`None`: nothing).
@@ -379,6 +501,17 @@ impl WriteTx {
             }
             ops.push(self.after_image(touch)?);
         }
+        // A namespace fenced for a move takes no more writes here: they
+        // would miss the copy.
+        if !self.past_fences {
+            for ns in &namespaces {
+                if self.state(ns, FENCE.0, FENCE.1)?.is_some() {
+                    return Err(Error::Busy(format!(
+                        "namespace {ns:?} is moving to another cluster group: try again"
+                    )));
+                }
+            }
+        }
         // Namespaces registered on the way (by a first write to them) keep
         // the creation time they got here.
         for ns in namespaces {
@@ -389,7 +522,8 @@ impl WriteTx {
         Ok(Some(Entry {
             format: ENTRY_FORMAT,
             layout: SCHEMA_VERSION,
-            at: Timestamp::now(),
+            // An import keeps the clock of the commit it copies.
+            at: self.commit_at.unwrap_or_else(Timestamp::now),
             ops,
             changes: self.pending_changes.entries().to_vec(),
         }))
@@ -647,6 +781,22 @@ impl WriteTx {
                     }
                 }
             }
+            Op::Change { ns, seq, change } => {
+                let mut table = self
+                    .tx
+                    .open_table(crate::changes::CHANGES)
+                    .map_err(storage)?;
+                match change {
+                    Some(change) => {
+                        table
+                            .insert((ns.as_str(), *seq), encode(change)?.as_slice())
+                            .map_err(storage)?;
+                    }
+                    None => {
+                        table.remove((ns.as_str(), *seq)).map_err(storage)?;
+                    }
+                }
+            }
             Op::Bulk(Bulk::DropNamespace { ns }) => {
                 if self.namespace(ns)?.is_some() {
                     self.drop_namespace(ns)?;
@@ -696,6 +846,191 @@ impl ReadTx {
         })
     }
 
+    /// Every primary record of `ns` and its change log, as effects, handed
+    /// to `take` about `chunk` at a time: what copying the namespace to
+    /// another database takes ([`WriteTx::import_ops`] writes them there).
+    pub fn namespace_ops(
+        &self,
+        ns: &str,
+        chunk: usize,
+        mut take: impl FnMut(Vec<Op>) -> Result<()>,
+    ) -> Result<()> {
+        let chunk = chunk.max(1);
+        let mut ops: Vec<Op> = Vec::with_capacity(chunk);
+        let mut push = |op: Op, ops: &mut Vec<Op>| -> Result<()> {
+            ops.push(op);
+            if ops.len() >= chunk {
+                take(std::mem::take(ops))?;
+            }
+            Ok(())
+        };
+        let owned = |key: &str| key.to_owned();
+        if let Some(meta) = self.registry.get(ns).map_err(storage)? {
+            push(
+                Op::Namespace {
+                    ns: owned(ns),
+                    meta: Some(json_of(meta.value())?),
+                },
+                &mut ops,
+            )?;
+        }
+        // Definitions first, so records are indexed as they arrive.
+        for item in self.indexes.range((ns, "")..).map_err(storage)? {
+            let (key, value) = item.map_err(storage)?;
+            let (of, name) = key.value();
+            if of != ns {
+                break;
+            }
+            push(
+                Op::Index {
+                    ns: owned(ns),
+                    name: owned(name),
+                    def: Some(json_of(value.value())?),
+                },
+                &mut ops,
+            )?;
+        }
+        for item in self.constraints.range((ns, "")..).map_err(storage)? {
+            let (key, value) = item.map_err(storage)?;
+            let (of, name) = key.value();
+            if of != ns {
+                break;
+            }
+            push(
+                Op::Constraint {
+                    ns: owned(ns),
+                    name: owned(name),
+                    constraint: Some(json_of(value.value())?),
+                },
+                &mut ops,
+            )?;
+        }
+        for item in self.match_rules.range((ns, "")..).map_err(storage)? {
+            let (key, value) = item.map_err(storage)?;
+            let (of, label) = key.value();
+            if of != ns {
+                break;
+            }
+            push(
+                Op::MatchRule {
+                    ns: owned(ns),
+                    label: owned(label),
+                    rule: Some(json_of(value.value())?),
+                },
+                &mut ops,
+            )?;
+        }
+        let records = (ns, 0u128)..=(ns, u128::MAX);
+        for item in self.nodes.range(records.clone()).map_err(storage)? {
+            let (key, value) = item.map_err(storage)?;
+            push(
+                Op::Node {
+                    ns: owned(ns),
+                    id: NodeId::from_u128(key.value().1),
+                    node: Some(decode(value.value())?),
+                },
+                &mut ops,
+            )?;
+        }
+        for item in self.edges.range(records.clone()).map_err(storage)? {
+            let (key, value) = item.map_err(storage)?;
+            push(
+                Op::Edge {
+                    ns: owned(ns),
+                    id: EdgeId::from_u128(key.value().1),
+                    edge: Some(decode(value.value())?),
+                },
+                &mut ops,
+            )?;
+        }
+        for item in self.texts.range(records.clone()).map_err(storage)? {
+            let (key, value) = item.map_err(storage)?;
+            push(
+                Op::Text {
+                    ns: owned(ns),
+                    id: NodeId::from_u128(key.value().1),
+                    text: Some(value.value().to_owned()),
+                },
+                &mut ops,
+            )?;
+        }
+        let vector_ids: Vec<u128> = self
+            .vectors
+            .range(records.clone())
+            .map_err(storage)?
+            .map(|item| item.map(|(key, _)| key.value().1).map_err(storage))
+            .collect::<Result<_>>()?;
+        for id in vector_ids {
+            let id = NodeId::from_u128(id);
+            push(
+                Op::Vector {
+                    ns: owned(ns),
+                    id,
+                    embedding: self.embedding(ns, id)?,
+                },
+                &mut ops,
+            )?;
+        }
+        for item in self.memory.range(records.clone()).map_err(storage)? {
+            let (key, value) = item.map_err(storage)?;
+            push(
+                Op::Memory {
+                    ns: owned(ns),
+                    id: NodeId::from_u128(key.value().1),
+                    state: Some(value.value()),
+                },
+                &mut ops,
+            )?;
+        }
+        for item in self.merges.range(records).map_err(storage)? {
+            let (key, value) = item.map_err(storage)?;
+            push(
+                Op::Merge {
+                    ns: owned(ns),
+                    id: key.value().1.to_string(),
+                    record: Some(json_of(value.value())?),
+                },
+                &mut ops,
+            )?;
+        }
+        for item in self.state.range((ns, "", "")..).map_err(storage)? {
+            let (key, value) = item.map_err(storage)?;
+            let (of, kind, name) = key.value();
+            if of != ns {
+                break;
+            }
+            push(
+                Op::State {
+                    ns: owned(ns),
+                    kind: owned(kind),
+                    key: owned(name),
+                    value: Some(value.value().to_vec()),
+                },
+                &mut ops,
+            )?;
+        }
+        for item in self
+            .changes
+            .range((ns, 0u64)..=(ns, u64::MAX))
+            .map_err(storage)?
+        {
+            let (key, value) = item.map_err(storage)?;
+            let change: crate::changes::Change = decode(value.value())?;
+            push(
+                Op::Change {
+                    ns: owned(ns),
+                    seq: key.value().1,
+                    change: Some(change),
+                },
+                &mut ops,
+            )?;
+        }
+        if !ops.is_empty() {
+            take(ops)?;
+        }
+        Ok(())
+    }
+
     /// Up to `limit` log entries after `after`, in order.
     pub fn log_entries(&self, after: u64, limit: usize) -> Result<Vec<(u64, Entry)>> {
         let table = self.tx.open_table(REPLICATION_LOG).map_err(storage)?;
@@ -708,5 +1043,31 @@ impl ReadTx {
             out.push((index.value(), decode(value.value())?));
         }
         Ok(out)
+    }
+}
+
+impl WriteTx {
+    /// Fences `ns` for a move to cluster group `to`: from this write on,
+    /// every other write to it here is refused (busy), so the entries up
+    /// to this one hold all it will ever get here.
+    pub fn fence_namespace(&mut self, ns: &str, to: &str) -> Result<()> {
+        self.past_fences = true;
+        self.put_state(ns, FENCE.0, FENCE.1, to.as_bytes())
+    }
+
+    /// Lifts the fence (a move given up).
+    pub fn unfence_namespace(&mut self, ns: &str) -> Result<()> {
+        self.past_fences = true;
+        self.delete_state(ns, FENCE.0, FENCE.1).map(|_| ())
+    }
+
+    /// Drops what a moved namespace left here and keeps its fence, so a
+    /// late write meant for it is refused rather than lost.
+    pub fn drop_moved_namespace(&mut self, ns: &str, to: &str) -> Result<()> {
+        self.past_fences = true;
+        if self.namespace(ns)?.is_some() {
+            self.drop_namespace(ns)?;
+        }
+        self.put_state(ns, FENCE.0, FENCE.1, to.as_bytes())
     }
 }

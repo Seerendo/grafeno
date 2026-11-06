@@ -53,6 +53,10 @@ pub struct AppState {
     /// Work that runs from the change log.
     pub background: crate::events::BackgroundConfig,
     pub runners: Arc<std::sync::Mutex<Vec<crate::events::RunnerStatus>>>,
+    /// The cluster group this state serves (0 on a single server).
+    pub group: u64,
+    /// Every group of this member, once they are all up (13.5).
+    pub groups: crate::groups::Slot,
 }
 
 /// Where writes go: the group-commit writer of a single server, or the
@@ -176,7 +180,35 @@ impl AppState {
             import_chunk: IMPORT_CHUNK,
             background: crate::events::BackgroundConfig::default(),
             runners: Arc::default(),
+            group: 0,
+            groups: Arc::default(),
         }
+    }
+
+    /// The state of another cluster group of this member: its database
+    /// and member, the rest shared (keys, limits, metrics, the registry).
+    pub fn for_group(
+        &self,
+        group: u64,
+        db: Arc<Grafeno>,
+        node: Arc<grafeno_cluster::Node>,
+        apis: std::collections::HashMap<u64, String>,
+    ) -> Self {
+        let mut state = self.clone();
+        state.group = group;
+        state.events = crate::events::Events::attach(&db);
+        state.writer = Arc::new(Writes {
+            local: Arc::new(grafeno::Writer::new(
+                db.clone(),
+                grafeno::WriterOptions::default(),
+            )),
+            cluster: Some(node),
+            apis,
+            split_cost: self.writer.split_cost,
+        });
+        state.runners = Arc::default();
+        state.db = db;
+        state
     }
 
     /// Sends every write through a cluster member (phase 13.2).
@@ -381,6 +413,20 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/cluster", get(cluster_status))
         .route("/cluster/voters", post(cluster_voters))
         .route("/cluster/compact", post(cluster_compact))
+        .route("/cluster/groups", get(crate::groups::groups))
+        .route(
+            "/cluster/placement",
+            get(crate::groups::placement).post(crate::groups::place),
+        )
+        .route(
+            "/cluster/groups/{group}/import",
+            post(crate::groups::import),
+        )
+        .route("/cluster/groups/{group}/fence", post(crate::groups::fence))
+        .route(
+            "/cluster/groups/{group}/directory",
+            post(crate::groups::set_directory),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             crate::cluster::route,
@@ -398,9 +444,16 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
     }
     // A panic while serving a request (a damaged page, a bug) answers 500
     // instead of dropping the connection.
-    let mut app = app.layer(DefaultBodyLimit::max(BODY_LIMIT)).layer(
-        tower_http::catch_panic::CatchPanicLayer::custom(panic_response),
-    );
+    let mut app = app
+        // On a cluster of several groups, to the group a request is for.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::groups::dispatch,
+        ))
+        .layer(DefaultBodyLimit::max(BODY_LIMIT))
+        .layer(tower_http::catch_panic::CatchPanicLayer::custom(
+            panic_response,
+        ));
     if !options.cors_origins.is_empty() {
         app = app.layer(cors(&options.cors_origins));
     }
@@ -473,7 +526,7 @@ impl ApiError {
         }
     }
 
-    fn bad_request(message: impl Into<String>) -> Self {
+    pub(crate) fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             code: "bad_request",
@@ -482,7 +535,7 @@ impl ApiError {
         }
     }
 
-    fn internal(message: impl Into<String>) -> Self {
+    pub(crate) fn internal(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "internal",
@@ -541,7 +594,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-type ApiResult<T> = Result<T, ApiError>;
+pub(crate) type ApiResult<T> = Result<T, ApiError>;
 
 /// Runs a write through the group-commit writer. `work` may run more than
 /// once (when another write of its group fails), so it takes its inputs by
@@ -1456,7 +1509,13 @@ const IMPORT_LIMIT: usize = 1024 * 1024 * 1024;
 
 async fn namespaces(State(state): State<AppState>) -> ApiResult<Json<Vec<grafeno::NamespaceInfo>>> {
     let caller = auth::current();
-    let namespaces = blocking(&state, |db| db.begin_read()?.namespaces()).await?;
+    let registry = state.groups.get().cloned();
+    let namespaces = blocking(&state, move |db| match registry {
+        // Every group's namespaces, each from where it lives (13.5).
+        Some(registry) => crate::groups::namespaces(&registry),
+        None => db.begin_read()?.namespaces(),
+    })
+    .await?;
     Ok(Json(
         namespaces
             .into_iter()

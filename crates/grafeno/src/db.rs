@@ -395,6 +395,7 @@ impl Grafeno {
                 .then(crate::replication::Capture::default),
             applying: false,
             commit_at: None,
+            past_fences: false,
         })
     }
 
@@ -925,6 +926,8 @@ pub struct WriteTx {
     pub(crate) applying: bool,
     /// The commit's clock, when it is not now (an applied entry's).
     pub(crate) commit_at: Option<Timestamp>,
+    /// Writes to namespaces fenced for a move go through (the move's own).
+    pub(crate) past_fences: bool,
 }
 
 impl WriteTx {
