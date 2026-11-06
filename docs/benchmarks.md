@@ -696,6 +696,30 @@ Argon2id with the server's parameters (19 MiB, 2 passes, 1 lane),
 Checks are bound by memory more than by cores, which is what makes them
 slow to guess offline; sessions and keys (SHA-256) cost a lookup.
 
+## Enforcement on reads (`crates/grafeno-query/examples/visibility_bench.rs`)
+
+50 000 Person nodes (a tenth also `Salary`, half in team red, each with an
+email and a 32-dimension embedding) and about three `knows` edges each, in
+memory, best of three, 2026-11-06. The same queries without a view, with a
+view that reads the whole namespace, and with one decided per record
+(`Salary` denied, `email` hidden, a policy keeping the account's team):
+
+| Query | No view | Whole namespace | Per record |
+| --- | --- | --- | --- |
+| count every node | 65.2 ms | 64.8 ms | 98.8 ms (+51%) |
+| filter on a property | 15.8 ms | 16.3 ms | 22.2 ms (+40%) |
+| one hop from 1 000 people | 19.2 ms | 19.0 ms | 23.9 ms (+25%) |
+| two hops from 100 people | 16.7 ms | 17.7 ms | 22.6 ms (+36%) |
+| full-text search | 12.3 ms | 12.0 ms | 12.1 ms |
+| vector search, top 10 | 1.16 ms | | 4.79 ms |
+
+Per record, every node read is checked against the labels, the hidden
+properties and the policy; a view of the whole namespace is decided once.
+Vector search under the per-record view (45% of the vectors visible)
+filters after the walk and widens it until ten visible hits are found: its
+recall@10 among the visible is 0.972, against 0.912 for the plain search
+among all, which walks less.
+
 ## Roles (`crates/grafeno/examples/rights_bench.rs`)
 
 5 000 roles, each with four privileges (read and create on its own

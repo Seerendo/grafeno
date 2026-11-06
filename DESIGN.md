@@ -397,7 +397,7 @@ without a current user. They remain possible for embedded use.
     Raft; a leader elected among them coordinates writes, the others take
     over when it fails, and reads and large queries spread over all of
     them.
-14. **Users, roles and permissions** (in progress, 14.1 to 14.3 done; six steps; see below):
+14. **Users, roles and permissions** (in progress, 14.1 to 14.4 done; six steps; see below):
     a complete role-based access control, as most databases have: users who
     sign in, roles and privileges granted with `GRANT` and `REVOKE`, rights
     down to labels, properties and records, and an audit log.
@@ -2627,7 +2627,7 @@ the Studio's Access view):
   enforced by queries (14.4); the audit log (14.5); the Studio sets no
   passwords or expiry dates (the API and GQ do).
 
-**14.4 Enforcement down to labels, properties and records.**
+**14.4 Enforcement down to labels, properties and records** (done).
 
 - Reads: nodes and edges a caller may not read are absent from every
   result, as if they did not exist (patterns, `count`, paths, `EXISTS`);
@@ -2650,6 +2650,92 @@ the Studio's Access view):
   property tests check that random queries under random rights never return
   a hidden node, edge or property, and never change one; the overhead of
   enforcement on reads is measured with and without restrictions.
+
+As built (`grafeno/src/view.rs`, `rights.rs`, the reads of `db.rs`,
+`traverse.rs`, `changes.rs`, `dump.rs` and `algo`, the checks of the
+write transaction, `grafeno-query`'s `Context` and procedures, the server's
+routes):
+
+- A `View` is an account's rights record by record. A node is visible when
+  no label of it is denied reading and the namespace or one of its labels
+  grants it; an edge when its label may be read and both ends are visible;
+  a property is hidden when it is denied on a label of its record. In a
+  namespace without label or property rules or policies, all its records
+  are visible or none, and nothing is checked per record (a check is a
+  cached lookup per namespace).
+- Record policies (`Policy`, held by roles): on a namespace pattern,
+  optionally the nodes of a label, for reads, writes or both, a condition:
+  `@recorded_by = current_user()`, or a property equal to the caller's
+  name, one of its attributes (`$account.team`, `Account.attributes`, new)
+  or a value. They narrow, like denials: a record must match every policy
+  that covers it (PostgreSQL's restrictive policies), so a role cannot
+  widen what another one limited. In GQ: `RESTRICT role ON NAMESPACE p
+  [NODES Label] [FOR READS | FOR WRITES] WHERE …`, `UNRESTRICT …`, `ALTER
+  USER … SET ATTRIBUTE key = value`; `SHOW PRIVILEGES FOR` lists policies.
+  Roles with policies and accounts with attributes travel as entry format
+  5, so a leader does not send them to a member that would drop them.
+- Reads in GQ: the query's `Context` (every node, edge, page, neighbor,
+  index, text, embedding and memory read) leaves out what is hidden and
+  strips hidden properties, so patterns, `count`, paths, `EXISTS`, maps
+  and projections never see them; a filter on a hidden property finds
+  nothing, and an index on one finds nothing. Paging keeps reading until a
+  page is full, so pages stay what they were. Searches (`db.search`,
+  `db.searchVector`, `db.searchFuzzy`) ask again for more while hidden hits
+  crowd out the visible; `db.labels`, `db.edgeLabels`, `db.propertyKeys`
+  and `db.stats` count what is visible; algorithms run on a projection of
+  the visible subgraph (a hidden weight weighs 1); `history()` of a hidden
+  property is empty; `EXPLAIN` shows no counts or estimates and `SHOW
+  NAMESPACES` no counts where they would tell how much is hidden.
+- Reads elsewhere: a snapshot can carry a view (`ReadTx::with_view`, which
+  takes the snapshot, so a shared one never gets a reader's view), and its
+  reads filter: records, pages, scans, traversals (which never go through a
+  hidden node or edge), searches, names, indexes, statistics, exports (JSON
+  Lines, GraphML, CSV) and the change log (a change is seen when its record
+  is; a deleted one by its labels, unless policies apply). The server gives
+  every route's snapshot its caller's view, the server-sent events stream
+  its subscriber's, and the namespace list counts what each caller sees.
+- Vector search, the open decision: filtering after the graph walk, and
+  widening the walk (four times as many candidates each round) until
+  enough visible hits are found. With 45% of 50 000 vectors visible, the
+  recall@10 among the visible is 0.972 (0.912 for the same search without a
+  view, which walks less), at 4.8 ms instead of 1.2.
+- Features that read every record of a namespace and whose results would
+  tell what is hidden (entity resolution and `db.match`, duplicates, match
+  pairs, merges, community summaries, extraction, the review queue, decay
+  and consolidation, integrity checks and vector recall) answer 403 to a
+  caller who sees the namespace record by record.
+- Writes: the write transaction checks each change against its actor's
+  view: the record must be visible (or it is not found), its labels allow
+  the operation (create, update, delete, merge, retract: at the namespace,
+  or `write` on the label) and no label denies it, the properties written
+  are not denied writing, write policies hold before and after, and an
+  edge's ends are visible. A node with an edge its caller cannot see cannot
+  be deleted by it (refused without naming the edge). A GQ statement that
+  would make a forbidden change fails whole, naming the privilege; one that
+  matches hidden records does not see them. A writing statement needs a way
+  to write in the namespace (any of create, update, delete, merge, retract,
+  or `write` on a label), no longer all three of 14.2.
+- Measured on 50 000 people (a tenth also `Salary`), best of three: a view
+  that reads the whole namespace costs nothing; one decided per record
+  (`Salary` denied, `email` hidden, a team policy) adds 25% to 51% to
+  scans, filters and traversals, and nothing to full-text search (the
+  table under Measurements).
+- Tests: `grafeno-query/tests/visibility.rs` (300 random graphs and rights
+  each: seven read queries never return a hidden node, edge or property and
+  return exactly the visible, counts and reachability included; six write
+  statements never change a hidden record, and change nothing when they
+  fail; checked sensitive by breaking the view twice),
+  `grafeno-server/tests/leaks.rs` (the leak matrix: listings, reads by id,
+  neighbors, k-hop, path, subgraph, neighborhoods, read-many, text and
+  vector search, recall, context, GQ and its procedures and algorithms,
+  JSON Lines, GraphML and CSV exports, the change log, statistics, the
+  namespace list, history; the refused features; writes stopped by
+  visibility, labels and properties), and the client's `accounts.test.ts`.
+- Not built in this step: policies on edges by label (a policy without a
+  label covers every node and edge), conditions beyond equality, and
+  filtering inside the HNSW walk; webhooks carry every change (they are
+  set up with `schema`, an administrator's privilege); the change log's
+  `last` still counts hidden changes.
 
 **14.5 Audit and accountability.**
 
@@ -2932,6 +3018,7 @@ spinning disk, on ARM, or for days at a time.
 | Replication log (13.1) | writes at 80% of the speed with the log on; 568 bytes per record; a replica applies 22 300 records/s | E1-mem | `replication_log.csv` |
 | Raft cluster of three (13.2) | 137 sequential writes/s (618 on one server), p50 7.2 ms; a leader replaced in 0.5 to 0.8 s | E1-disk | `cluster.csv` |
 | Passwords (14.1) | Argon2id at 19 ms a check: 53 sign-ins/s on one core, 141 on 16 threads | E1-mem | `auth.csv` |
+| Enforcement on reads (14.4), 50 000 people | a view of the whole namespace costs nothing; per record +25% to +51% on scans and traversals, nothing on full-text search; vector recall@10 0.972 with 45% visible | E1-mem | `visibility.csv` |
 | Roles (14.2), 5 000 roles, 2 811 reached by one account | rights computed in 17 ms once per change; a namespace check 93 ns, a label or property check 271 ns | E1-mem | `rights.csv` |
 | Runbooks on a compose cluster (13.6) | rolling upgrade 13.5 → 13.6, a member lost, a majority lost, a disk replaced: 15 971 operations, all linearizable | E1-disk | `drill.csv` |
 | Several Raft groups (13.5) | 109, 153 and 181 writes/s with 1, 2 and 3 groups; 20 000 nodes moved under writes in 11 s with a 39 ms pause, no write lost or doubled | E1-disk | `groups.csv`, `namespace_move.csv` |
@@ -2974,6 +3061,7 @@ real binary. The ones that carry each guarantee:
 | A read split across members returns one server's rows | `grafeno-query/tests/common/mod.rs` (used by `conformance.rs`, `planner.rs`, `cypher.rs`, `queries.rs`, `traversal.rs`, `batch.rs`), `grafeno-server/tests/split.rs`, `aggregate.rs` tests | every read of those suites that can be split, whole against 2, 3 and 5 parts through JSON, row order included; exact sums independent of order; three processes, with a member down |
 | A namespace moves between groups without losing or doubling a write | `grafeno/tests/replication.rs` (copy, catch-up, fence), `grafeno-server/tests/groups.rs` | a namespace copied and caught up equals the source, change log numbers included; a fenced namespace refuses writes; three processes with two more groups, writes routed through any member, a move under three writers retrying busy answers, every acknowledged write found once on every member |
 | A cluster restarts, rejoins and upgrades without anomalies | `grafeno-cluster/tests/operations.rs`, `packaging/compose/drill.sh` | a new cluster from a follower's backup, a member joining from an older backup without a snapshot, a restart; the leader refusing an entry format a voter cannot read; on the compose, every runbook under load checked for linearizability |
+| Nothing hidden is returned or changed | `grafeno-query/tests/visibility.rs`, `grafeno-server/tests/leaks.rs` | 300 random graphs and rights for reads and for writes; the leak matrix over every surface of the server |
 | Access is managed in GQ, the API and the tools, by those who may | `grafeno-query/tests/conformance/scenarios.txt`, `grafeno-query/tests/access.rs`, `grafeno-server/tests/admin.rs`, `shell.rs`, `clients/typescript/test/accounts.test.ts` | every access statement and admin endpoint; refusals without `manage_accounts` or `manage_roles`; superusers only a superuser's; `EXPLAIN` naming what is missing; expiry; an open server keeping a superuser |
 | Rights are the union of roles, and a denial wins | `grafeno/tests/rights.rs`, `grafeno-server/tests/roles.rs` | 2 000 random role graphs against a direct model; over HTTP, patterns with denials, nested roles, a custom editor, server privileges, `public`, scoped keys, cycles refused |
 | Accounts sign in, and keys and sessions do only what they may | `grafeno-server/tests/accounts.rs`, `access.rs`, `shell.rs`, `cluster.rs`, `clients/typescript/test/accounts.test.ts` | sign-in, refresh, expiry, revocation, lockouts, the password policy, disabled accounts, scoped, expired and rotated keys over HTTP, the shell and the client; in a cluster, keys and sessions on every member |
@@ -3010,6 +3098,7 @@ cargo run --release -p grafeno-server --example groups_bench -- 10 8 20000
 OLD_IMAGE=grafeno:13.5 NEW_IMAGE=grafeno:13.6 packaging/compose/drill.sh   # images built from each commit
 cargo run --release -p grafeno-server --example auth_bench -- 60
 cargo run --release -p grafeno --example rights_bench -- 5000 1000
+cargo run --release -p grafeno-query --example visibility_bench -- 50000
 FAULT_SECONDS=40 cargo test --release -p grafeno-server --test faults -- --nocapture
 cargo run --release -p grafeno --example changes_bench -- 100000
 cargo run --release -p grafeno-server --example events_bench -- 100000
@@ -3056,7 +3145,6 @@ docker run --rm --memory 512m --memory-swap 512m -e CACHE_MB=128 -e PROJECTION_C
   MIT/Apache-2.0).
 - Binary record format (postcard, rkyv).
 - Whether Grafito's graph moves entirely to Grafeno or is only mirrored.
-- Filtered vector search (labels, ACL) inside HNSW instead of post-filtering.
 - Whether an application in front (Grafito) signs its users in itself and
   calls Grafeno as one service account, or maps them to Grafeno accounts
   (phase 14 allows both).

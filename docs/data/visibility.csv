@@ -1,0 +1,9 @@
+measure,no view,whole namespace,per record,unit
+people,50000,,,
+count every node,65.2,64.8,98.8,ms
+filter on a property,15.8,16.3,22.2,ms
+one hop from 1 000 people,19.2,19.0,23.9,ms
+two hops from 100 people,16.7,17.7,22.6,ms
+full-text search,12.3,12.0,12.1,ms
+vector search top 10,1.16,,4.79,ms
+vector recall@10 (45% visible per record),0.912,,0.972,

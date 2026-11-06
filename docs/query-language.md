@@ -749,6 +749,28 @@ SHOW PRIVILEGES FOR ana;     // source, access, privilege, on (a role's, or an a
 SHOW CURRENT USER;           // name, kind, superuser, roles, effective_roles
 ```
 
+Record policies (14.4) limit a role to the records that match a condition,
+for reads, writes or both; they narrow, like denials, so a record must
+match every policy that covers it:
+
+```cypher
+RESTRICT analyst ON NAMESPACE crm NODES Customer WHERE tenant = $account.tenant;
+RESTRICT writer ON NAMESPACE 'team-*' FOR WRITES WHERE @recorded_by = current_user();
+RESTRICT auditor ON NAMESPACE crm FOR READS WHERE region = 'eu';
+UNRESTRICT analyst ON NAMESPACE crm NODES Customer WHERE tenant = $account.tenant;
+ALTER USER ana SET ATTRIBUTE tenant = 'acme';    // what $account.tenant is for ana
+```
+
+What a caller may not read is absent from every result, as if it did not
+exist: nodes it may not read (a denied label, or a policy), edges whose
+label it may not read or that lead to such nodes, and hidden properties,
+from records, maps, `keys()`, `properties()`, filters (`WHERE n.email = …`
+finds nothing) and indexes. `count`, paths, `EXISTS`, procedures,
+algorithms and `history()` see only the rest; `EXPLAIN` shows no counts or
+estimates there. A writing statement that would change something its
+caller may not (a label, a property, a policy) fails whole and names the
+privilege; records it may not see are not matched.
+
 Writing statements answer one row, `result`, saying what changed
 (`granted 2 privileges on namespace team-* to analyst`). `EXPLAIN` of a
 statement the caller may not run says which privilege it lacks, in a

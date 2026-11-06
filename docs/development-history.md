@@ -220,8 +220,16 @@ presentan el proyecto y los primeros pasos.
   same through `/v1/admin`, `grafeno roles`, `grafeno grants`, the
   TypeScript client and an Access view in the Studio.
 
-Next, the rest of phase 14: rights down to labels, properties and
-records, and an audit log; phase 15: the engine and the interface apart (the
+- **Phase 14.4, enforcement down to records:** what a caller may not read
+  is absent everywhere (queries and their counts, paths and procedures,
+  searches, recall, algorithms, exports, the change log, statistics), as
+  if it did not exist, and hidden properties are absent from records;
+  every change is checked against labels, properties and operations;
+  record policies limit a role to the records that match a condition
+  (`@recorded_by = current_user()`, `team = $account.team`).
+
+Next, the rest of phase 14: an audit log, and identities from outside
+(OIDC); phase 15: the engine and the interface apart (the
 engine installs natively like a database server, from a `curl` one-liner,
 signed APT and DNF repositories or a guided Windows setup, with no Docker
 needed; Grafeno Desktop becomes a separate product that talks to engines

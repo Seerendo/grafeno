@@ -30,7 +30,7 @@ MCP para agentes.
 | **Encontrar contexto** | Combinar búsqueda BM25, vectores HNSW y expansión del grafo; preparar contexto con un presupuesto de tokens. |
 | **Mantener la memoria** | Resolver entidades, revisar posibles duplicados, registrar fusiones reversibles y resumir comunidades sin un modelo. |
 | **Explorar y consultar** | Visualizar relaciones, editar información y ejecutar GQ, un lenguaje parecido a Cypher. |
-| **Operar la base** | Cuentas que inician sesión, roles con concesiones y denegaciones, claves de API, respaldos, importación y exportación, comprobaciones de integridad y reconstrucción de índices. |
+| **Operar la base** | Cuentas que inician sesión, roles con concesiones y denegaciones hasta etiquetas, propiedades y registros, claves de API, respaldos, importación y exportación, comprobaciones de integridad y reconstrucción de índices. |
 | **Operar un clúster** | Varios servidores sincronizados con Raft: elección de líder, recuperación ante fallos, lecturas linealizables, lecturas grandes repartidas entre miembros y namespaces en varios grupos. |
 
 ## Empezar por el escritorio

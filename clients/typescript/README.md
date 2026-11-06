@@ -102,7 +102,9 @@ await admin.changeAccount("ana", { expires_at: "2027-01-01" });
 ```
 
 `revoke`, `revokeRoles`, `roles`, `role`, `deleteRole` and
-`privilegeCatalog` complete them; GQ access statements (`GRANT …`, `SHOW
+`privilegeCatalog` complete them. Roles take record `policies` (14.4), and
+`changeAccount(name, { attributes: { team: "red" } })` sets what they compare
+with; GQ access statements (`GRANT …`, `SHOW
 USERS`) also run through `namespace(…).query`.
 
 ## Expand neighborhoods together

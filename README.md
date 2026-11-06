@@ -30,7 +30,7 @@ for agents.
 | **Retrieve context** | Combine BM25 text search, HNSW vectors and graph expansion; pack context into a token budget. |
 | **Maintain memory** | Resolve entities, review possible duplicates, record reversible merges and summarize communities without a model. |
 | **Explore and query** | Visualize relationships, edit information and run GQ, a Cypher-like language. |
-| **Operate the database** | Accounts that sign in, roles with grants and denials, API keys, backups, import and export, integrity checks and index rebuilds. |
+| **Operate the database** | Accounts that sign in, roles with grants and denials down to labels, properties and records, API keys, backups, import and export, integrity checks and index rebuilds. |
 | **Run a cluster** | Several servers kept in sync with Raft: a leader elected, failover, linearizable reads, large reads split across members, namespaces on several groups. |
 
 ## Start with the desktop

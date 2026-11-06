@@ -294,6 +294,13 @@ GRANT ROLE team_reader TO ana;
 or from the command line (`grafeno grants grant read --on namespace:team-* --to team_reader`,
 `grafeno roles show team_reader`), and in the Studio's Access view.
 
+Rights reach labels, properties and records (14.4): `DENY read ON NODES
+Salary IN crm TO team_reader` hides those nodes everywhere, `DENY read ON
+PROPERTY Person.email IN crm` hides one property, and `RESTRICT team_reader
+ON NAMESPACE crm NODES Customer WHERE tenant = $account.tenant` keeps each
+account to its tenant's customers (`ALTER USER ana SET ATTRIBUTE tenant =
+'acme'`). What is hidden is absent, as if it did not exist.
+
 ## Backups
 
 A backup is a consistent copy of the whole database file (every
