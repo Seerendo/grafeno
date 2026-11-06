@@ -59,6 +59,10 @@ const DROP_AFTER: Duration = Duration::from_secs(5);
 pub struct GroupConfig {
     pub id: u64,
     pub voters: Vec<u64>,
+    /// This member joins the group (a member restored from a backup): it
+    /// starts with no voters and waits for the leader to add it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub join: bool,
 }
 
 /// Where a namespace lives.

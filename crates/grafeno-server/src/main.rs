@@ -250,6 +250,9 @@ struct MemberTarget {
     /// An owner token or key.
     #[arg(long, env = "GRAFENO_TOKEN", hide_env_values = true)]
     token: Option<String>,
+    /// The Raft group (0, the default, is the cluster's first).
+    #[arg(long, default_value_t = 0)]
+    group: u64,
 }
 
 #[derive(Subcommand)]
@@ -285,7 +288,12 @@ fn cluster_call(
         .http_status_as_error(false)
         .build()
         .into();
-    let url = format!("{}/v1/cluster{path}", target.url.trim_end_matches('/'));
+    let base = target.url.trim_end_matches('/');
+    let url = match (target.group, path) {
+        (0, _) => format!("{base}/v1/cluster{path}"),
+        (group, "") => format!("{base}/v1/cluster/groups/{group}/status"),
+        (group, path) => format!("{base}/v1/cluster/groups/{group}{path}"),
+    };
     let auth = target.token.as_ref().map(|token| format!("Bearer {token}"));
     let response = match (method, body) {
         ("GET", _) => {

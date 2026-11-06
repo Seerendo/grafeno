@@ -1,0 +1,5 @@
+step,seconds,operations,writes,reads,unknown_writes,available_pct,longest_gap_ms,linearizable,notes
+rolling upgrade 13.5 to 13.6 (leader first),90.4,11218,5558,5560,100,91.8,4840,yes,"move refused while a 13.5 member remained; format 2 and move after"
+lose one member (the leader; down 10 s),24.1,1754,839,835,80,64.6,2288,yes,
+lose a majority (2 of 3 down 10 s),32.3,1220,568,567,85,27.6,19618,yes,writes stop while the majority is down
+replace a disk (backup from a follower; rejoin),25.3,1779,899,853,27,63.1,2989,yes,caught up from the log (0 snapshots installed)

@@ -1,0 +1,49 @@
+# Three Grafeno members on one Docker network (phase 13.6): each holds the
+# data, they elect a leader, and the cluster keeps serving when one is
+# down. Two Raft groups: group 0 (every namespace by default) and group 1.
+#
+#   cd packaging/compose
+#   GRAFENO_TOKEN=change-me docker compose up -d
+#
+# The members' APIs are on the host at 127.0.0.1:17841, 17842 and 17843
+# (Grafeno Studio at /studio/). Each member's image and settings file can be
+# chosen on its own (M1_IMAGE, M1_CONFIG, …): a rolling upgrade changes one
+# image at a time, and a member rejoining from a backup starts with
+# `join-<n>.toml`. See docs/cluster-runbooks.md.
+
+x-member: &member
+  restart: unless-stopped
+  environment:
+    GRAFENO_CONFIG: /etc/grafeno/grafeno.toml
+    GRAFENO_TOKEN: ${GRAFENO_TOKEN:-change-me}
+
+services:
+  m1:
+    <<: *member
+    image: ${M1_IMAGE:-grafeno:latest}
+    hostname: m1
+    ports: ["127.0.0.1:17841:7810"]
+    volumes:
+      - data-m1:/data
+      - ./${M1_CONFIG:-m1.toml}:/etc/grafeno/grafeno.toml:ro
+  m2:
+    <<: *member
+    image: ${M2_IMAGE:-grafeno:latest}
+    hostname: m2
+    ports: ["127.0.0.1:17842:7810"]
+    volumes:
+      - data-m2:/data
+      - ./${M2_CONFIG:-m2.toml}:/etc/grafeno/grafeno.toml:ro
+  m3:
+    <<: *member
+    image: ${M3_IMAGE:-grafeno:latest}
+    hostname: m3
+    ports: ["127.0.0.1:17843:7810"]
+    volumes:
+      - data-m3:/data
+      - ./${M3_CONFIG:-m3.toml}:/etc/grafeno/grafeno.toml:ro
+
+volumes:
+  data-m1:
+  data-m2:
+  data-m3:

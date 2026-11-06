@@ -16,9 +16,12 @@ FROM rust:1-slim-trixie AS build
 WORKDIR /src
 COPY . .
 COPY --from=studio /src/studio/dist studio/dist
+# The workspace's own sources are touched first: the cached target may hold
+# a build of another version whose files look newer than these.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p grafeno-server \
+    find crates -name '*.rs' -exec touch {} + \
+    && cargo build --release --locked -p grafeno-server \
     && cp target/release/grafeno /usr/local/bin/grafeno
 
 FROM debian:trixie-slim

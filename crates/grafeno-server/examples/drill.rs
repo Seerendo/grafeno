@@ -231,6 +231,60 @@ fn main() {
         })
     );
     if !ok {
+        explain(&history);
         std::process::exit(1);
     }
+}
+
+/// Why a history is not linearizable, in the plainest terms that show it:
+/// reads of a value nobody wrote, and reads of a value an acknowledged
+/// write had replaced before they began. Writes the history to
+/// `drill-history.json` for a closer look.
+fn explain(history: &[Op]) {
+    let written: std::collections::HashMap<u64, &Op> = history
+        .iter()
+        .filter_map(|op| match op.kind {
+            Kind::Write(v) => Some((v, op)),
+            Kind::Read(_) => None,
+        })
+        .collect();
+    let mut unwritten = 0;
+    let mut stale = Vec::new();
+    for read in history.iter().filter(|op| matches!(op.kind, Kind::Read(_))) {
+        let Kind::Read(v) = read.kind else { continue };
+        if v == 0 {
+            continue;
+        }
+        let Some(source) = written.get(&v) else {
+            unwritten += 1;
+            continue;
+        };
+        // Another write began after this value's write completed and
+        // completed before the read began: the value was replaced.
+        if let Some(done) = source.complete
+            && let Some(newer) = history.iter().find(|op| {
+                matches!(op.kind, Kind::Write(_))
+                    && op.invoke > done
+                    && op.complete.is_some_and(|c| c < read.invoke)
+            })
+        {
+            stale.push((read.invoke, v, newer.kind));
+        }
+    }
+    eprintln!(
+        "not linearizable: {unwritten} reads of values never written, {} stale reads; first: {:?}",
+        stale.len(),
+        stale.iter().take(5).collect::<Vec<_>>()
+    );
+    let dump: Vec<Value> = history
+        .iter()
+        .map(|op| {
+            let (kind, value) = match op.kind {
+                Kind::Write(v) => ("w", v),
+                Kind::Read(v) => ("r", v),
+            };
+            json!([kind, value, op.invoke, op.complete])
+        })
+        .collect();
+    let _ = std::fs::write("drill-history.json", Value::Array(dump).to_string());
 }

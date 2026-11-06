@@ -681,6 +681,24 @@ entry is the lever (not built yet). With the leader cut off, another
 member is elected and commits a write in 510 to 831 ms (median 595, five
 runs) with 50 ms ticks (election timeouts of 0.5 to 1 s).
 
+## Cluster runbooks under load (`packaging/compose/drill.sh`)
+
+Three members in Docker on this laptop, two Raft groups, three clients of
+the `drill` example writing distinct values to a register and reading it
+linearizably on random members, 2026-11-06. Every history was checked
+for linearizability.
+
+| Step | Operations | Writes succeeded in | Longest stretch without a write | Linearizable |
+| --- | --- | --- | --- | --- |
+| rolling upgrade 13.5 → 13.6, the leader first | 11 218 | 92% of 100 ms windows | 4.8 s | yes |
+| the leader down for 10 s | 1 754 | 65% | 2.3 s | yes |
+| two of three members down for 10 s | 1 220 | 28% | 19.6 s | yes |
+| a disk replaced from a follower's backup | 1 779 | 63% | 3.0 s | yes |
+
+Each step is short and holds its outage, and clients also pick members
+that are down, so the share is low by design; what matters is that no
+history broke linearizability. Details in `docs/cluster-runbooks.md`.
+
 ## Several Raft groups (`crates/grafeno-server/examples/groups_bench.rs`)
 
 Three members on this laptop (one NVMe disk), 50 ms ticks, immediate

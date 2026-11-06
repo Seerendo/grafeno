@@ -423,6 +423,10 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
             post(crate::groups::import),
         )
         .route("/cluster/groups/{group}/fence", post(crate::groups::fence))
+        // Each group's own status, voters and compaction (13.6).
+        .route("/cluster/groups/{group}/status", get(cluster_status))
+        .route("/cluster/groups/{group}/voters", post(cluster_voters))
+        .route("/cluster/groups/{group}/compact", post(cluster_compact))
         .route(
             "/cluster/groups/{group}/directory",
             post(crate::groups::set_directory),

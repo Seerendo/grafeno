@@ -224,12 +224,20 @@ curl -X POST http://10.0.0.1:7810/v1/cluster/placement -H "Authorization: Bearer
 A namespace that already has data moves while it keeps serving: its
 writes pause for tens of milliseconds (they answer busy; clients retry)
 and none is lost. Any member takes requests for any namespace. Back up
-each group's file. `grafeno cluster status --url http://10.0.0.1:7810 --token …`
-shows a member's view; `grafeno cluster voters 1 2 3 4` (on the leader)
+each group's file (`GET /v1/backup?group=1`; backups can be taken on a
+follower). `grafeno cluster status --url http://10.0.0.1:7810 --token …`
+(`--group 1` for another group) shows a member's view, with elections,
+leader changes, snapshots, the entry format the group writes, what each
+member runs and, on the leader, each member's lag; `/v1/metrics` has the
+same as `grafeno_cluster_*` series, and Grafeno Studio a Cluster view; `grafeno cluster voters 1 2 3 4` (on the leader)
 changes the members, the new one listed in every member's `peers` and
 started with `voters = []`; `grafeno cluster compact` snapshots a member's
 database and trims its log. Each member keeps its Raft state in
 `<db>.raft` and snapshots in `<db>.snapshots/`.
+
+A three-member compose cluster, systemd and Windows service setups, and
+the runbooks for losing a member, losing a majority, replacing a disk and
+upgrading are in [cluster-runbooks.md](cluster-runbooks.md).
 
 For now: traffic between members is authenticated by the secret but not
 encrypted (keep them on a private network); imports go into a single server

@@ -1,0 +1,15 @@
+# Member 1 of the compose cluster.
+db = "/data/grafeno.redb"
+addr = "0.0.0.0:7810"
+
+[cluster]
+id = 1
+addr = "0.0.0.0:7811"
+secret = "change-this-shared-secret"
+voters = [1, 2, 3]
+peers = [
+  { id = 1, addr = "m1:7811", api = "m1:7810" },
+  { id = 2, addr = "m2:7811", api = "m2:7810" },
+  { id = 3, addr = "m3:7811", api = "m3:7810" },
+]
+groups = [{ id = 1, voters = [1, 2, 3] }]

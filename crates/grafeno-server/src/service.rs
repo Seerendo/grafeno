@@ -157,7 +157,7 @@ pub fn run(
                 group_path.as_deref(),
                 cluster,
                 group.id,
-                &group.voters,
+                if group.join { &[] } else { &group.voters },
             )?;
             nodes.insert(group.id, group_node.clone());
             let group_apis = apis

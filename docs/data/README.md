@@ -47,6 +47,7 @@ build unless the file says otherwise; on E1, runs vary by about ±20%.
 | `vector_search_int8.csv` | 1 000 searches on 1 M vectors in 512 MiB and 2 GiB, 12.4 against 12.5's int8 copies, four runs each | `ram_bench.rs search` | E2 | 2026-11-06 | paired bars per container, best and worst run |
 | `replication_log.csv` | Writes with the replication log off and on, its size and a replica's apply speed (13.1) | `crates/grafeno/examples/replication_bench.rs` | E1-mem | 2026-11-06 | bars, or a table |
 | `cluster.csv` | Sequential writes on one server and through a three-member Raft cluster, and failover times (13.2) | `crates/grafeno-cluster/examples/cluster_bench.rs` | E1-disk | 2026-11-06 | a table |
+| `drill.csv` | Cluster runbooks on the compose under load: operations, availability, longest outage, linearizability (13.6) | `packaging/compose/drill.sh`, `crates/grafeno-server/examples/drill.rs` | E1-disk | 2026-11-06 | a table |
 | `groups.csv` | Write throughput of three members with 1, 2 and 3 Raft groups, 24 clients (13.5) | `crates/grafeno-server/examples/groups_bench.rs` | E1-disk | 2026-11-06 | a table |
 | `namespace_move.csv` | Namespaces moved between groups under writes: copy, catch-up rounds, the pause, writes found (13.5) | `groups_bench.rs`, `crates/grafeno-server/tests/groups.rs` | E1-disk | 2026-11-06 | a table |
 | `split.csv` | Reads on one server and split across 3 and 5 members (3 scan threads each), and one server with 9 and 15 threads (13.4) | `crates/grafeno-server/examples/split_bench.rs` | E1-disk | 2026-11-06 | a table |

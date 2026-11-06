@@ -366,7 +366,14 @@ member); writes during a move's pause answer `busy` (503) and should be
 retried. Internal routes under `/v1/cluster/groups/{id}/` carry a move's
 copies, fence and directory.
 
-`grafeno cluster status|voters|compact --url … --token …` call them.
+`grafeno cluster status|voters|compact --url … --token … [--group N]` call
+them; `/v1/cluster/groups/{id}/status`, `…/voters` and `…/compact` do the
+same for another group. Status (13.6) also counts elections, leader
+changes and snapshots sent and installed, gives the entry format the
+group writes and what each member runs (`members`), and on the leader
+each other member's lag (`peers`); `/v1/metrics` has them as
+`grafeno_cluster_*` series per group. `GET /v1/backup?group=N` copies
+another group's file. See [docs/cluster-runbooks.md](../../docs/cluster-runbooks.md).
 
 ## MCP
 

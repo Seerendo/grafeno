@@ -392,7 +392,7 @@ without a current user. They remain possible for embedded use.
     Cypher and tool compatibility, query optimization under concurrency,
     batched execution, batched and parallel traversal, compact storage and
     vector quantization.
-13. **Distributed operation** (in progress, 13.1 to 13.5 done; six steps; see below): several
+13. **Distributed operation** (done, in six steps; see below): several
     servers holding the same data, kept in sync by a replicated log with
     Raft; a leader elected among them coordinates writes, the others take
     over when it fails, and reads and large queries spread over all of
@@ -2222,7 +2222,7 @@ As built (`grafeno/src/replication.rs`, `grafeno-server/src/groups.rs`,
   placement through any member, writes and reads routed, listings merged,
   a move under three writers checked on every member).
 
-**13.6 Operating a cluster.**
+**13.6 Operating a cluster** (done).
 
 - Status and metrics per member (role, term, commit and applied positions,
   lag, elections, snapshot transfers) in `/metrics`, `grafeno cluster
@@ -2237,6 +2237,79 @@ As built (`grafeno/src/replication.rs`, `grafeno-server/src/groups.rs`,
   losing a majority, and replacing a disk.
 - Done when: a rolling upgrade and every runbook have been run on the
   compose under load, with the linearizability checker watching.
+
+As built (`grafeno-raft`, `grafeno-cluster`, `grafeno-server`, the
+Studio's Cluster view, `packaging/compose/`, `docs/cluster-runbooks.md`):
+
+- Status: every member's status (per group) counts the elections it
+  started, the leader changes it saw and the snapshots it sent and
+  installed; on the leader it lists each other member's last known index
+  and lag; it says the entry format the group writes and what each member
+  runs. `/v1/metrics` has `grafeno_cluster_*` series per group (leader,
+  term, commit, applied, last and snapshot indexes, entry format,
+  elections, leader changes, snapshots sent and installed, and
+  `peer_lag{member}` on the leader); `grafeno cluster status|voters|compact
+  --group N` and `/v1/cluster/groups/{id}/status|voters|compact` reach any
+  group. Grafeno Studio has a Cluster view (the desktop app bundles the
+  Studio): the groups as the member it talks to sees them, the lag of the
+  others where it leads, the members' versions and formats, where
+  namespaces live, and moves.
+- Rolling upgrades: members say what they run (version, newest entry
+  format, layout) with every message (`x-grafeno-member`). An entry carries
+  the oldest format that can hold it (2 only with change log entries a
+  namespace move copies, 1 otherwise), followers decide by the format,
+  not by the layout of the database that wrote it (entries are records,
+  whatever layout stores them), and a leader refuses a write whose format
+  a voter cannot read (members before 13.6 do not say, and are taken to
+  read format 1): "upgrade every member first". Followers hear
+  only from the leader, so the leader's status is the one that knows
+  every member's format. Layout upgrades happen as each member opens its
+  file.
+- Backups and members from backups: backups can be taken on a follower
+  (`/v1/backup`, `?group=N` for another group's file). A database restored
+  from a backup starts Raft after the position it holds (a snapshot of it
+  at that index, of unknown term, persisted with a snapshot file), so a
+  new cluster starts from copies of one backup, and a member joins from an
+  older backup and catches up from the log after it, without a snapshot
+  when the leader still holds those entries. A group's settings take
+  `join = true` for a member rejoining it.
+- Installation: `packaging/compose/` (three members, two Raft groups,
+  each member's image and settings file chosen on its own, rejoin
+  settings); the systemd unit and the Windows service need only the
+  `[cluster]` section in their `grafeno.toml`; the image build touches the
+  workspace's sources first (a cached target holding another version's
+  build made Cargo keep stale crates). `docs/cluster-runbooks.md` covers
+  installing, watching, backups and restores, losing one member, losing a
+  majority, replacing a disk, and rolling upgrades.
+- The drill: `drill` (an example of `grafeno-server`) loads a cluster with
+  clients writing distinct values to a register and reading it
+  linearizably on random members, then checks the history and reports
+  availability; `packaging/compose/drill.sh` runs every runbook on the
+  compose cluster under it, from an image of 13.5 (commit 275a196) to one
+  of 13.6.
+- Run on the compose with three clients under `drill`: a rolling upgrade
+  from 13.5 to 13.6 with the leader first (11 218 operations; the move
+  refused while a 13.5 member remained, format 2 and the move after),
+  losing the leader for 10 s (1 754), losing a majority for 10 s (1 220;
+  writes stop and nothing is lost), and replacing a disk from a
+  follower's backup (1 779; caught up from the log, no snapshot): every
+  history linearizable, every member holding the same registers at the
+  end. Found on the way: a member whose volume survived an earlier run
+  joined with that cluster's data and Raft state and served an old value
+  (members with the same ids and secret cannot tell two clusters apart:
+  the runbooks say never to reuse a data directory across clusters); the
+  image build kept stale crates from a cached build of another version;
+  and the drill script itself raced a previous run.
+- Not built in this step: a cluster identity in messages (see above),
+  TLS between members, a cluster view that asks
+  every member (the Studio shows the member it talks to), automatic
+  removal of a dead member, five-member and multi-machine drills, and
+  network partitions on the compose (members are stopped, not cut off;
+  partitions were exercised in one process in 13.3).
+- Tests: `grafeno-cluster/tests/operations.rs` (a new cluster from a
+  follower's backup, a member joining from an older backup without a
+  snapshot, a restart of a member started that way, the status counters
+  and lag, format negotiation), and the drill.
 
 **Measures for the phase** (in `docs/benchmarks.md` and `docs/performance.md`,
 against one server): write latency and throughput with three and five
@@ -2635,6 +2708,7 @@ spinning disk, on ARM, or for days at a time.
 | Vector search, 1 M vectors in 512 MiB, int8 copies (12.5) | 3.5 to 4.2 ms (4.9 to 5.2 ms before), same resident memory | E2 | `vector_search_int8.csv` |
 | Replication log (13.1) | writes at 80% of the speed with the log on; 568 bytes per record; a replica applies 22 300 records/s | E1-mem | `replication_log.csv` |
 | Raft cluster of three (13.2) | 137 sequential writes/s (618 on one server), p50 7.2 ms; a leader replaced in 0.5 to 0.8 s | E1-disk | `cluster.csv` |
+| Runbooks on a compose cluster (13.6) | rolling upgrade 13.5 → 13.6, a member lost, a majority lost, a disk replaced: 15 971 operations, all linearizable | E1-disk | `drill.csv` |
 | Several Raft groups (13.5) | 109, 153 and 181 writes/s with 1, 2 and 3 groups; 20 000 nodes moved under writes in 11 s with a 39 ms pause, no write lost or doubled | E1-disk | `groups.csv`, `namespace_move.csv` |
 | Reads split across members (13.4) | 200 000 people, 3 threads a member: scans 2.1, aggregates 2.9, top-20 3.0, two hops 1.4 times faster with 5 members | E1-disk | `split.csv` |
 | Faults injected under reads and writes (13.3) | 31 759 operations, all linearizable; writes resume 0.4 s (one process) and 0.5 s (real processes) after the leader fails | E1-disk | `faults.csv` |
@@ -2674,6 +2748,7 @@ real binary. The ones that carry each guarantee:
 | Reads and writes stay linearizable through failures | `grafeno-cluster/tests/linearizable.rs`, `grafeno-server/tests/faults.rs`, `grafeno-cluster/src/check.rs`, `clients/typescript/test/cluster.test.ts` | a register written and read by concurrent clients while members are cut off, restarted, compacted and killed, every history checked by a linearizability checker (which rejects the unsafe control); forwarding, read-your-writes and keyed writes across real processes |
 | A read split across members returns one server's rows | `grafeno-query/tests/common/mod.rs` (used by `conformance.rs`, `planner.rs`, `cypher.rs`, `queries.rs`, `traversal.rs`, `batch.rs`), `grafeno-server/tests/split.rs`, `aggregate.rs` tests | every read of those suites that can be split, whole against 2, 3 and 5 parts through JSON, row order included; exact sums independent of order; three processes, with a member down |
 | A namespace moves between groups without losing or doubling a write | `grafeno/tests/replication.rs` (copy, catch-up, fence), `grafeno-server/tests/groups.rs` | a namespace copied and caught up equals the source, change log numbers included; a fenced namespace refuses writes; three processes with two more groups, writes routed through any member, a move under three writers retrying busy answers, every acknowledged write found once on every member |
+| A cluster restarts, rejoins and upgrades without anomalies | `grafeno-cluster/tests/operations.rs`, `packaging/compose/drill.sh` | a new cluster from a follower's backup, a member joining from an older backup without a snapshot, a restart; the leader refusing an entry format a voter cannot read; on the compose, every runbook under load checked for linearizability |
 | Costly queries stop | `grafeno-query/tests/adversarial.rs` | 32 hostile queries within their limits; nesting just under the limit runs on a 2 MiB stack; `max_cost` refuses; procedure rows count against `max_memory` |
 | Nothing a client sends crashes the parser | `grafeno-query/tests/fuzz.rs` | proptest: random tokens, valid queries with random edits, arbitrary text, through the lexer, parser, planner, `EXPLAIN` and executor |
 | The API keeps its contract | `grafeno-server/tests/http.rs`, `mcp.rs`, `shell.rs`, `clients/typescript/test` | every endpoint and MCP tool, limits, conflicts (409 with details), metrics, the CLI shell, and the client against the real binary |
@@ -2704,6 +2779,7 @@ cargo run --release -p grafeno-cluster --example cluster_bench -- 500
 FAULT_SECONDS=30 cargo test --release -p grafeno-cluster --test linearizable -- --nocapture
 cargo run --release -p grafeno-server --example split_bench -- 200000 3 5   # build grafeno first
 cargo run --release -p grafeno-server --example groups_bench -- 10 8 20000
+OLD_IMAGE=grafeno:13.5 NEW_IMAGE=grafeno:13.6 packaging/compose/drill.sh   # images built from each commit
 FAULT_SECONDS=40 cargo test --release -p grafeno-server --test faults -- --nocapture
 cargo run --release -p grafeno --example changes_bench -- 100000
 cargo run --release -p grafeno-server --example events_bench -- 100000

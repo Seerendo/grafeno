@@ -198,10 +198,15 @@ measured speed, memory and limits, with charts, in
   throughput 109, 153 and 181 a second with one, two and three groups on
   one machine); a namespace moves between groups while it is written,
   pausing writes for tens of milliseconds and losing none.
+- **Phase 13.6, operating a cluster:** status and `/metrics` per Raft
+  group (elections, leader changes, snapshots, each member's lag), a
+  Cluster view in Grafeno Studio, rolling upgrades where the leader writes
+  no format an older member cannot read, backups from followers, new
+  clusters and members from backups, a three-member compose and runbooks
+  (a member lost, a majority lost, a disk replaced, an upgrade), each run
+  under load with a linearizability checker watching.
 
-Next, the rest of phase 13: distributed operation (servers kept in sync by a
-replicated log with Raft, failover, reads and large queries spread over
-the servers); phase 14: users, roles and permissions (sign-in, roles you
+Next, phase 14: users, roles and permissions (sign-in, roles you
 define, `GRANT` and `REVOKE`, rights down to labels, properties and
 records, an audit log); phase 15: the engine and the interface apart (the
 engine installs natively like a database server, from a `curl` one-liner,
