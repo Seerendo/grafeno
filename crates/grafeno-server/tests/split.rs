@@ -86,6 +86,20 @@ fn query(port: u16, text: &str, split: &str) -> (u16, Value) {
     (status, serde_json::from_str(&body).unwrap_or(Value::Null))
 }
 
+/// Runs a setup write, retrying while the cluster answers busy: right
+/// after the first election a change of leader can drop a write, which the
+/// server reports as 503 `busy` without applying it.
+fn write(port: u16, text: &str) -> (u16, Value) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (code, body) = query(port, text, "off");
+        if code != 503 || body["error"]["code"] != "busy" || Instant::now() >= deadline {
+            return (code, body);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn status(port: u16) -> Option<Value> {
     let mut response = agent()
         .get(&format!("http://127.0.0.1:{port}/v1/cluster"))
@@ -133,25 +147,22 @@ fn split_reads_return_what_one_member_does() {
         std::thread::sleep(Duration::from_millis(100));
     };
     // 3 000 people, 20 companies, some acquaintances.
-    let (code, body) = query(
+    let (code, body) = write(
         members[leader].api,
         "UNWIND range(0, 19) AS c CREATE (:Company {name: 'company ' + toString(c), c: c})",
-        "off",
     );
     assert_eq!(code, 200, "{body}");
-    let (code, body) = query(
+    let (code, body) = write(
         members[leader].api,
         "UNWIND range(1, 3000) AS i \
          CREATE (p:Person {i: i, name: 'person ' + toString(i), age: i % 80, score: (i * 7919 % 1000) / 10.0, \
                  city: ['Lima', 'Quito', 'Bogotá', 'La Paz', 'Santiago'][i % 5]}) \
          WITH p, i MATCH (c:Company {c: i % 20}) CREATE (p)-[:works_at]->(c)",
-        "off",
     );
     assert_eq!(code, 200, "{body}");
-    let (code, body) = query(
+    let (code, body) = write(
         members[leader].api,
         "MATCH (a:Person), (b:Person) WHERE a.i % 50 = 0 AND b.i = a.i + 1 CREATE (a)-[:knows]->(b)",
-        "off",
     );
     assert_eq!(code, 200, "{body}");
     // Every member has it all.
