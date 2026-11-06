@@ -83,3 +83,37 @@ test("users sign in, refresh and sign out", async () => {
   // The key outlives the session.
   assert.equal((await reader.namespace("notes").stats()).nodes, 1);
 });
+
+test("roles and grants (14.3)", async () => {
+  const admin = new Grafeno({ url, token });
+  const catalog = await admin.privilegeCatalog();
+  assert.ok(catalog.server.includes("manage_roles"));
+  await admin.putRole("team-reader", { description: "reads the teams" });
+  const granted = await admin.grant(["read", "export"], { on: "namespace", namespace: "team-*" }, ["team-reader"]);
+  assert.equal(granted.rows[0][0], "granted 2 privileges on namespace team-* to team-reader");
+  await admin.grant(["read"], { on: "namespace", namespace: "team-secret" }, ["team-reader"], { deny: true });
+  const listed = await admin.privilegesOf("team-reader");
+  assert.equal(listed.rows.length, 3);
+  const revoked = await admin.revoke(["export"], { on: "namespace", namespace: "team-*" }, ["team-reader"]);
+  assert.equal(revoked.rows[0][0], "revoked 1 privilege on namespace team-* from team-reader");
+
+  await admin.createAccount({ name: "bot", kind: "service" });
+  await admin.grantRoles(["team-reader"], ["bot"]);
+  const { secret } = await admin.createKey({ name: "bot-key", account: "bot" });
+  const bot = new Grafeno({ url, token: secret });
+  await bot.namespace("team-a").stats();
+  await assert.rejects(bot.namespace("team-secret").stats(), (error) => error instanceof GrafenoError && error.status === 403);
+  // A GQ access statement through the ordinary query call.
+  const shown = await admin.namespace("default").query("SHOW PRIVILEGES FOR bot");
+  assert.equal(shown.rows.length, 2);
+  await assert.rejects(bot.namespace("team-a").query("CREATE ROLE x"), (error) => error instanceof GrafenoError && error.status === 403);
+
+  const later = await admin.changeAccount("bot", { expires_at: "2020-01-01" });
+  assert.ok(later.expires_at);
+  await assert.rejects(bot.namespace("team-a").stats(), (error) => error instanceof GrafenoError && error.status === 401);
+  await admin.changeAccount("bot", { expires_at: null });
+  await admin.revokeRoles(["team-reader"], ["bot"]);
+  await assert.rejects(bot.namespace("team-a").stats(), (error) => error instanceof GrafenoError && error.status === 403);
+  assert.deepEqual((await admin.roles()).map((role) => role.name), ["team-reader"]);
+  await admin.deleteRole("team-reader");
+});

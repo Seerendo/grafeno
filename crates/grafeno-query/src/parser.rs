@@ -3,6 +3,7 @@
 use grafeno::Direction;
 
 use crate::QueryError;
+use crate::access::{Access, Target, UserSet};
 use crate::ast::{
     BinOp, Clause, Expr, Key, MapItem, Mode, NodePattern, Pattern, PatternKind, ProcedureCall,
     Projection, Quantifier, Query, RelPattern, RemoveItem, ReturnItem, Schema, SetItem, Statement,
@@ -175,9 +176,258 @@ impl Parser<'_> {
         })
     }
 
+    // ------------------------------------------------------------ access
+
+    /// A user, role or grant statement (14.3), if the statement is one.
+    fn access(&mut self) -> Result<Option<Access>, QueryError> {
+        let user = |p: &Self, at: usize| p.keyword_at(at, "USER");
+        if self.at_keyword("SHOW") {
+            let what = if self.keyword_at(1, "USERS") {
+                Access::ShowUsers
+            } else if self.keyword_at(1, "ROLES") {
+                Access::ShowRoles
+            } else if self.keyword_at(1, "CURRENT") && user(self, 2) {
+                self.position += 1;
+                Access::ShowCurrentUser
+            } else if self.keyword_at(1, "PRIVILEGES") {
+                self.position += 2;
+                let holder = if self.eat_keyword("FOR") {
+                    Some(self.access_name("an account or a role")?)
+                } else {
+                    None
+                };
+                return Ok(Some(Access::ShowPrivileges { holder }));
+            } else {
+                return Ok(None);
+            };
+            self.position += 2;
+            return Ok(Some(what));
+        }
+        let service = self.at_keyword("CREATE")
+            && self.keyword_at(1, "SERVICE")
+            && self.keyword_at(2, "ACCOUNT");
+        if service || (self.at_keyword("CREATE") && user(self, 1)) {
+            self.position += if service { 3 } else { 2 };
+            let name = self.access_name("the account's name")?;
+            let if_not_exists = self.if_not_exists();
+            let set = self.user_sets()?;
+            return Ok(Some(Access::CreateUser {
+                name,
+                service,
+                if_not_exists,
+                set,
+            }));
+        }
+        if self.at_keyword("ALTER") && user(self, 1) {
+            self.position += 2;
+            let name = self.access_name("the account's name")?;
+            let set = self.user_sets()?;
+            if set.is_empty() {
+                return Err(
+                    self.unexpected("SET PASSWORD, STATUS, EXPIRES, SUPERUSER or DESCRIPTION")
+                );
+            }
+            return Ok(Some(Access::AlterUser { name, set }));
+        }
+        if self.at_keyword("CREATE") && self.keyword_at(1, "ROLE") {
+            self.position += 2;
+            let name = self.access_name("the role's name")?;
+            let if_not_exists = self.if_not_exists();
+            let description = if self.at_keyword("SET") && self.keyword_at(1, "DESCRIPTION") {
+                self.position += 2;
+                Some(self.expr()?)
+            } else {
+                None
+            };
+            return Ok(Some(Access::CreateRole {
+                name,
+                if_not_exists,
+                description,
+            }));
+        }
+        if self.at_keyword("DROP") && (user(self, 1) || self.keyword_at(1, "ROLE")) {
+            let role = self.keyword_at(1, "ROLE");
+            self.position += 2;
+            let name = self.access_name("the name to drop")?;
+            let if_exists = self.at_keyword("IF") && self.keyword_at(1, "EXISTS");
+            if if_exists {
+                self.position += 2;
+            }
+            return Ok(Some(if role {
+                Access::DropRole { name, if_exists }
+            } else {
+                Access::DropUser { name, if_exists }
+            }));
+        }
+        let grant = self.at_keyword("GRANT");
+        let deny = self.at_keyword("DENY");
+        let revoke = self.at_keyword("REVOKE");
+        if !(grant || deny || revoke) {
+            return Ok(None);
+        }
+        self.advance();
+        if !deny && (self.at_keyword("ROLE") || self.at_keyword("ROLES")) {
+            self.advance();
+            let roles = self.access_names("a role")?;
+            self.expect_keyword(if grant { "TO" } else { "FROM" })?;
+            let holders = self.access_names("an account or a role")?;
+            return Ok(Some(if grant {
+                Access::GrantRole { roles, to: holders }
+            } else {
+                Access::RevokeRole {
+                    roles,
+                    from: holders,
+                }
+            }));
+        }
+        let which = if revoke && self.eat_keyword("GRANT") {
+            grafeno::Revoke::Grants
+        } else if revoke && self.eat_keyword("DENY") {
+            grafeno::Revoke::Denials
+        } else {
+            grafeno::Revoke::Both
+        };
+        let mut privileges = vec![self.ident("a privilege (SHOW PRIVILEGES lists them)")?];
+        while self.eat(&Token::Comma) {
+            privileges.push(self.ident("a privilege")?);
+        }
+        self.expect_keyword("ON")?;
+        let target = self.access_target()?;
+        self.expect_keyword(if revoke { "FROM" } else { "TO" })?;
+        let roles = self.access_names("a role")?;
+        Ok(Some(if revoke {
+            Access::Revoke {
+                which,
+                privileges,
+                target,
+                roles,
+            }
+        } else {
+            Access::Grant {
+                deny,
+                privileges,
+                target,
+                roles,
+            }
+        }))
+    }
+
+    /// `SERVER`, `NAMESPACE name`, `NODES Label IN name`, `EDGES label IN
+    /// name` or `PROPERTY Label.key IN name`.
+    fn access_target(&mut self) -> Result<Target, QueryError> {
+        if self.eat_keyword("SERVER") {
+            return Ok(Target::Server);
+        }
+        if self.eat_keyword("NAMESPACE") {
+            return Ok(Target::Namespace(self.access_pattern()?));
+        }
+        let edges = self.eat_keyword("EDGES") || self.eat_keyword("RELATIONSHIPS");
+        if edges || self.eat_keyword("NODES") {
+            let label = self.ident("a label")?;
+            let namespace = self.access_in()?;
+            return Ok(Target::Label {
+                namespace,
+                label,
+                edges,
+            });
+        }
+        if self.eat_keyword("PROPERTY") {
+            let label = self.ident("a label")?;
+            self.expect(Token::Dot, "`.` and the property")?;
+            let property = self.ident("a property")?;
+            let namespace = self.access_in()?;
+            return Ok(Target::Property {
+                namespace,
+                label,
+                property,
+            });
+        }
+        Err(self.unexpected("SERVER, NAMESPACE, NODES, EDGES or PROPERTY"))
+    }
+
+    fn access_in(&mut self) -> Result<String, QueryError> {
+        self.expect_keyword("IN")?;
+        self.eat_keyword("NAMESPACE");
+        self.access_pattern()
+    }
+
+    /// A namespace or a pattern: a name, a string (`'team-*'`) or `*`.
+    fn access_pattern(&mut self) -> Result<String, QueryError> {
+        if self.eat(&Token::Star) {
+            return Ok("*".into());
+        }
+        self.access_name("a namespace (quote a pattern: 'team-*')")
+    }
+
+    /// A name: an identifier or a string (for names with `-`).
+    fn access_name(&mut self, expected: &str) -> Result<String, QueryError> {
+        match self.peek().clone() {
+            Token::Ident(name) | Token::Str(name) => {
+                self.advance();
+                Ok(name)
+            }
+            _ => Err(self.unexpected(expected)),
+        }
+    }
+
+    fn access_names(&mut self, expected: &str) -> Result<Vec<String>, QueryError> {
+        let mut names = vec![self.access_name(expected)?];
+        while self.eat(&Token::Comma) {
+            names.push(self.access_name(expected)?);
+        }
+        Ok(names)
+    }
+
+    fn if_not_exists(&mut self) -> bool {
+        let found =
+            self.at_keyword("IF") && self.keyword_at(1, "NOT") && self.keyword_at(2, "EXISTS");
+        if found {
+            self.position += 3;
+        }
+        found
+    }
+
+    /// `SET PASSWORD expr`, `SET STATUS ACTIVE | SUSPENDED`, `SET EXPIRES
+    /// expr`, `SET SUPERUSER true | false`, `SET DESCRIPTION expr`.
+    fn user_sets(&mut self) -> Result<Vec<UserSet>, QueryError> {
+        let mut sets = Vec::new();
+        while self.eat_keyword("SET") {
+            let set = if self.eat_keyword("PASSWORD") {
+                UserSet::Password(self.expr()?)
+            } else if self.eat_keyword("STATUS") {
+                if self.eat_keyword("ACTIVE") {
+                    UserSet::Disabled(false)
+                } else if self.eat_keyword("SUSPENDED") || self.eat_keyword("DISABLED") {
+                    UserSet::Disabled(true)
+                } else {
+                    return Err(self.unexpected("ACTIVE or SUSPENDED"));
+                }
+            } else if self.eat_keyword("EXPIRES") {
+                UserSet::Expires(self.expr()?)
+            } else if self.eat_keyword("SUPERUSER") {
+                if self.eat_keyword("TRUE") {
+                    UserSet::Superuser(true)
+                } else if self.eat_keyword("FALSE") {
+                    UserSet::Superuser(false)
+                } else {
+                    return Err(self.unexpected("true or false"));
+                }
+            } else if self.eat_keyword("DESCRIPTION") {
+                UserSet::Description(self.expr()?)
+            } else {
+                return Err(self.unexpected("PASSWORD, STATUS, EXPIRES, SUPERUSER or DESCRIPTION"));
+            };
+            sets.push(set);
+        }
+        Ok(sets)
+    }
+
     /// `CREATE INDEX`, `CREATE CONSTRAINT`, `DROP INDEX`, `DROP CONSTRAINT`,
     /// `SHOW INDEXES` or `SHOW CONSTRAINTS`, if the statement is one.
     fn schema(&mut self) -> Result<Option<Schema>, QueryError> {
+        if let Some(access) = self.access()? {
+            return Ok(Some(Schema::Access(access)));
+        }
         let what = |parser: &Self, at: usize| {
             if parser.keyword_at(at, "INDEX") || parser.keyword_at(at, "INDEXES") {
                 Some(false)

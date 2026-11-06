@@ -38,6 +38,7 @@
 //!
 //! The full reference is in `docs/query-language.md`.
 
+mod access;
 mod aggregate;
 mod algorithms;
 mod ast;
@@ -59,14 +60,16 @@ mod value;
 
 use std::fmt;
 
+pub use access::{AccessContext, GrantRequest, PasswordHasher, manage_grants};
 pub use cache::{
     STATEMENT_CACHE, StatementCacheStats, clear_statement_cache, statement_cache_stats,
 };
 pub use eval::Params;
 pub use exec::split::{Partial, SplitPlan, execute_part, merge_parts, split_plan};
 pub use exec::{
-    MAX_PATH_LENGTH, PlanStep, QueryResult, StatementKind, WriteStats, execute, execute_in,
-    execute_read, execute_read_with, execute_with, is_write, statement_kind,
+    MAX_PATH_LENGTH, PlanStep, QueryResult, Requirements, StatementKind, WriteStats, execute,
+    execute_in, execute_read, execute_read_with, execute_with, is_write, requirements,
+    statement_kind,
 };
 pub use limits::{Limits, NamespaceFilter};
 pub use parallel::{MIN_CANDIDATES, parallelism, set_parallelism};

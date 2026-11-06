@@ -75,6 +75,7 @@ fn main() {
             superuser: false,
             own_only: false,
             disabled: false,
+            expires_at: None,
             description: None,
             created_at: Timestamp::now(),
         })

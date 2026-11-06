@@ -611,4 +611,186 @@ impl WriteTx {
         self.bump_access()?;
         Ok(removed)
     }
+
+    /// Gives `role` privileges (grants or denials) and built-in levels on
+    /// namespace patterns; returns how many it did not have yet.
+    pub fn grant(
+        &mut self,
+        role: &str,
+        privileges: &[Privilege],
+        levels: &[Grant],
+    ) -> Result<usize> {
+        let mut def = self.existing_role(role)?;
+        let mut added = 0;
+        for privilege in privileges {
+            privilege.check()?;
+            if !def.privileges.contains(privilege) {
+                def.privileges.push(privilege.clone());
+                added += 1;
+            }
+        }
+        for level in levels {
+            if !def.grants.contains(level) {
+                def.grants.push(level.clone());
+                added += 1;
+            }
+        }
+        if added > 0 {
+            self.put_role(&def)?;
+        }
+        Ok(added)
+    }
+
+    /// Takes privileges (`which` says whether grants, denials or both) and
+    /// built-in levels from `role`; returns how many it had.
+    pub fn revoke(
+        &mut self,
+        role: &str,
+        privileges: &[(Act, Object)],
+        levels: &[Grant],
+        which: Revoke,
+    ) -> Result<usize> {
+        let mut def = self.existing_role(role)?;
+        let before = def.privileges.len() + def.grants.len();
+        def.privileges.retain(|p| {
+            let matches = privileges
+                .iter()
+                .any(|(action, object)| *action == p.action && *object == p.object);
+            let kind = match which {
+                Revoke::Both => true,
+                Revoke::Grants => !p.deny,
+                Revoke::Denials => p.deny,
+            };
+            !(matches && kind)
+        });
+        if which != Revoke::Denials {
+            def.grants.retain(|g| !levels.contains(g));
+        }
+        let removed = before - def.privileges.len() - def.grants.len();
+        if removed > 0 {
+            self.put_role(&def)?;
+        }
+        Ok(removed)
+    }
+
+    /// Gives `role` to `to`, an account or another role; says which it was
+    /// and whether it is new to it.
+    pub fn grant_role(&mut self, role: &str, to: &str) -> Result<(Holder, bool)> {
+        self.existing_role(role)?;
+        if let Some(mut account) = self.account(to)? {
+            if account.roles.iter().any(|r| r == role) {
+                return Ok((Holder::Account, false));
+            }
+            account.roles.push(role.to_owned());
+            self.put_account(&account)?;
+            return Ok((Holder::Account, true));
+        }
+        if let Some(mut def) = self.role(to)? {
+            if def.roles.iter().any(|r| r == role) {
+                return Ok((Holder::Role, false));
+            }
+            def.roles.push(role.to_owned());
+            self.put_role(&def)?;
+            return Ok((Holder::Role, true));
+        }
+        Err(Error::Invalid(format!(
+            "there is no account or role {to:?}"
+        )))
+    }
+
+    /// Takes `role` from `from`, an account or another role; says which it
+    /// was and whether it had it.
+    pub fn revoke_role(&mut self, role: &str, from: &str) -> Result<(Holder, bool)> {
+        if let Some(mut account) = self.account(from)? {
+            let had = account.roles.iter().any(|r| r == role);
+            if had {
+                account.roles.retain(|r| r != role);
+                self.put_account(&account)?;
+            }
+            return Ok((Holder::Account, had));
+        }
+        if let Some(mut def) = self.role(from)? {
+            let had = def.roles.iter().any(|r| r == role);
+            if had {
+                def.roles.retain(|r| r != role);
+                self.put_role(&def)?;
+            }
+            return Ok((Holder::Role, had));
+        }
+        Err(Error::Invalid(format!(
+            "there is no account or role {from:?}"
+        )))
+    }
+
+    /// Whether `name` is an account, a role or neither.
+    pub fn holder(&self, name: &str) -> Result<Option<Holder>> {
+        Ok(if self.account(name)?.is_some() {
+            Some(Holder::Account)
+        } else if self.role(name)?.is_some() {
+            Some(Holder::Role)
+        } else {
+            None
+        })
+    }
+
+    fn existing_role(&self, name: &str) -> Result<RoleDef> {
+        if BUILT_IN_ROLES.contains(&name) {
+            return Err(Error::Invalid(format!(
+                "{name:?} is built in: grant its privileges to a role of your own"
+            )));
+        }
+        self.role(name)?.ok_or_else(|| {
+            Error::Invalid(format!(
+                "there is no role {name:?} (CREATE ROLE {name} first)"
+            ))
+        })
+    }
+}
+
+/// What [`WriteTx::revoke`] takes away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Revoke {
+    Grants,
+    Denials,
+    Both,
+}
+
+/// What holds a role: an account or another role.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Holder {
+    Account,
+    Role,
+}
+
+/// The built-in level a name stands for (`reader`, `editor`, `admin`).
+pub fn level_of(name: &str) -> Option<Role> {
+    match name.to_ascii_lowercase().as_str() {
+        "reader" => Some(Role::Read),
+        "editor" => Some(Role::Write),
+        "admin" => Some(Role::Admin),
+        _ => None,
+    }
+}
+
+impl std::fmt::Display for Object {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Object::Server => f.write_str("server"),
+            Object::Namespace { namespace } => write!(f, "namespace {namespace}"),
+            Object::Label {
+                namespace,
+                label,
+                edges,
+            } => write!(
+                f,
+                "{} {label} in {namespace}",
+                if *edges { "edges" } else { "nodes" }
+            ),
+            Object::Property {
+                namespace,
+                label,
+                property,
+            } => write!(f, "property {label}.{property} in {namespace}"),
+        }
+    }
 }

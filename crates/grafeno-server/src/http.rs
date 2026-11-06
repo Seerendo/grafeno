@@ -379,6 +379,34 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/algorithms", get(algorithms))
         .route("/whoami", get(crate::accounts::whoami))
         .route("/privileges", get(crate::roles::catalog))
+        // 14.3: the same accounts and roles under /admin, and grants.
+        .route(
+            "/admin/users",
+            get(crate::accounts::list_accounts).post(crate::accounts::create_account),
+        )
+        .route(
+            "/admin/users/{name}",
+            get(crate::accounts::get_account)
+                .patch(crate::accounts::change_account)
+                .delete(crate::accounts::delete_account),
+        )
+        .route("/admin/roles", get(crate::roles::list_roles))
+        .route(
+            "/admin/roles/{name}",
+            get(crate::roles::get_role)
+                .put(crate::roles::put_role)
+                .delete(crate::roles::delete_role),
+        )
+        .route(
+            "/admin/grants",
+            get(crate::admin::privileges_of).post(crate::admin::grant),
+        )
+        .route("/admin/grants/revoke", post(crate::admin::revoke))
+        .route("/admin/grants/roles", post(crate::admin::grant_roles))
+        .route(
+            "/admin/grants/roles/revoke",
+            post(crate::admin::revoke_roles),
+        )
         .route("/roles", get(crate::roles::list_roles))
         .route(
             "/roles/{name}",
@@ -839,6 +867,12 @@ async fn refuse(
     .into_response()
 }
 
+/// Why the caller may not do what `role` stands for in `ns`, if it may not.
+fn missing(caller: &Caller, ns: &str, role: Role) -> Option<String> {
+    let actions = auth::role_actions(role);
+    (!caller.can_all(actions, ns)).then(|| caller.refusal(ns, actions))
+}
+
 /// 403 unless the caller of this request has `role` on `ns`.
 fn require(ns: &str, role: Role) -> ApiResult<()> {
     require_all(ns, auth::role_actions(role))
@@ -860,7 +894,7 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Absent → `None`, `null` → `Some(None)`, a value → `Some(Some(value))`.
-fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
@@ -2111,15 +2145,35 @@ async fn run_query_counted(
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let _guard = CancelOnDrop(cancel.clone());
     let caller = auth::current();
-    match grafeno_query::statement_kind(&query)? {
-        grafeno_query::StatementKind::Read => require(&ns, Role::Read)?,
-        grafeno_query::StatementKind::Write => require(&ns, Role::Write)?,
-        grafeno_query::StatementKind::Schema => require(&ns, Role::Admin)?,
+    let context = auth::access_context(&caller);
+    let needs = grafeno_query::requirements(&query, Some(&context))?;
+    // What the statement would lack if it ran: refused, or, under EXPLAIN,
+    // said in the plan (14.3).
+    let missing = match needs.kind {
+        grafeno_query::StatementKind::Read => missing(&caller, &ns, Role::Read),
+        grafeno_query::StatementKind::Write => missing(&caller, &ns, Role::Write),
+        grafeno_query::StatementKind::Schema => missing(&caller, &ns, Role::Admin),
+        grafeno_query::StatementKind::Access => needs.lacking.map(|privilege| {
+            format!(
+                "{:?} has no `{privilege}` privilege on the server",
+                caller.name()
+            )
+        }),
+    };
+    if let (Some(message), false) = (&missing, needs.explain) {
+        return Err(ApiError::forbidden(message.clone()));
     }
+    // Even under EXPLAIN, a plan of a namespace is for those who read it.
+    if needs.kind != grafeno_query::StatementKind::Access {
+        require(&ns, Role::Read)?;
+    }
+    let denied = missing.filter(|_| needs.explain);
+    let access = needs.kind == grafeno_query::StatementKind::Access;
     let limits = grafeno_query::Limits {
         cancel: Some(cancel),
         visible: (!caller.is_owner())
             .then(|| grafeno_query::NamespaceFilter::new(move |ns| caller.may(ns, Role::Read))),
+        access: Some(context),
         ..state.limits.clone()
     };
     if !grafeno_query::is_write(&query)? {
@@ -2130,10 +2184,14 @@ async fn run_query_counted(
             if let (Some(node), Some(split)) = (writer.cluster(), &split) {
                 return crate::cluster::read(&writer, node, &ns, &query, &params, &limits, split);
             }
-            Ok(
+            let mut result =
                 grafeno_query::execute_read_with(&db.begin_read()?, &ns, &query, &params, &limits)?
-                    .to_json(),
-            )
+                    .to_json();
+            if let (Some(message), Some(rows)) = (denied, result["rows"].as_array_mut()) {
+                let step = rows.len() + 1;
+                rows.push(json!([step, "DENIED", message]));
+            }
+            Ok(result)
         })
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
@@ -2143,6 +2201,7 @@ async fn run_query_counted(
     // engine error and the query error itself is kept aside.
     let failure: Arc<std::sync::Mutex<Option<grafeno_query::QueryError>>> = Arc::default();
     let kept = failure.clone();
+    let (token, had) = (state.token.is_some(), state.keys.has_accounts());
     let outcome = write(state, move |tx| {
         // Written already under this key: the first result, nothing more.
         if let Some(key) = &key
@@ -2159,6 +2218,9 @@ async fn run_query_counted(
                 Error::Invalid(message)
             })?
             .to_json();
+        if access {
+            crate::accounts::keep_a_superuser(tx, token, had)?;
+        }
         if let Some(key) = &key {
             let bytes = serde_json::to_vec(&result)
                 .map_err(|error| Error::Serialization(error.to_string()))?;
@@ -2168,7 +2230,13 @@ async fn run_query_counted(
     })
     .await;
     match outcome {
-        Ok(result) => Ok(result),
+        Ok(result) => {
+            // Accounts and keys changed: dropped accounts' keys stop working.
+            if access {
+                state.keys.reload(&state.db)?;
+            }
+            Ok(result)
+        }
         Err(error) => match failure.lock().expect("not poisoned").take() {
             Some(query_error) => Err(query_error.into()),
             None => Err(error),

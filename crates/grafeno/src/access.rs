@@ -113,12 +113,21 @@ pub struct Account {
     /// A disabled account can neither sign in nor use its keys.
     #[serde(default)]
     pub disabled: bool,
+    /// After this time the account can neither sign in nor use its keys
+    /// (14.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub created_at: Timestamp,
 }
 
 impl Account {
+    /// Whether it has expired at `now`.
+    pub fn expired(&self, now: Timestamp) -> bool {
+        self.expires_at.is_some_and(|at| at <= now)
+    }
+
     /// The highest role it has on `ns`.
     pub fn role_in(&self, ns: &str) -> Option<Role> {
         if self.superuser {
@@ -234,6 +243,7 @@ impl Principal {
                 superuser: self.owner,
                 own_only: self.own_only,
                 disabled: false,
+                expires_at: None,
                 description: self.description.clone(),
                 created_at: self.created_at,
             },
@@ -527,6 +537,7 @@ mod tests {
             superuser: false,
             own_only: false,
             disabled: false,
+            expires_at: None,
             description: None,
             created_at: Timestamp::from_micros(0),
         }

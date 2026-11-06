@@ -125,6 +125,12 @@ enum Command {
     /// Accounts: users who sign in with a password, and service accounts.
     #[command(subcommand)]
     Users(UsersCommand),
+    /// Roles: privileges, levels and other roles, given to accounts.
+    #[command(subcommand)]
+    Roles(RolesCommand),
+    /// Grant, deny and revoke privileges on roles, and roles to accounts.
+    #[command(subcommand)]
+    Grants(GrantsCommand),
     /// A cluster member's view, its voters, and compacting its log (on a
     /// running member, through its API).
     #[command(subcommand)]
@@ -424,6 +430,97 @@ enum UsersCommand {
         #[command(flatten)]
         target: KeysTarget,
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RolesCommand {
+    /// List the roles, built-in ones first.
+    List {
+        #[command(flatten)]
+        target: KeysTarget,
+    },
+    /// Create a role (empty; grant it privileges with `grafeno grants`).
+    Create {
+        #[command(flatten)]
+        target: KeysTarget,
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Delete a role: every account and role that had it loses it.
+    Delete {
+        #[command(flatten)]
+        target: KeysTarget,
+        name: String,
+    },
+    /// The privileges of a role or an account, with the role each comes from.
+    Show {
+        #[command(flatten)]
+        target: KeysTarget,
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum GrantsCommand {
+    /// Every privilege, by what it applies to.
+    Catalog {
+        #[command(flatten)]
+        target: KeysTarget,
+    },
+    /// Grant privileges (`read,create`, or a level: reader, editor, admin).
+    Grant {
+        #[command(flatten)]
+        target: KeysTarget,
+        privileges: String,
+        /// server, namespace:NAME, nodes:Label@NAME, edges:label@NAME or
+        /// property:Label.key@NAME (NAME may be a pattern: `team-*`).
+        #[arg(long)]
+        on: String,
+        /// The role.
+        #[arg(long)]
+        to: String,
+    },
+    /// Deny privileges: a denial wins over any grant.
+    Deny {
+        #[command(flatten)]
+        target: KeysTarget,
+        privileges: String,
+        #[arg(long)]
+        on: String,
+        #[arg(long)]
+        to: String,
+    },
+    /// Revoke privileges (grants and denials; `--grants` or `--denials` only).
+    Revoke {
+        #[command(flatten)]
+        target: KeysTarget,
+        privileges: String,
+        #[arg(long)]
+        on: String,
+        #[arg(long)]
+        from: String,
+        #[arg(long, conflicts_with = "denials")]
+        grants: bool,
+        #[arg(long)]
+        denials: bool,
+    },
+    /// Give a role to an account or another role.
+    AddRole {
+        #[command(flatten)]
+        target: KeysTarget,
+        role: String,
+        #[arg(long)]
+        to: String,
+    },
+    /// Take a role from an account or another role.
+    RemoveRole {
+        #[command(flatten)]
+        target: KeysTarget,
+        role: String,
+        #[arg(long)]
+        from: String,
     },
 }
 
@@ -788,6 +885,97 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     users::change(&target.resolve()?, &name, None, Some(false))?
                 }
                 UsersCommand::Delete { target, name } => users::delete(&target.resolve()?, &name)?,
+            }
+        }
+        Command::Roles(command) => {
+            use grafeno_server::access_cli::{quote, run};
+            match command {
+                RolesCommand::List { target } => run(&target.resolve()?, "SHOW ROLES")?,
+                RolesCommand::Create {
+                    target,
+                    name,
+                    description,
+                } => {
+                    let mut statement = format!("CREATE ROLE {}", quote(&name));
+                    if let Some(description) = description {
+                        statement.push_str(&format!(" SET DESCRIPTION {}", quote(&description)));
+                    }
+                    run(&target.resolve()?, &statement)?
+                }
+                RolesCommand::Delete { target, name } => {
+                    run(&target.resolve()?, &format!("DROP ROLE {}", quote(&name)))?
+                }
+                RolesCommand::Show { target, name } => run(
+                    &target.resolve()?,
+                    &format!("SHOW PRIVILEGES FOR {}", quote(&name)),
+                )?,
+            }
+        }
+        Command::Grants(command) => {
+            use grafeno_server::access_cli::{privileges, quote, run, target as on};
+            match command {
+                GrantsCommand::Catalog { target } => run(&target.resolve()?, "SHOW PRIVILEGES")?,
+                GrantsCommand::Grant {
+                    target,
+                    privileges: list,
+                    on: object,
+                    to,
+                } => run(
+                    &target.resolve()?,
+                    &format!(
+                        "GRANT {} ON {} TO {}",
+                        privileges(&list)?,
+                        on(&object)?,
+                        quote(&to)
+                    ),
+                )?,
+                GrantsCommand::Deny {
+                    target,
+                    privileges: list,
+                    on: object,
+                    to,
+                } => run(
+                    &target.resolve()?,
+                    &format!(
+                        "DENY {} ON {} TO {}",
+                        privileges(&list)?,
+                        on(&object)?,
+                        quote(&to)
+                    ),
+                )?,
+                GrantsCommand::Revoke {
+                    target,
+                    privileges: list,
+                    on: object,
+                    from,
+                    grants,
+                    denials,
+                } => {
+                    let which = if grants {
+                        "GRANT "
+                    } else if denials {
+                        "DENY "
+                    } else {
+                        ""
+                    };
+                    run(
+                        &target.resolve()?,
+                        &format!(
+                            "REVOKE {which}{} ON {} FROM {}",
+                            privileges(&list)?,
+                            on(&object)?,
+                            quote(&from)
+                        ),
+                    )?
+                }
+                GrantsCommand::AddRole { target, role, to } => run(
+                    &target.resolve()?,
+                    &format!("GRANT ROLE {} TO {}", quote(&role), quote(&to)),
+                )?,
+                GrantsCommand::RemoveRole { target, role, from } => run(
+                    &target.resolve()?,
+                    &format!("REVOKE ROLE {} FROM {}", quote(&role), quote(&from)),
+                )?,
             }
         }
         Command::Namespaces { db } => {

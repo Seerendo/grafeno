@@ -504,6 +504,26 @@ impl Caller {
     }
 }
 
+/// What the caller may manage, for access statements in GQ (14.3); passwords
+/// set there go through the policy and Argon2id.
+pub fn access_context(caller: &Caller) -> grafeno_query::AccessContext {
+    let hasher: grafeno_query::PasswordHasher = Arc::new(|name: &str, password: &str| {
+        check_password(name, password)?;
+        Ok(hash_password(password))
+    });
+    grafeno_query::AccessContext {
+        account: caller.account().map(|a| a.name.clone()),
+        superuser: caller.is_owner(),
+        manage_accounts: caller.can_server(Act::ManageAccounts),
+        manage_roles: caller.can_server(Act::ManageRoles),
+        effective_roles: match caller {
+            Caller::Account { rights, .. } => rights.roles.clone(),
+            _ => Vec::new(),
+        },
+        hash_password: Some(hasher),
+    }
+}
+
 /// The actions a built-in level stands for in a check: reading is `read`,
 /// writing is creating, updating and deleting, administering is changing
 /// the schema.
@@ -585,7 +605,10 @@ pub fn need(method: &str, path: &str) -> Need {
         // Their own sessions, password and keys; the handlers check more.
         ["auth", ..] | ["keys", ..] => Need::Caller,
         ["accounts", ..] => Need::Server(Act::ManageAccounts),
-        ["roles", ..] => Need::Server(Act::ManageRoles),
+        ["roles", ..] | ["admin", "roles", ..] => Need::Server(Act::ManageRoles),
+        ["admin", "users", ..] => Need::Server(Act::ManageAccounts),
+        // Grants check what they touch: roles, or an account's roles.
+        ["admin", "grants", ..] => Need::Caller,
         ["algorithms"] | ["whoami"] | ["privileges"] => Need::Caller,
         ["metrics"] => Need::Server(Act::Metrics),
         // Listing filters what the caller may read; creating checks the
@@ -629,6 +652,9 @@ fn namespace_actions(method: &str, rest: &[&str]) -> &'static [Act] {
         return READ;
     }
     match (method, rest) {
+        // A GQ statement: the handler checks what it does (a read, a write,
+        // the schema, or managing access, which needs no namespace).
+        ("POST", ["query"]) => &[],
         (_, ["import", ..]) => &[Act::Import],
         ("POST", ["algo", ..]) => &[Act::Algorithms],
         (
@@ -641,7 +667,6 @@ fn namespace_actions(method: &str, rest: &[&str]) -> &'static [Act] {
             | ["search", ..]
             | ["recall"]
             | ["context"]
-            | ["query"]
             | ["query", "part"]
             | ["match"],
         ) => READ,
@@ -676,7 +701,7 @@ mod tests {
             need("POST", "/vault/search/text"),
             ns("vault", &[Act::Read])
         );
-        assert_eq!(need("POST", "/vault/query"), ns("vault", &[Act::Read]));
+        assert_eq!(need("POST", "/vault/query"), ns("vault", &[]));
         assert_eq!(need("POST", "/vault/merge"), ns("vault", &[Act::Merge]));
         assert_eq!(need("POST", "/vault/match"), ns("vault", &[Act::Read]));
         assert_eq!(need("POST", "/vault/read-many"), ns("vault", &[Act::Read]));
@@ -724,6 +749,15 @@ mod tests {
         assert_eq!(need("DELETE", "/keys/ana"), Need::Caller);
         assert_eq!(need("POST", "/accounts"), Need::Server(Act::ManageAccounts));
         assert_eq!(need("PUT", "/roles/x"), Need::Server(Act::ManageRoles));
+        assert_eq!(
+            need("PUT", "/admin/roles/x"),
+            Need::Server(Act::ManageRoles)
+        );
+        assert_eq!(
+            need("GET", "/admin/users"),
+            Need::Server(Act::ManageAccounts)
+        );
+        assert_eq!(need("POST", "/admin/grants"), Need::Caller);
         assert_eq!(need("GET", "/metrics"), Need::Server(Act::Metrics));
         assert_eq!(need("POST", "/backup"), Need::Server(Act::Backup));
         assert_eq!(need("GET", "/cluster/status"), Need::Server(Act::Cluster));

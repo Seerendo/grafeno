@@ -293,3 +293,100 @@ fn users_sign_in_from_the_shell() {
     let _ = server.wait();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Phase 14.3: `grafeno roles` and `grafeno grants` on a database file,
+/// and access statements in a local shell (passwords through the policy).
+#[test]
+fn roles_and_grants_from_the_command_line() {
+    let dir = std::env::temp_dir().join(format!("grafeno-shell-roles-{}", NodeId::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("roles.redb");
+    let db = db.to_str().unwrap();
+    let run = |args: &[&str]| {
+        let mut all = args.to_vec();
+        all.extend(["--db", db]);
+        let out = grafeno(&all, "");
+        assert!(out.status.success(), "{args:?}: {}", text(&out.stderr));
+        text(&out.stdout)
+    };
+    run(&[
+        "roles",
+        "create",
+        "team-reader",
+        "--description",
+        "reads the teams",
+    ]);
+    run(&[
+        "grants",
+        "grant",
+        "read,algorithms",
+        "--on",
+        "namespace:team-*",
+        "--to",
+        "team-reader",
+    ]);
+    run(&[
+        "grants",
+        "deny",
+        "read",
+        "--on",
+        "namespace:team-secret",
+        "--to",
+        "team-reader",
+    ]);
+    run(&[
+        "grants",
+        "grant",
+        "read",
+        "--on",
+        "property:Person.email@crm",
+        "--to",
+        "team-reader",
+    ]);
+    let shown = run(&["roles", "show", "team-reader"]);
+    assert!(shown.contains("deny"), "{shown}");
+    assert!(shown.contains("namespace team-secret"), "{shown}");
+    assert!(shown.contains("property Person.email in crm"), "{shown}");
+    let revoked = run(&[
+        "grants",
+        "revoke",
+        "read",
+        "--on",
+        "namespace:team-secret",
+        "--from",
+        "team-reader",
+        "--denials",
+    ]);
+    assert!(revoked.contains("revoked 1 privilege"), "{revoked}");
+    let listed = run(&["roles", "list"]);
+    assert!(
+        listed.contains("team-reader") && listed.contains("reads the teams"),
+        "{listed}"
+    );
+    assert!(run(&["grants", "catalog"]).contains("manage_roles"));
+
+    // A local shell sets passwords through the policy and Argon2id.
+    let weak = shell(
+        &["--db", db, "-c", "CREATE USER ana SET PASSWORD 'short';"],
+        None,
+    );
+    assert!(!weak.status.success());
+    let good = shell(
+        &[
+            "--db",
+            db,
+            "-c",
+            "CREATE USER ana SET PASSWORD 'correct horse battery';",
+        ],
+        None,
+    );
+    assert!(good.status.success(), "{}", text(&good.stderr));
+    run(&["grants", "add-role", "team-reader", "--to", "ana"]);
+    let users = run(&["users", "list"]);
+    assert!(users.contains("ana"), "{users}");
+    let shown = run(&["roles", "show", "ana"]);
+    assert!(shown.contains("team-reader"), "{shown}");
+    run(&["grants", "remove-role", "team-reader", "--from", "ana"]);
+    run(&["roles", "delete", "team-reader"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -321,6 +321,7 @@ impl QueryConfig {
             },
             cancel: None,
             visible: None,
+            access: None,
         }
     }
 }

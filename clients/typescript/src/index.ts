@@ -98,13 +98,52 @@ export interface Account {
   kind: "user" | "service";
   has_password: boolean;
   grants: Grant[];
+  /** Roles granted to it (14.2). */
+  roles: string[];
   superuser: boolean;
   /** `superuser`, under its name before 14.1. */
   owner: boolean;
   own_only: boolean;
   disabled: boolean;
+  /** When it stops working (14.3), microseconds since the epoch. */
+  expires_at?: number;
   description?: string;
   created_at: number;
+}
+
+/** What a privilege is on (14.2). Namespaces may be patterns: `team-*`, `*`. */
+export type PrivilegeObject =
+  | { on: "server" }
+  | { on: "namespace"; namespace: string }
+  | { on: "label"; namespace: string; label: string; edges?: boolean }
+  | { on: "property"; namespace: string; label: string; property: string };
+
+/** An action on an object, granted or denied (a denial wins). */
+export interface Privilege {
+  action: string;
+  object: PrivilegeObject;
+  deny?: boolean;
+}
+
+/** A role an administrator defined (14.2). */
+export interface RoleDefinition {
+  name: string;
+  privileges: Privilege[];
+  /** Built-in levels on namespace patterns (`read`, `write`, `admin`). */
+  grants: Grant[];
+  /** Roles it has. */
+  roles: string[];
+  description?: string;
+  created_at: number;
+}
+
+/** Every action by what it applies to, and the built-in roles. */
+export interface PrivilegeCatalog {
+  server: string[];
+  namespace: string[];
+  label: string[];
+  property: string[];
+  built_in: Record<string, unknown>;
 }
 
 /** What a key is narrowed to, inside its account's rights. */
@@ -802,6 +841,7 @@ export class Grafeno {
     kind: "user" | "service";
     password?: string;
     grants?: Grant[];
+    roles?: string[];
     superuser?: boolean;
     own_only?: boolean;
     description?: string;
@@ -812,7 +852,17 @@ export class Grafeno {
   /** Changes an account: password, grants, status (superusers). */
   changeAccount(
     name: string,
-    change: { password?: string; grants?: Grant[]; superuser?: boolean; own_only?: boolean; disabled?: boolean; description?: string | null },
+    change: {
+      password?: string;
+      grants?: Grant[];
+      roles?: string[];
+      superuser?: boolean;
+      own_only?: boolean;
+      disabled?: boolean;
+      /** Microseconds or an ISO 8601 date; `null` for never. */
+      expires_at?: number | string | null;
+      description?: string | null;
+    },
   ): Promise<Account> {
     return this.request("PATCH", `/v1/accounts/${encodeURIComponent(name)}`, change);
   }
@@ -820,6 +870,67 @@ export class Grafeno {
   /** Deletes an account with its keys and sessions (superusers). */
   async deleteAccount(name: string): Promise<void> {
     await this.request("DELETE", `/v1/accounts/${encodeURIComponent(name)}`);
+  }
+
+  /** Every privilege by what it applies to (14.2). */
+  privilegeCatalog(): Promise<PrivilegeCatalog> {
+    return this.request("GET", "/v1/privileges");
+  }
+
+  /** The roles (`manage_roles`). */
+  roles(): Promise<RoleDefinition[]> {
+    return this.request("GET", "/v1/admin/roles");
+  }
+
+  /** One role (`manage_roles`). */
+  role(name: string): Promise<RoleDefinition> {
+    return this.request("GET", `/v1/admin/roles/${encodeURIComponent(name)}`);
+  }
+
+  /** Defines or replaces a role; cycles are refused (`manage_roles`). */
+  putRole(
+    name: string,
+    role: { privileges?: Privilege[]; grants?: Grant[]; roles?: string[]; description?: string },
+  ): Promise<RoleDefinition> {
+    return this.request("PUT", `/v1/admin/roles/${encodeURIComponent(name)}`, role);
+  }
+
+  /** Removes a role; every account and role that had it loses it. */
+  async deleteRole(name: string): Promise<void> {
+    await this.request("DELETE", `/v1/admin/roles/${encodeURIComponent(name)}`);
+  }
+
+  /**
+   * Grants privileges (actions such as `read`, or the levels `reader`,
+   * `editor`, `admin`) on an object to roles; `deny` denies them instead.
+   */
+  grant(privileges: string[], on: PrivilegeObject, to: string[], options: { deny?: boolean } = {}): Promise<QueryResult> {
+    return this.request("POST", "/v1/admin/grants", { privileges, on, to, deny: options.deny ?? false });
+  }
+
+  /** Revokes privileges on an object from roles: grants, denials or both. */
+  revoke(
+    privileges: string[],
+    on: PrivilegeObject,
+    from: string[],
+    which: "grants" | "denials" | "both" = "both",
+  ): Promise<QueryResult> {
+    return this.request("POST", "/v1/admin/grants/revoke", { privileges, on, from, which });
+  }
+
+  /** Gives roles to accounts (`manage_accounts`) or roles (`manage_roles`). */
+  grantRoles(roles: string[], to: string[]): Promise<QueryResult> {
+    return this.request("POST", "/v1/admin/grants/roles", { roles, to });
+  }
+
+  /** Takes roles from accounts or roles. */
+  revokeRoles(roles: string[], from: string[]): Promise<QueryResult> {
+    return this.request("POST", "/v1/admin/grants/roles/revoke", { roles, from });
+  }
+
+  /** An account's or a role's privileges, each with the role it comes from. */
+  privilegesOf(holder: string): Promise<QueryResult> {
+    return this.request("GET", `/v1/admin/grants?holder=${encodeURIComponent(holder)}`);
   }
 
   /** Replaces a key's secret; the new one is returned only here, the old one stops working. */

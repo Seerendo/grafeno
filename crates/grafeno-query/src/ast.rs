@@ -45,6 +45,8 @@ pub(crate) enum Schema {
     Show { constraints: bool },
     /// `SHOW NAMESPACES`.
     ShowNamespaces,
+    /// Users, roles and grants (14.3).
+    Access(crate::access::Access),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -61,6 +63,7 @@ impl Statement {
     pub(crate) fn writes(&self) -> bool {
         match &self.schema {
             Some(Schema::Show { .. } | Schema::ShowNamespaces) => false,
+            Some(Schema::Access(access)) => access.writes(),
             Some(_) => true,
             None => self
                 .parts

@@ -102,6 +102,21 @@ fn sorted(rows: &Json) -> Vec<String> {
     rows
 }
 
+/// `got` with every value that `expected` writes as `"*"` replaced by
+/// `"*"`, so that it compares equal.
+fn masked(got: &Json, expected: &Json) -> Json {
+    match (got, expected) {
+        (_, Json::String(star)) if star == "*" => Json::String("*".into()),
+        (Json::Array(got), Json::Array(expected)) if got.len() == expected.len() => Json::Array(
+            got.iter()
+                .zip(expected)
+                .map(|(got, expected)| masked(got, expected))
+                .collect(),
+        ),
+        _ => got.clone(),
+    }
+}
+
 fn run(scenario: &Scenario) -> Result<(), String> {
     let db = Grafeno::in_memory().map_err(|e| e.to_string())?;
     let params = Params::new();
@@ -129,7 +144,7 @@ fn run(scenario: &Scenario) -> Result<(), String> {
         )),
         (_, Err(error)) => Err(format!("failed: {error}")),
         (Expect::Ordered(rows), Ok(result)) => {
-            let got = result.to_json()["rows"].clone();
+            let got = masked(&result.to_json()["rows"], rows);
             if &got == rows {
                 Ok(())
             } else {

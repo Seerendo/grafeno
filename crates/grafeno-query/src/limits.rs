@@ -34,6 +34,9 @@ pub struct Limits {
     /// The namespaces the caller may see, for statements that list them
     /// (`SHOW NAMESPACES`); all when `None`.
     pub visible: Option<NamespaceFilter>,
+    /// Who runs access statements and what they may manage (14.3);
+    /// everything when `None`.
+    pub access: Option<crate::access::AccessContext>,
 }
 
 /// Which namespaces a caller may see.
@@ -68,6 +71,7 @@ impl Limits {
             max_cost: None,
             cancel: None,
             visible: None,
+            access: None,
         }
     }
 

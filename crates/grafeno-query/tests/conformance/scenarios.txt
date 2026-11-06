@@ -10,6 +10,8 @@
 #   then any order: expected rows as JSON, in any order
 #   then error: text the error must contain
 #
+# In expected rows, "*" stands for any value (a time it was created).
+#
 # Nodes and edges are compared by what the query asks of them, so scenarios
 # return properties rather than whole records.
 #
@@ -711,3 +713,158 @@ then: [[2]]
 given: CREATE (:N {n: 1})
 when: MATCH (a) RETURN size(id(a))
 then: [[36]]
+
+# ---------------------------------------------------------------- access (14.3)
+# Run without a caller, as the owner; passwords need the server's hasher.
+
+=== create a service account and list it
+given: CREATE SERVICE ACCOUNT indexer SET DESCRIPTION 'loads notes'
+when: SHOW USERS
+then: [["indexer", "service", [], [], false, "active", null, "*"]]
+
+=== a user needs a password
+when: CREATE USER ana
+then error: a user needs a password
+
+=== passwords need the server
+when: CREATE USER ana SET PASSWORD 'a long passphrase'
+then error: passwords are set through the server
+
+=== create an account twice
+given: CREATE SERVICE ACCOUNT bot
+when: CREATE SERVICE ACCOUNT bot
+then error: an account named "bot" exists
+
+=== create an account if it does not exist
+given: CREATE SERVICE ACCOUNT bot
+when: CREATE SERVICE ACCOUNT bot IF NOT EXISTS
+then: [["the account bot exists"]]
+
+=== suspend, expire and drop an account
+given: CREATE SERVICE ACCOUNT bot
+given: ALTER USER bot SET STATUS SUSPENDED SET EXPIRES '2030-01-01'
+when: SHOW USERS
+then: [["bot", "service", [], [], false, "disabled", "*", "*"]]
+
+=== drop an account
+given: CREATE SERVICE ACCOUNT bot
+given: DROP USER bot
+when: SHOW USERS
+then: []
+
+=== drop an account that is not there
+when: DROP USER ghost IF EXISTS
+then: [["there is no account ghost"]]
+
+=== create and list roles
+given: CREATE ROLE analyst SET DESCRIPTION 'reads the teams'
+when: SHOW ROLES
+then: [["reader", true, [], 0, "*"], ["editor", true, [], 0, "*"], ["admin", true, [], 0, "*"], ["superuser", true, [], 0, "*"], ["analyst", false, [], 0, "reads the teams"]]
+
+=== built-in roles cannot be made
+when: CREATE ROLE editor
+then error: is a built-in role
+
+=== grant and deny privileges
+given: CREATE ROLE analyst
+given: GRANT read, algorithms ON NAMESPACE 'team-*' TO analyst
+given: DENY read ON NAMESPACE 'team-secret' TO analyst
+given: GRANT read ON NODES Person IN crm TO analyst
+given: DENY read ON PROPERTY Person.email IN crm TO analyst
+given: GRANT editor ON NAMESPACE notes TO analyst
+given: GRANT metrics ON SERVER TO analyst
+when: SHOW PRIVILEGES FOR analyst
+then any order: [["analyst", "grant", "editor", "namespace notes"], ["analyst", "grant", "read", "namespace team-*"], ["analyst", "grant", "algorithms", "namespace team-*"], ["analyst", "deny", "read", "namespace team-secret"], ["analyst", "grant", "read", "nodes Person in crm"], ["analyst", "deny", "read", "property Person.email in crm"], ["analyst", "grant", "metrics", "server"]]
+
+=== grant reports what is new
+given: CREATE ROLE analyst
+given: GRANT read ON NAMESPACE crm TO analyst
+when: GRANT read, export ON NAMESPACE crm TO analyst
+then: [["granted 1 privilege on namespace crm to analyst"]]
+
+=== revoke only denials
+given: CREATE ROLE analyst
+given: GRANT read ON NAMESPACE crm TO analyst
+given: DENY read ON NAMESPACE crm TO analyst
+given: REVOKE DENY read ON NAMESPACE crm FROM analyst
+when: SHOW PRIVILEGES FOR analyst
+then: [["analyst", "grant", "read", "namespace crm"]]
+
+=== revoke a level and a privilege
+given: CREATE ROLE analyst
+given: GRANT reader, export ON NAMESPACE crm TO analyst
+when: REVOKE reader, export ON NAMESPACE crm FROM analyst
+then: [["revoked 2 privileges on namespace crm from analyst"]]
+
+=== edges and their label
+given: CREATE ROLE auditor
+given: GRANT write ON EDGES works_at IN * TO auditor
+when: SHOW PRIVILEGES FOR auditor
+then: [["auditor", "grant", "write", "edges works_at in *"]]
+
+=== a privilege must fit its object
+given: CREATE ROLE analyst
+when: GRANT backup ON NAMESPACE crm TO analyst
+then error: does not apply
+
+=== a level is on a namespace
+given: CREATE ROLE analyst
+when: GRANT editor ON SERVER TO analyst
+then error: a level on a namespace
+
+=== unknown privileges
+given: CREATE ROLE analyst
+when: GRANT fly ON SERVER TO analyst
+then error: unknown privilege
+
+=== grants go to existing roles
+when: GRANT read ON NAMESPACE crm TO nobody
+then error: CREATE ROLE nobody first
+
+=== roles to accounts and to roles
+given: CREATE ROLE reader_crm
+given: CREATE ROLE analyst
+given: CREATE SERVICE ACCOUNT bot
+given: GRANT reader ON NAMESPACE crm TO reader_crm
+given: GRANT ROLE reader_crm TO analyst
+given: GRANT ROLE analyst TO bot
+when: SHOW PRIVILEGES FOR bot
+then: [["reader_crm", "grant", "reader", "namespace crm"]]
+
+=== role cycles are refused
+given: CREATE ROLE a
+given: CREATE ROLE b
+given: GRANT ROLE a TO b
+when: GRANT ROLE b TO a
+then error: a cycle
+
+=== revoke a role
+given: CREATE ROLE analyst
+given: CREATE SERVICE ACCOUNT bot
+given: GRANT ROLE analyst TO bot
+given: REVOKE ROLE analyst FROM bot
+when: SHOW USERS
+then: [["bot", "service", [], [], false, "active", null, "*"]]
+
+=== dropping a role takes it from everyone
+given: CREATE ROLE analyst
+given: CREATE SERVICE ACCOUNT bot
+given: GRANT ROLE analyst TO bot
+given: DROP ROLE analyst
+when: SHOW USERS
+then: [["bot", "service", [], [], false, "active", null, "*"]]
+
+=== the public role is everyone's
+given: CREATE ROLE public
+given: GRANT reader ON NAMESPACE docs TO public
+given: CREATE SERVICE ACCOUNT bot
+when: SHOW PRIVILEGES FOR bot
+then: [["public", "grant", "reader", "namespace docs"]]
+
+=== the current user without one
+when: SHOW CURRENT USER
+then: [["owner", "token", true, [], []]]
+
+=== explain an access statement
+when: EXPLAIN GRANT read ON NAMESPACE crm TO analyst
+then: [[1, "SCHEMA", "grant read on namespace crm to analyst (manage_roles)"]]

@@ -115,6 +115,7 @@ pub fn create(target: &Target, new: NewAccount) -> Result<(), String> {
                 superuser: new.superuser,
                 own_only: new.own_only,
                 disabled: false,
+                expires_at: None,
                 description: None,
                 created_at: Timestamp::now(),
             };

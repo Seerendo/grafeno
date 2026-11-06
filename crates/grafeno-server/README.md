@@ -176,6 +176,33 @@ curl -X PATCH localhost:7810/v1/accounts/ana -H "Authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' -d '{"roles": ["team-reader"]}'
 ```
 
+Access can be managed in GQ too (14.3): `CREATE USER`, `ALTER USER`,
+`CREATE ROLE`, `GRANT`, `DENY`, `REVOKE`, `GRANT ROLE`, `SHOW USERS`,
+`SHOW ROLES`, `SHOW PRIVILEGES [FOR name]`, `SHOW CURRENT USER` (see
+[the query language](../../docs/query-language.md#users-roles-and-privileges)),
+with `grafeno roles` and `grafeno grants`, and in the Studio's Access view.
+
+```bash
+grafeno roles create team_reader --config grafeno.toml
+```
+
+```bash
+grafeno grants grant read,export --on "namespace:team-*" --to team_reader --config grafeno.toml
+```
+
+```bash
+grafeno grants deny read --on property:Person.email@crm --to team_reader --config grafeno.toml
+```
+
+```bash
+grafeno grants add-role team_reader --to ana --config grafeno.toml
+```
+
+Without a token, accounts close the server: the first account must be a
+superuser, and a change that would leave no active superuser (or no
+accounts) is refused. Accounts can expire (`ALTER USER … SET EXPIRES`,
+`expires_at`): an expired account answers 401 `account_expired`.
+
 An account may also be a **superuser** (everything, including managing
 accounts; `owner` in older answers) and may be limited to **its own
 records**: then it changes or deletes only
@@ -221,6 +248,12 @@ superuser, and from then on every request needs a credential.
 | `GET`, `POST` | `/v1/accounts` | `{name, kind: user\|service, password?, grants, roles, superuser, own_only, description}` | `manage_accounts`; only superusers make superusers |
 | `GET`, `PATCH`, `DELETE` | `/v1/accounts/{name}` | `{password?, grants?, roles?, superuser?, own_only?, disabled?, description?}` | `manage_accounts`, not on superusers; disabling or a new password ends its sessions |
 | `GET` | `/v1/privileges` | | every action by object, and the built-in levels (anyone signed in) |
+| `GET`, `POST`, `PATCH`, `DELETE` | `/v1/admin/users`, `/v1/admin/users/{name}` | as `/v1/accounts`, plus `expires_at` (microseconds, ISO 8601, or `null`) | the accounts under the design's name (14.3) |
+| `GET`, `PUT`, `DELETE` | `/v1/admin/roles`, `/v1/admin/roles/{name}` | as `/v1/roles` | the roles (`manage_roles`) |
+| `GET` | `/v1/admin/grants?holder=name` | | `{columns: [source, access, privilege, on], rows}`: an account's or a role's privileges (its own: anyone; others: `manage_roles` or `manage_accounts`) |
+| `POST` | `/v1/admin/grants` | `{privileges: ["read", "editor", …], on: {on: …}, to: [roles], deny?}` | grants or denies; `{rows: [["granted 2 privileges …"]]}` (`manage_roles`) |
+| `POST` | `/v1/admin/grants/revoke` | `{privileges, on, from: [roles], which?: grants\|denials\|both}` | revokes |
+| `POST` | `/v1/admin/grants/roles`, `/v1/admin/grants/roles/revoke` | `{roles, to}` / `{roles, from}` | gives or takes roles: to accounts `manage_accounts`, to roles `manage_roles` |
 | `GET` | `/v1/roles` | | the roles (`manage_roles`) |
 | `GET`, `PUT`, `DELETE` | `/v1/roles/{name}` | `{privileges: [{action, object: {on: server\|namespace\|label\|property, namespace?, label?, edges?, property?}, deny?}], grants, roles, description}` | a role; `PUT` defines or replaces it (201 when new), refusing cycles; `DELETE` takes it from everyone |
 | `GET`, `POST` | `/v1/keys` | `{name, account?, scope?: {namespaces, read_only}, expires_in_days?, description?}` | an account's own keys (superusers: all); the secret once |

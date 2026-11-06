@@ -134,7 +134,7 @@ pub fn execute_with(
         let mut tx = db.begin_write()?;
         let read = db.begin_read()?;
         let outcome = match &statement.schema {
-            Some(schema) => run_schema(&read, Some(&mut tx), ns, schema, limits),
+            Some(schema) => run_schema(&read, Some(&mut tx), ns, schema, params, limits),
             None => Runner::new(&read, Some(&mut tx), ns, params, statement.mode, limits)?
                 .run(&statement),
         };
@@ -172,7 +172,7 @@ pub fn execute_in(
         return explain(&statement, &plan_info(read, ns)?, params);
     }
     match &statement.schema {
-        Some(schema) => run_schema(read, Some(tx), ns, schema, limits),
+        Some(schema) => run_schema(read, Some(tx), ns, schema, params, limits),
         None => Runner::new(read, Some(tx), ns, params, statement.mode, limits)?.run(&statement),
     }
 }
@@ -206,7 +206,7 @@ pub fn execute_read_with(
         ));
     }
     if let Some(schema) = &statement.schema {
-        return run_schema(read, None, ns, schema, limits);
+        return run_schema(read, None, ns, schema, params, limits);
     }
     Runner::new(read, None, ns, params, statement.mode, limits)?.run(&statement)
 }
@@ -283,6 +283,7 @@ fn run_schema(
     tx: Option<&mut WriteTx>,
     ns: &str,
     schema: &Schema,
+    params: &Params,
     limits: &Limits,
 ) -> Result<QueryResult, QueryError> {
     let table = |rows: Vec<Vec<Value>>| QueryResult {
@@ -292,6 +293,9 @@ fn run_schema(
         profile: None,
     };
     match schema {
+        Schema::Access(access) => {
+            crate::access::run(read, tx, access, params, limits.access.as_ref())
+        }
         Schema::ShowNamespaces => Ok(QueryResult {
             columns: ["name", "nodes", "edges", "created_at", "description"]
                 .iter()
@@ -475,16 +479,52 @@ pub enum StatementKind {
     Write,
     /// Creates or drops indexes and constraints.
     Schema,
+    /// Manages or lists users, roles and grants: the statement checks what
+    /// the caller may manage itself ([`Limits::access`]).
+    Access,
 }
 
 pub fn statement_kind(query: &str) -> Result<StatementKind, QueryError> {
     let statement = crate::cache::parsed(query)?;
+    if statement.mode != Mode::Explain && matches!(statement.schema, Some(Schema::Access(_))) {
+        return Ok(StatementKind::Access);
+    }
     Ok(if statement.mode == Mode::Explain || !statement.writes() {
         StatementKind::Read
     } else if statement.schema.is_some() {
         StatementKind::Schema
     } else {
         StatementKind::Write
+    })
+}
+
+/// What a statement would need if it ran, `EXPLAIN` aside.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Requirements {
+    /// It is an `EXPLAIN`: it describes, and runs nothing.
+    pub explain: bool,
+    /// The kind of the statement under the `EXPLAIN`, if any.
+    pub kind: StatementKind,
+    /// For an access statement, the server privilege `context` lacks.
+    pub lacking: Option<&'static str>,
+}
+
+/// [`Requirements`] of a statement, for a caller described by `context`.
+pub fn requirements(
+    query: &str,
+    context: Option<&crate::access::AccessContext>,
+) -> Result<Requirements, QueryError> {
+    let statement = crate::cache::parsed(query)?;
+    let (kind, lacking) = match &statement.schema {
+        Some(Schema::Access(access)) => (StatementKind::Access, access.lacking(context)),
+        Some(_) if statement.writes() => (StatementKind::Schema, None),
+        _ if statement.writes() => (StatementKind::Write, None),
+        _ => (StatementKind::Read, None),
+    };
+    Ok(Requirements {
+        explain: statement.mode == Mode::Explain,
+        kind,
+        lacking,
     })
 }
 
@@ -2467,6 +2507,7 @@ fn explain(
             Schema::Drop { name, .. } => format!("drop {name}"),
             Schema::Show { .. } => "list the indexes".into(),
             Schema::ShowNamespaces => "list the namespaces".into(),
+            Schema::Access(access) => access.describe(),
         };
         return Ok(QueryResult {
             columns: vec!["step".into(), "operation".into(), "details".into()],

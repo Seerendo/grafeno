@@ -145,6 +145,7 @@ fn world() -> impl Strategy<Value = (HashMap<String, RoleDef>, Account)> {
                 superuser,
                 own_only: false,
                 disabled: false,
+                expires_at: None,
                 description: None,
                 created_at: Timestamp::from_micros(0),
             };
@@ -420,6 +421,7 @@ fn roles_in_the_database() {
             superuser: false,
             own_only: false,
             disabled: false,
+            expires_at: None,
             description: None,
             created_at: Timestamp::now(),
         })

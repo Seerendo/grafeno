@@ -78,6 +78,9 @@ pub fn authenticate(state: &AppState, token: &str) -> Result<Caller, ApiError> {
         if account.disabled {
             return Err(unauthorized("account_disabled", "the account is disabled"));
         }
+        if account.expired(Timestamp::now()) {
+            return Err(unauthorized("account_expired", "the account expired"));
+        }
         let rights = state.keys.rights(&read, &account)?;
         Ok((Arc::new(account), rights))
     };
@@ -167,6 +170,8 @@ pub struct AccountOutput {
     own_only: bool,
     disabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<Timestamp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     created_at: Timestamp,
 }
@@ -183,6 +188,7 @@ impl From<&Account> for AccountOutput {
             owner: account.superuser,
             own_only: account.own_only,
             disabled: account.disabled,
+            expires_at: account.expires_at,
             description: account.description.clone(),
             created_at: account.created_at,
         }
@@ -348,6 +354,7 @@ pub async fn setup(
         superuser: true,
         own_only: false,
         disabled: false,
+        expires_at: None,
         description: Some("the first account".into()),
         created_at: Timestamp::now(),
     };
@@ -404,6 +411,9 @@ pub async fn signin(
     if account.disabled {
         return Err(unauthorized("account_disabled", "the account is disabled"));
     }
+    if account.expired(Timestamp::now()) {
+        return Err(unauthorized("account_expired", "the account expired"));
+    }
     throttle.succeeded(&account.name);
     Ok(Json(open_session(&state, &account, address).await?))
 }
@@ -448,8 +458,13 @@ pub async fn refresh(
         .db
         .begin_read()?
         .account(&session.account)?
-        .filter(|a| !a.disabled)
-        .ok_or_else(|| unauthorized("account_disabled", "the account is disabled or gone"))?;
+        .filter(|a| !a.disabled && !a.expired(Timestamp::now()))
+        .ok_or_else(|| {
+            unauthorized(
+                "account_disabled",
+                "the account is disabled, expired or gone",
+            )
+        })?;
     let (access, access_secret) = auth::new_token(auth::ACCESS_PREFIX, &id);
     let (refresh, refresh_secret) = auth::new_token(auth::REFRESH_PREFIX, &id);
     let renewed = Session {
@@ -703,11 +718,17 @@ pub async fn create_account(
         superuser: input.superuser,
         own_only: input.own_only,
         disabled: false,
+        expires_at: None,
         description: input.description.filter(|d| !d.trim().is_empty()),
         created_at: Timestamp::now(),
     };
     let stored = account.clone();
-    crate::http::write(&state, move |tx| tx.create_account(&stored)).await?;
+    let (token, had) = (state.token.is_some(), state.keys.has_accounts());
+    crate::http::write(&state, move |tx| {
+        tx.create_account(&stored)?;
+        keep_a_superuser(tx, token, had)
+    })
+    .await?;
     state.keys.note_account();
     Ok((StatusCode::CREATED, Json(AccountOutput::from(&account))))
 }
@@ -734,6 +755,9 @@ pub struct AccountChange {
     superuser: Option<bool>,
     own_only: Option<bool>,
     disabled: Option<bool>,
+    /// When it stops working (`null`: never).
+    #[serde(default, deserialize_with = "crate::http::double_option")]
+    expires_at: Option<Option<crate::api::TimeInput>>,
     description: Option<Option<String>>,
 }
 
@@ -755,8 +779,15 @@ pub async fn change_account(
         only_superusers("make or unmake a superuser")?;
     }
     guard_superuser(&state, &name)?;
+    // Microseconds or an ISO 8601 date, as everywhere in the API.
+    let expires_at = match &input.expires_at {
+        Some(Some(at)) => Some(Some(at.resolve().map_err(ApiError::from)?)),
+        Some(None) => Some(None),
+        None => None,
+    };
     let input = Arc::new(input);
     let target = name.clone();
+    let (token, had) = (state.token.is_some(), state.keys.has_accounts());
     let changed = crate::http::write(&state, move |tx| {
         let mut account = tx
             .account(&target)?
@@ -783,6 +814,9 @@ pub async fn change_account(
         if let Some(own_only) = input.own_only {
             account.own_only = own_only;
         }
+        if let Some(expires_at) = expires_at {
+            account.expires_at = expires_at;
+        }
         if let Some(disabled) = input.disabled {
             end |= disabled && !account.disabled;
             account.disabled = disabled;
@@ -791,6 +825,7 @@ pub async fn change_account(
             account.description = description.clone();
         }
         tx.put_account(&account)?;
+        keep_a_superuser(tx, token, had)?;
         if end {
             for session in tx_sessions(tx, &target)? {
                 tx.delete_session(&session)?;
@@ -823,6 +858,29 @@ fn guard_superuser(state: &AppState, name: &str) -> ApiResult<()> {
     Ok(())
 }
 
+/// Without a token, accounts close the server: refuses a change that
+/// would leave accounts but no active superuser, as nobody could manage
+/// them any more (the first account must be one).
+/// Dropping every account is refused too: it would open the server to
+/// anyone (`had` says whether there were accounts before the change).
+pub(crate) fn keep_a_superuser(
+    tx: &grafeno::WriteTx,
+    token: bool,
+    had: bool,
+) -> grafeno::Result<()> {
+    if token {
+        return Ok(());
+    }
+    let accounts = tx.accounts()?;
+    if (accounts.is_empty() && !had) || accounts.iter().any(|a| a.superuser && !a.disabled) {
+        Ok(())
+    } else {
+        Err(grafeno::Error::Invalid(
+            "without a token in grafeno.toml, accounts close the server: keep an active superuser (the first account must be one)".into(),
+        ))
+    }
+}
+
 /// The ids of an account's sessions, inside a write.
 fn tx_sessions(tx: &grafeno::WriteTx, account: &str) -> grafeno::Result<Vec<String>> {
     Ok(tx
@@ -840,7 +898,13 @@ pub async fn delete_account(
 ) -> ApiResult<StatusCode> {
     guard_superuser(&state, &name)?;
     let target = name.clone();
-    let removed = crate::http::write(&state, move |tx| tx.delete_account(&target)).await?;
+    let (token, had) = (state.token.is_some(), state.keys.has_accounts());
+    let removed = crate::http::write(&state, move |tx| {
+        let removed = tx.delete_account(&target)?;
+        keep_a_superuser(tx, token, had)?;
+        Ok(removed)
+    })
+    .await?;
     state.keys.reload(&state.db)?;
     if removed {
         Ok(StatusCode::NO_CONTENT)
@@ -955,6 +1019,7 @@ pub async fn create_key(
         superuser: input.owner,
         own_only: input.own_only,
         disabled: false,
+        expires_at: None,
         description: key.description.clone(),
         created_at: key.created_at,
     });
@@ -1021,6 +1086,7 @@ pub async fn revoke_key(
 ) -> ApiResult<StatusCode> {
     let key = manageable(&state, &name)?;
     let target = name.clone();
+    let (token, had) = (state.token.is_some(), state.keys.has_accounts());
     crate::http::write(&state, move |tx| {
         tx.delete_api_key(&target)?;
         let alone = key.account == target
@@ -1030,6 +1096,7 @@ pub async fn revoke_key(
             && !tx.all_api_keys()?.iter().any(|k| k.account == target);
         if alone {
             tx.delete_account(&target)?;
+            keep_a_superuser(tx, token, had)?;
         }
         Ok(())
     })

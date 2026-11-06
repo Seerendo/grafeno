@@ -237,9 +237,15 @@ impl Backend {
 
     fn query(&self, ns: &str, query: &str) -> Result<Value, String> {
         match self {
-            Backend::Local(db) => grafeno_query::execute(db, ns, query, &Default::default())
-                .map(|result| result.to_json())
-                .map_err(|error| error.to_string()),
+            Backend::Local(db) => grafeno_query::execute_with(
+                db,
+                ns,
+                query,
+                &Default::default(),
+                &crate::access_cli::local_limits(),
+            )
+            .map(|result| result.to_json())
+            .map_err(|error| error.to_string()),
             Backend::Remote { .. } => {
                 self.call("POST", &path(ns, "query"), Some(json!({ "query": query })))
             }
