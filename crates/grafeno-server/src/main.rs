@@ -89,7 +89,8 @@ enum Command {
         /// Use a throwaway in-memory database.
         #[arg(long, conflicts_with = "url")]
         memory: bool,
-        /// URL of a running `grafeno serve`, such as http://127.0.0.1:7810.
+        /// URL of a running `grafeno serve`, such as http://127.0.0.1:7810;
+        /// several members of a cluster separated by commas, tried in turn.
         #[arg(long, env = "GRAFENO_URL")]
         url: Option<String>,
         /// Bearer token of the server.

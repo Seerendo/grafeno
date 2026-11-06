@@ -1,6 +1,7 @@
 //! `grafeno shell`: an interactive console for GQ queries and administration,
 //! on a database file or on a running server.
 
+use std::cell::Cell;
 use std::io::{BufRead, IsTerminal, Read};
 use std::time::Instant;
 
@@ -33,24 +34,42 @@ Example: MATCH (p:Person)-[:works_at]->(c) RETURN p.name, c.name LIMIT 10;";
 
 /// Where the shell sends its work: a database file opened directly, or a
 /// server over HTTP. Both answer with the HTTP API's JSON shapes.
+///
+/// A remote backend may know several members of a cluster: it talks to
+/// one, moves to the next when that one does not answer, and sends the
+/// last position it saw (`x-grafeno-after`) so it reads its own writes on
+/// whichever member it lands.
 pub enum Backend {
     Local(Grafeno),
     Remote {
         agent: ureq::Agent,
-        url: String,
+        urls: Vec<String>,
+        current: Cell<usize>,
+        position: Cell<u64>,
         token: Option<String>,
     },
 }
 
 impl Backend {
-    pub fn remote(url: &str, token: Option<String>) -> Self {
+    /// `urls` is one address or several separated by commas.
+    pub fn remote(urls: &str, token: Option<String>) -> Self {
         let agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .build()
             .new_agent();
+        let mut list: Vec<String> = urls
+            .split(',')
+            .map(|url| url.trim().trim_end_matches('/').to_owned())
+            .filter(|url| !url.is_empty())
+            .collect();
+        if list.is_empty() {
+            list.push(urls.trim().to_owned());
+        }
         Backend::Remote {
             agent,
-            url: url.trim_end_matches('/').to_owned(),
+            urls: list,
+            current: Cell::new(0),
+            position: Cell::new(0),
             token,
         }
     }
@@ -58,7 +77,7 @@ impl Backend {
     fn describe(&self) -> String {
         match self {
             Backend::Local(_) => "a local database file".into(),
-            Backend::Remote { url, .. } => url.clone(),
+            Backend::Remote { urls, current, .. } => urls[current.get()].clone(),
         }
     }
 
@@ -70,27 +89,64 @@ impl Backend {
         body: Option<String>,
         json_body: bool,
     ) -> Result<String, String> {
-        let Backend::Remote { agent, url, token } = self else {
+        let Backend::Remote {
+            agent,
+            urls,
+            current,
+            position,
+            token,
+        } = self
+        else {
             unreachable!("only remote backends send requests")
         };
-        let uri = format!("{url}{path}");
-        let mut request = match method {
-            "GET" => agent.get(&uri).force_send_body(),
-            _ => agent.post(&uri),
-        };
-        if let Some(token) = token {
-            request = request.header("authorization", format!("Bearer {token}"));
-        }
         let content_type = if json_body {
             "application/json"
         } else {
             "application/x-ndjson"
         };
-        let result = match body {
-            Some(body) => request.header("content-type", content_type).send(body),
-            None => request.send_empty(),
+        // The member in use first, then the others in turn.
+        let mut failures = Vec::new();
+        let mut answered = None;
+        for step in 0..urls.len() {
+            let at = (current.get() + step) % urls.len();
+            let url = &urls[at];
+            let uri = format!("{url}{path}");
+            let mut request = match method {
+                "GET" => agent.get(&uri).force_send_body(),
+                _ => agent.post(&uri),
+            };
+            if let Some(token) = token {
+                request = request.header("authorization", format!("Bearer {token}"));
+            }
+            if position.get() > 0 {
+                request = request.header("x-grafeno-after", position.get().to_string());
+            }
+            let result = match &body {
+                Some(body) => request
+                    .header("content-type", content_type)
+                    .send(body.as_str()),
+                None => request.send_empty(),
+            };
+            match result {
+                Ok(response) => {
+                    current.set(at);
+                    answered = Some(response);
+                    break;
+                }
+                Err(error) => failures.push(format!("cannot reach {url}: {error}")),
+            }
+        }
+        let Some(mut response) = answered else {
+            return Err(failures.join("; "));
         };
-        let mut response = result.map_err(|error| format!("cannot reach {url}: {error}"))?;
+        if let Some(seen) = response
+            .headers()
+            .get("x-grafeno-position")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            position.set(position.get().max(seen));
+        }
         let status = response.status();
         let text = response
             .body_mut()

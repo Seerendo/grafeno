@@ -504,13 +504,43 @@ export interface SummaryInput {
   archive_sources?: boolean;
 }
 
+/**
+ * How fresh a read must be on a cluster: `local` (default) reads what the
+ * member has applied, `bounded` sends it to the leader when the member
+ * lags far behind, `linearizable` sees every write acknowledged before it
+ * (through the leader). A single server ignores it.
+ */
+export type Consistency = "local" | "bounded" | "linearizable";
+
 export interface GrafenoOptions {
-  /** Base URL, such as `http://127.0.0.1:7810`. */
-  url: string;
+  /**
+   * Base URL, such as `http://127.0.0.1:7810`. For a cluster, several
+   * members' URLs: the client uses one and moves to the next when it does
+   * not answer.
+   */
+  url: string | string[];
   /** Bearer token, if the server was started with one. */
   token?: string;
+  /** The consistency of every request (default `local`). */
+  consistency?: Consistency;
+  /**
+   * Read your own writes on any member (default true): each request asks
+   * the member to have applied the last position this client saw.
+   */
+  readYourWrites?: boolean;
   /** A custom `fetch`, for tests or other runtimes. */
   fetch?: typeof fetch;
+}
+
+/** Options of one GQ statement. */
+export interface QueryOptions {
+  /**
+   * A write sent again with the same key (a retry after a lost answer)
+   * runs once: later sends return the first result.
+   */
+  idempotencyKey?: string;
+  /** The consistency of this statement, over the client's. */
+  consistency?: Consistency;
 }
 
 /** An error returned by the server (or a network failure, with status 0). */
@@ -530,16 +560,39 @@ export class GrafenoError extends Error {
 }
 
 export class Grafeno {
-  readonly #url: string;
+  readonly #urls: string[];
+  #current = 0;
+  #position = 0;
   readonly #token: string | undefined;
+  readonly #consistency: Consistency | undefined;
+  readonly #readYourWrites: boolean;
   readonly #fetch: typeof fetch;
 
   constructor(options: GrafenoOptions) {
-    this.#url = options.url.replace(/\/+$/, "");
+    const urls = Array.isArray(options.url) ? options.url : [options.url];
+    this.#urls = urls.map((url) => url.replace(/\/+$/, "")).filter((url) => url !== "");
+    if (this.#urls.length === 0) throw new Error("Grafeno needs at least one URL");
     this.#token = options.token;
+    this.#consistency = options.consistency;
+    this.#readYourWrites = options.readYourWrites ?? true;
     // Browsers refuse `fetch` called as a method of another object
     // ("Illegal invocation"), so the global one is bound to `globalThis`.
     this.#fetch = options.fetch ?? fetch.bind(globalThis);
+  }
+
+  /** The member this client talks to now. */
+  get url(): string {
+    return this.#urls[this.#current];
+  }
+
+  /** The latest cluster position this client saw (0 on a single server). */
+  get position(): number {
+    return this.#position;
+  }
+
+  /** The cluster as the current member sees it: role, leader, positions, voters (owners only). */
+  cluster(): Promise<Record<string, unknown>> {
+    return this.request("GET", "/v1/cluster");
   }
 
   /** Operations on one namespace (a user, organization or agent). */
@@ -627,28 +680,49 @@ export class Grafeno {
   }
 
   /** Sends a request and parses the JSON response. */
-  async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  async request<T>(method: string, path: string, body?: unknown, extra: Record<string, string> = {}): Promise<T> {
     const response = await this.#send(
       method,
       path,
       body === undefined ? undefined : JSON.stringify(body),
       "application/json",
+      extra,
     );
     const text = await response.text();
     return (text ? JSON.parse(text) : undefined) as T;
   }
 
   /** Sends a request; throws `GrafenoError` unless the response is a success. */
-  async #send(method: string, path: string, body?: string, contentType?: string): Promise<Response> {
+  async #send(
+    method: string,
+    path: string,
+    body?: string,
+    contentType?: string,
+    extra: Record<string, string> = {},
+  ): Promise<Response> {
     const headers: Record<string, string> = {};
     if (body !== undefined && contentType) headers["content-type"] = contentType;
     if (this.#token) headers.authorization = `Bearer ${this.#token}`;
-    let response: Response;
-    try {
-      response = await this.#fetch(this.#url + path, { method, headers, body });
-    } catch (error) {
-      throw new GrafenoError(0, "network", `request to Grafeno failed: ${String(error)}`);
+    if (this.#consistency) headers["x-grafeno-consistency"] = this.#consistency;
+    if (this.#readYourWrites && this.#position > 0) headers["x-grafeno-after"] = String(this.#position);
+    Object.assign(headers, extra);
+    // The member in use first, then the others in turn.
+    let response: Response | undefined;
+    const failures: string[] = [];
+    for (let step = 0; step < this.#urls.length && response === undefined; step++) {
+      const at = (this.#current + step) % this.#urls.length;
+      try {
+        response = await this.#fetch(this.#urls[at] + path, { method, headers, body });
+        this.#current = at;
+      } catch (error) {
+        failures.push(`${this.#urls[at]}: ${String(error)}`);
+      }
     }
+    if (response === undefined) {
+      throw new GrafenoError(0, "network", `request to Grafeno failed: ${failures.join("; ")}`);
+    }
+    const seen = Number(response.headers.get("x-grafeno-position"));
+    if (Number.isSafeInteger(seen) && seen > this.#position) this.#position = seen;
     if (!response.ok) {
       const text = await response.text();
       let error: ({ code?: string; message?: string } & Record<string, unknown>) | undefined;
@@ -833,8 +907,11 @@ export class Namespace {
    * `MATCH (p:Person)-[:works_at]->(c) RETURN p.name, c.name`. Statements
    * with writes run in one transaction.
    */
-  query(query: string, params: Record<string, unknown> = {}): Promise<QueryResult> {
-    return this.#call("POST", "/query", { query, params });
+  query(query: string, params: Record<string, unknown> = {}, options: QueryOptions = {}): Promise<QueryResult> {
+    const extra: Record<string, string> = {};
+    if (options.idempotencyKey !== undefined) extra["idempotency-key"] = options.idempotencyKey;
+    if (options.consistency !== undefined) extra["x-grafeno-consistency"] = options.consistency;
+    return this.#client.request("POST", this.#base + "/query", { query, params }, extra);
   }
 
   /**
