@@ -68,6 +68,7 @@ pruebas y las aserciones de depuración. No requiere cambiar `Cargo.toml`.
 
 ```bash
 npm run build --prefix studio
+npm test --prefix studio
 npm run build --prefix clients/typescript
 npm test --prefix clients/typescript
 ```

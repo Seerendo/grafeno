@@ -245,6 +245,19 @@ def scenario(window, files, artifacts):
     window.wait(lambda: window.text("main .cards .card:first-child .value") == "1", "mostrar la base recuperada")
     window.capture(artifacts, "06-copia-recuperada")
     checks.append("Copiar y recuperar sin sobrescribir la base activa ni el respaldo, conservando los datos.")
+    session = window.invoke("session")
+    reply = window.invoke("request", {"method": "GET", "url": session["url"] + "/v1/backup", "headers": {}})
+    assert reply["status"] == 200, reply
+    assert reply.get("bodyBase64") and reply["body"] == "", "el respaldo binario perdió su representación"
+    binary_backup = files / "respaldo del puente.redb"
+    binary_backup.write_bytes(base64.b64decode(reply["bodyBase64"], validate=True))
+    recovered_from_bridge = files / "recuperada desde el puente.redb"
+    assert window.invoke("restore_database", {"source": str(binary_backup), "path": str(recovered_from_bridge)}) > 0
+    window.open_file(recovered_from_bridge)
+    assert window.read_query("MATCH (p:Person) RETURN p.name") == [["Ana de prueba"]]
+    window.wait(lambda: window.text("main .cards .card:first-child .value") == "1", "mostrar la recuperación del puente binario")
+    window.capture(artifacts, "07-puente-binario")
+    checks.append("Transferir un respaldo binario por el puente Tauri y recuperar sus datos sin alterarlos.")
     for check in checks:
         print(f"OK: {check}", flush=True)
     return checks

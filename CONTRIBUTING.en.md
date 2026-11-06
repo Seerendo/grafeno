@@ -68,6 +68,7 @@ tests and debug assertions. It does not require changes to `Cargo.toml`.
 
 ```bash
 npm run build --prefix studio
+npm test --prefix studio
 npm run build --prefix clients/typescript
 npm test --prefix clients/typescript
 ```

@@ -36,6 +36,8 @@ jobs:
             clients/typescript/package-lock.json
       - name: Instalar dependencias de la interfaz
         run: npm ci --prefix studio --no-audit --no-fund
+      - name: Probar el contrato del puente de escritorio
+        run: npm test --prefix studio
       - name: Comprobar tipos y compilar la interfaz
         run: npm run build --prefix studio
       - name: Instalar dependencias del cliente

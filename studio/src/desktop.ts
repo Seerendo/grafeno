@@ -1,3 +1,5 @@
+import { createDesktopFetch } from "./desktop-fetch.ts";
+
 // The desktop application (Tauri): when the Studio runs in its window,
 // `window.__TAURI__` is there, and these helpers reach the app's commands.
 // In a browser they are absent and the Studio works as before.
@@ -60,32 +62,8 @@ export const desktop = {
   },
 };
 
-interface Reply {
-  status: number;
-  headers: Record<string, string>;
-  body: string;
-}
-
-/**
- * `fetch` through the app: requests to the open database run in-process,
- * others go out from the app itself, so no server needs CORS for it.
- */
-export const desktopFetch: typeof fetch = async (input, init) => {
-  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-  const headers: Record<string, string> = {};
-  new Headers(init?.headers).forEach((value, name) => {
-    headers[name] = value;
-  });
-  const body = init?.body == null ? null : typeof init.body === "string" ? init.body : await new Response(init.body).text();
-  let reply: Reply;
-  try {
-    reply = await invoke<Reply>("request", { method: init?.method ?? "GET", url, headers, body });
-  } catch (error) {
-    throw new TypeError(String(error));
-  }
-  const empty = reply.status === 204 || reply.status === 205 || reply.status === 304;
-  return new Response(empty ? null : reply.body, { status: reply.status, headers: reply.headers });
-};
+/** Solicitudes locales dentro del proceso; remotas mediante el agente nativo. */
+export const desktopFetch = createDesktopFetch(invoke);
 
 /** Saves text to a file the user picks: a dialog in the app, a download in a browser. */
 export async function saveText(name: string, text: string, type: string): Promise<boolean> {

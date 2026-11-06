@@ -153,3 +153,34 @@ La prueba de ventana también crea una copia, rechaza destinos existentes y una
 sesión caducada, intenta recuperar un archivo inválido y abre una recuperación
 válida conservando los datos. Los selectores nativos siguen pendientes de prueba
 manual.
+
+## Contrato del puente HTTP
+
+`src/bridge.rs` contiene el transporte local y remoto sin dependencia de Tauri.
+`studio/src/desktop-fetch.ts` adapta las solicitudes de Studio a ese contrato.
+El texto UTF-8 viaja en `body`; las respuestas con otros bytes incluyen
+`bodyBase64` y un `body` vacío. En las solicitudes se admite `body` o
+`bodyBase64`, nunca ambos. Así se conservan respaldos binarios sin convertir
+bytes inválidos en caracteres de reemplazo. Las llamadas textuales existentes
+siguen siendo compatibles.
+
+El adaptador normaliza `Request`, URL y `RequestInit`, conservando método,
+cabeceras y bytes del cuerpo. Mantiene los estados HTTP —incluidos los errores—
+y deja sin cuerpo las respuestas HEAD, 204, 205 y 304.
+
+`AbortSignal` permite dejar de esperar y evita el envío si se cancela antes.
+Una orden ya enviada puede continuar y confirmar cambios: cancelar no revierte
+una escritura ni detiene una consulta del motor. El adaptador no vuelve a
+enviar automáticamente una orden fallida. Los cuerpos se almacenan completos
+en memoria; esta entrega no implementa streaming ni un reemplazo general de
+todas las opciones de `fetch` del navegador.
+
+```bash
+npm test --prefix studio
+cargo test --locked -p grafeno-desktop bridge::tests
+```
+
+Las pruebas verifican texto Unicode, bytes de 0 a 255, transporte remoto real
+por HTTP, estados de error, objetos Request, cancelación y el formato JSON del
+contrato. La prueba de ventana obtiene un respaldo binario por el comando
+Tauri, lo recupera y comprueba los datos en la base resultante.

@@ -11,25 +11,17 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
-use std::sync::Arc;
 use std::sync::Mutex;
 
-use axum::Router;
-use axum::body::Body;
-#[cfg(test)]
-use grafeno::Grafeno;
-use http_body_util::BodyExt;
 use serde::Serialize;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
-use tower::ServiceExt;
 
+mod bridge;
 mod local_database;
-#[cfg(test)]
-use local_database::router_for;
+use bridge::{Reply, local_request, remote_request, request_body};
 use local_database::{
     Session, SessionInfo, backup_target, file_name, info, local_path, open_session, request_target,
 };
@@ -49,13 +41,6 @@ struct RecentItem {
     path: String,
     name: String,
     exists: bool,
-}
-
-#[derive(Serialize)]
-struct Reply {
-    status: u16,
-    headers: BTreeMap<String, String>,
-    body: String,
 }
 
 fn recent_file(app: &AppHandle) -> Option<PathBuf> {
@@ -255,46 +240,6 @@ fn open_external(app: AppHandle, url: String) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-/// A request to the open database's router, in this process.
-async fn local_request(
-    router: Router,
-    method: &str,
-    path: &str,
-    headers: &BTreeMap<String, String>,
-    body: Option<String>,
-) -> Result<Reply, String> {
-    let mut builder = axum::http::Request::builder()
-        .method(method)
-        .uri(if path.is_empty() { "/" } else { path });
-    for (name, value) in headers {
-        builder = builder.header(name, value);
-    }
-    let request = builder
-        .body(Body::from(body.unwrap_or_default()))
-        .map_err(|error| error.to_string())?;
-    let response = router
-        .oneshot(request)
-        .await
-        .map_err(|error| error.to_string())?;
-    let status = response.status().as_u16();
-    let headers = response
-        .headers()
-        .iter()
-        .filter_map(|(name, value)| Some((name.to_string(), value.to_str().ok()?.to_owned())))
-        .collect();
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .map_err(|error| error.to_string())?
-        .to_bytes();
-    Ok(Reply {
-        status,
-        headers,
-        body: String::from_utf8_lossy(&bytes).into_owned(),
-    })
-}
-
 /// One HTTP request from the Studio: to the open database in-process, or
 /// to a remote server.
 #[tauri::command]
@@ -304,7 +249,9 @@ async fn request(
     url: String,
     headers: BTreeMap<String, String>,
     body: Option<String>,
+    body_base64: Option<String>,
 ) -> Result<Reply, String> {
+    let body = request_body(body, body_base64)?;
     if let Some(path) = local_path(&url) {
         let (router, token, path) = {
             let current = desktop.session.lock().expect("not poisoned");
@@ -331,43 +278,6 @@ async fn request(
     tokio::task::spawn_blocking(move || remote_request(&agent, &method, &url, &headers, body))
         .await
         .map_err(|error| error.to_string())?
-}
-
-/// A request to a Grafeno server, sent by the app (blocking).
-fn remote_request(
-    agent: &ureq::Agent,
-    method: &str,
-    url: &str,
-    headers: &BTreeMap<String, String>,
-    body: Option<String>,
-) -> Result<Reply, String> {
-    let mut builder = ureq::http::Request::builder().method(method).uri(url);
-    for (name, value) in headers {
-        builder = builder.header(name, value);
-    }
-    let request = builder
-        .body(body.unwrap_or_default())
-        .map_err(|error| error.to_string())?;
-    let mut response = agent
-        .run(request)
-        .map_err(|error| format!("cannot reach {url}: {error}"))?;
-    let status = response.status().as_u16();
-    let headers = response
-        .headers()
-        .iter()
-        .filter_map(|(name, value)| Some((name.to_string(), value.to_str().ok()?.to_owned())))
-        .collect();
-    let body = response
-        .body_mut()
-        .with_config()
-        .limit(1 << 30)
-        .read_to_string()
-        .map_err(|error| format!("cannot read the response: {error}"))?;
-    Ok(Reply {
-        status,
-        headers,
-        body,
-    })
 }
 
 // ------------------------------------------------------------ menu
@@ -571,96 +481,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    async fn call(router: &Router, method: &str, path: &str, body: Option<&str>) -> Reply {
-        let headers = BTreeMap::from([("content-type".to_owned(), "application/json".to_owned())]);
-        local_request(
-            router.clone(),
-            method,
-            path,
-            &headers,
-            body.map(str::to_owned),
-        )
-        .await
-        .unwrap()
-    }
-
-    #[tokio::test]
-    async fn the_bridge_reads_and_writes_in_process() {
-        let router = router_for(Arc::new(Grafeno::in_memory().unwrap()), None);
-        let health = call(&router, "GET", "/health", None).await;
-        assert_eq!(health.status, 200);
-        let created = call(&router, "POST", "/v1/namespaces", Some(r#"{"name":"lab"}"#)).await;
-        assert_eq!(created.status, 201, "{}", created.body);
-        let wrote = call(
-            &router,
-            "POST",
-            "/v1/lab/query",
-            Some(r#"{"query":"CREATE (:Person {name: 'Ana'})-[:knows]->(:Person {name: 'Bob'})"}"#),
-        )
-        .await;
-        assert_eq!(wrote.status, 200, "{}", wrote.body);
-        let read = call(
-            &router,
-            "POST",
-            "/v1/lab/query",
-            Some(r#"{"query":"MATCH (p:Person) RETURN count(p)"}"#),
-        )
-        .await;
-        assert!(read.body.contains("[[2]]"), "{}", read.body);
-        assert!(
-            read.headers
-                .get("content-type")
-                .is_some_and(|t| t.contains("json"))
-        );
-        let deleted = call(&router, "DELETE", "/v1/namespaces/lab", None).await;
-        assert_eq!(deleted.status, 200);
-        let missing = call(&router, "GET", "/v1/namespaces/lab", None).await;
-        assert_eq!(missing.status, 404);
-        // The Studio is not served from the app's router.
-        assert_eq!(call(&router, "GET", "/studio/", None).await.status, 404);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn the_bridge_reaches_a_server() {
-        let router = router_for(Arc::new(Grafeno::in_memory().unwrap()), None);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        let agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .build()
-            .new_agent();
-        let url = format!("http://{address}");
-        let reply = tokio::task::spawn_blocking(move || {
-            let headers =
-                BTreeMap::from([("content-type".to_owned(), "application/json".to_owned())]);
-            let created = remote_request(
-                &agent,
-                "POST",
-                &format!("{url}/v1/namespaces"),
-                &headers,
-                Some(r#"{"name":"far"}"#.into()),
-            )
-            .unwrap();
-            let missing = remote_request(
-                &agent,
-                "GET",
-                &format!("{url}/v1/namespaces/nope"),
-                &headers,
-                None,
-            )
-            .unwrap();
-            (created, missing)
-        })
-        .await
-        .unwrap();
-        assert_eq!(reply.0.status, 201, "{}", reply.0.body);
-        assert_eq!(
-            reply.1.status, 404,
-            "errors come back as answers, not failures"
-        );
-    }
 
     #[test]
     fn a_database_path_on_the_command_line() {

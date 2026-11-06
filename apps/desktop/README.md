@@ -163,3 +163,32 @@ cargo test --locked -p grafeno-desktop local_database::tests
 The window test also creates a backup, refuses existing destinations and an
 expired session, rejects an invalid recovery and opens a valid recovered database
 with its data intact. Native file dialogs still need manual testing.
+
+## HTTP bridge contract
+
+`src/bridge.rs` contains local and remote transport without a Tauri dependency.
+`studio/src/desktop-fetch.ts` adapts Studio requests to that contract. UTF-8 text
+travels in `body`; replies containing other bytes include `bodyBase64` and an
+empty `body`. Requests accept either `body` or `bodyBase64`, never both. This
+preserves binary backups without replacing invalid UTF-8 bytes with characters.
+Existing text callers remain compatible.
+
+The adapter normalizes `Request`, URL and `RequestInit`, preserving the method,
+headers and body bytes. HTTP statuses, including errors, remain responses;
+HEAD, 204, 205 and 304 have no response body.
+
+`AbortSignal` stops waiting and prevents dispatch when aborted beforehand. An
+already dispatched command may continue and commit: aborting neither rolls back
+a write nor stops an engine query. The adapter does not automatically resend a
+failed command. Bodies are fully buffered in memory; this change does not add
+streaming or implement every browser `fetch` option.
+
+```bash
+npm test --prefix studio
+cargo test --locked -p grafeno-desktop bridge::tests
+```
+
+Tests cover Unicode, byte values 0 through 255, real remote HTTP transport,
+error statuses, Request objects, cancellation and the JSON wire format. The
+window test obtains a binary backup through the Tauri command, restores it
+and checks the resulting database contents.
