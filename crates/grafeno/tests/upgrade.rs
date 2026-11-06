@@ -99,7 +99,11 @@ fn verify(db: &Grafeno, version: u64) {
     if version >= 7 {
         // Principals became service accounts with a key each (layout 15).
         let accounts = read.accounts().unwrap();
-        let expected = if version >= 14 { 3 } else { 1 };
+        let expected = match version {
+            15 => 2,
+            14 => 3,
+            _ => 1,
+        };
         assert_eq!(accounts.len(), expected, "v{version}");
         let reader = read.account("reader").unwrap().expect("the reader");
         assert_eq!(reader.kind, grafeno::AccountKind::Service);
@@ -112,13 +116,32 @@ fn verify(db: &Grafeno, version: u64) {
             (key.account.as_str(), key.secret_hash.as_str()),
             ("reader", "00".repeat(32).as_str())
         );
-        if version >= 14 {
+        if version == 15 {
+            let ana = read.account("ana").unwrap().unwrap();
+            assert_eq!(ana.kind, grafeno::AccountKind::User);
+            assert!(ana.own_only && ana.password_hash.is_some());
+            assert!(
+                read.api_key("ana-ro")
+                    .unwrap()
+                    .unwrap()
+                    .scope
+                    .unwrap()
+                    .read_only
+            );
+            assert_eq!(read.sessions(Some("ana")).unwrap().len(), 1);
+            assert!(
+                read.roles().unwrap().is_empty(),
+                "roles start empty (layout 16)"
+            );
+        } else if version >= 14 {
             assert!(read.account("admin-key").unwrap().unwrap().superuser);
             let agent = read.account("agent").unwrap().unwrap();
             assert!(agent.own_only && agent.may("fixture", grafeno::Role::Write));
             assert_eq!(read.api_keys().unwrap().len(), 3);
         }
-        assert!(read.sessions(None).unwrap().is_empty());
+        if version < 15 {
+            assert!(read.sessions(None).unwrap().is_empty());
+        }
     }
     assert!(read.merges(NS, None).unwrap().is_empty());
     if version >= 11 {
@@ -136,7 +159,7 @@ fn verify(db: &Grafeno, version: u64) {
 
 #[test]
 fn every_past_layout_upgrades() {
-    for version in 1..=14 {
+    for version in 1..=15 {
         let path = fixture(version);
         {
             let db = Grafeno::open(&path).unwrap_or_else(|e| panic!("v{version}: {e}"));

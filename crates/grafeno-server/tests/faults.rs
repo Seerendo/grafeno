@@ -201,7 +201,7 @@ fn register_stays_linearizable_when_processes_die() {
             let (running, history, apis) = (running.clone(), history.clone(), apis.clone());
             std::thread::spawn(move || {
                 let agent = agent();
-                let mut rng = Rng(seed ^ (client * 0x9E37_79B9_7F4A_7C15));
+                let mut rng = Rng(seed ^ client.wrapping_mul(0x9E37_79B9_7F4A_7C15));
                 let mut at = rng.below(3) as usize;
                 let mut counter = 0u64;
                 while running.load(Ordering::Relaxed) {

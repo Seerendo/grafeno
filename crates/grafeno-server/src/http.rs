@@ -376,6 +376,14 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/{ns}/query/part", post(query_part))
         .route("/algorithms", get(algorithms))
         .route("/whoami", get(crate::accounts::whoami))
+        .route("/privileges", get(crate::roles::catalog))
+        .route("/roles", get(crate::roles::list_roles))
+        .route(
+            "/roles/{name}",
+            get(crate::roles::get_role)
+                .put(crate::roles::put_role)
+                .delete(crate::roles::delete_role),
+        )
         .route(
             "/keys",
             get(crate::accounts::list_keys).post(crate::accounts::create_key),
@@ -799,8 +807,10 @@ async fn auth(State(state): State<AppState>, request: Request, next: Next) -> Re
             "{:?} is not a superuser (or its key is scoped)",
             caller.name()
         )),
-        Need::Namespace(ns, role) if caller.may(&ns, role) => Ok(()),
-        Need::Namespace(ns, role) => Err(caller.refusal(&ns, role)),
+        Need::Server(action) if caller.can_server(action) => Ok(()),
+        Need::Server(action) => Err(caller.server_refusal(action)),
+        Need::Namespace(ns, actions) if caller.can_all(actions, &ns) => Ok(()),
+        Need::Namespace(ns, actions) => Err(caller.refusal(&ns, actions)),
     };
     if let Err(message) = allowed {
         return refuse(request, StatusCode::FORBIDDEN, "forbidden", message).await;
@@ -829,11 +839,17 @@ async fn refuse(
 
 /// 403 unless the caller of this request has `role` on `ns`.
 fn require(ns: &str, role: Role) -> ApiResult<()> {
+    require_all(ns, auth::role_actions(role))
+}
+
+/// 403 unless the caller of this request may do every one of `actions` in
+/// `ns`.
+fn require_all(ns: &str, actions: &[grafeno::Act]) -> ApiResult<()> {
     let caller = auth::current();
-    if caller.may(ns, role) {
+    if caller.can_all(actions, ns) {
         Ok(())
     } else {
-        Err(ApiError::forbidden(caller.refusal(ns, role)))
+        Err(ApiError::forbidden(caller.refusal(ns, actions)))
     }
 }
 
@@ -1634,7 +1650,7 @@ async fn create_namespace(
     State(state): State<AppState>,
     Body(input): Body<NewNamespace>,
 ) -> ApiResult<(StatusCode, Json<grafeno::NamespaceInfo>)> {
-    require(&input.name, Role::Admin)?;
+    require_all(&input.name, &[grafeno::Act::CreateNamespace])?;
     let info = write(&state, move |tx| {
         tx.create_namespace(&input.name, input.description.as_deref())?;
         tx.namespace(&input.name)?
@@ -1774,7 +1790,7 @@ async fn export(
         .collect();
     let caller = auth::current();
     for ns in &namespaces {
-        require(ns, Role::Read)?;
+        require_all(ns, &[grafeno::Act::Export])?;
     }
     let body = blocking(&state, move |db| {
         let read = db.begin_read()?;

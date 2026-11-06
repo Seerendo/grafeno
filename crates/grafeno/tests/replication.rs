@@ -50,6 +50,7 @@ fn snapshot(db: &Grafeno) -> String {
     lines.push(format!("{:?}", read.accounts().unwrap()));
     lines.push(format!("{:?}", read.api_keys().unwrap()));
     lines.push(format!("{:?}", read.sessions(None).unwrap()));
+    lines.push(format!("{:?}", read.roles().unwrap()));
     lines.join("\n")
 }
 
@@ -153,12 +154,28 @@ fn write_everything(db: &Grafeno) -> (NodeId, NodeId) {
                 namespace: NS.into(),
                 role: Role::Read,
             }],
+            roles: Vec::new(),
             superuser: false,
             own_only: false,
             disabled: false,
             description: None,
             created_at: Timestamp::from_micros(6),
         })?;
+        // A role, granted to her (14.2).
+        tx.put_role(&grafeno::RoleDef {
+            name: "auditor".into(),
+            privileges: vec![grafeno::Privilege::grant(
+                grafeno::Act::Metrics,
+                grafeno::Object::Server,
+            )],
+            grants: Vec::new(),
+            roles: Vec::new(),
+            description: None,
+            created_at: Timestamp::from_micros(8),
+        })?;
+        let mut ana = tx.account("ana")?.unwrap();
+        ana.roles.push("auditor".into());
+        tx.put_account(&ana)?;
         tx.put_session(&grafeno::Session {
             id: "s1".into(),
             account: "ana".into(),

@@ -101,6 +101,9 @@ pub struct Account {
     pub password_hash: Option<String>,
     #[serde(default)]
     pub grants: Vec<Grant>,
+    /// Roles granted to it (14.2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<String>,
     /// Every right on every namespace, and managing accounts.
     #[serde(default)]
     pub superuser: bool,
@@ -227,6 +230,7 @@ impl Principal {
                 kind: AccountKind::Service,
                 password_hash: None,
                 grants: self.grants.clone(),
+                roles: Vec::new(),
                 superuser: self.owner,
                 own_only: self.own_only,
                 disabled: false,
@@ -361,13 +365,18 @@ impl WriteTx {
     /// Writes an account as it is (created or changed).
     pub fn put_account(&mut self, account: &Account) -> Result<()> {
         check_principal_name(&account.name)?;
+        for role in &account.roles {
+            if self.role(role)?.is_none() {
+                return Err(Error::Invalid(format!("no role {role:?}")));
+            }
+        }
         self.note(crate::replication::Touch::Account(account.name.clone()));
         self.tx
             .open_table(ACCOUNTS)
             .map_err(storage)?
             .insert(account.name.as_str(), encode(account)?.as_slice())
             .map_err(storage)?;
-        Ok(())
+        self.bump_access()
     }
 
     /// Removes an account with its keys and sessions; returns whether it
@@ -382,13 +391,15 @@ impl WriteTx {
             self.delete_session(&session.id)?;
         }
         self.note(crate::replication::Touch::Account(name.to_owned()));
-        Ok(self
+        let removed = self
             .tx
             .open_table(ACCOUNTS)
             .map_err(storage)?
             .remove(name)
             .map_err(storage)?
-            .is_some())
+            .is_some();
+        self.bump_access()?;
+        Ok(removed)
     }
 
     /// Adds a key to an existing account. Fails with [`Error::Conflict`] if
@@ -512,6 +523,7 @@ mod tests {
                     role: *role,
                 })
                 .collect(),
+            roles: Vec::new(),
             superuser: false,
             own_only: false,
             disabled: false,

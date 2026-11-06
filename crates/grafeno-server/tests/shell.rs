@@ -284,7 +284,7 @@ fn users_sign_in_from_the_shell() {
         "her long passphrase\n",
     );
     assert!(
-        text(&other.stderr).contains("no read access"),
+        text(&other.stderr).contains("no `read` privilege"),
         "{}{}",
         text(&other.stdout),
         text(&other.stderr)

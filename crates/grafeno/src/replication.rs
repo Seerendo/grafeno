@@ -44,10 +44,10 @@ pub const FENCE: (&str, &str) = ("cluster", "moved");
 /// The newest version of [`Entry`]'s format this build reads and writes.
 /// 1: records and bulk work (13.1). 2: also change log entries copied as
 /// they are ([`Op::Change`], 13.5). 3: accounts, API keys and sessions
-/// instead of principals (14.1). An entry carries the oldest format that
+/// instead of principals (14.1). 4: roles (14.2). An entry carries the oldest format that
 /// can hold it, so a member of the version before reads every entry that
 /// does not need the new one.
-pub const ENTRY_FORMAT: u32 = 3;
+pub const ENTRY_FORMAT: u32 = 4;
 
 pub(crate) const ENABLED: &str = "replication_enabled";
 const FIRST: &str = "replication_first";
@@ -67,6 +67,7 @@ pub(crate) enum Touch {
     Account(String),
     ApiKey(String),
     Session(String),
+    Role(String),
     Namespace(String),
     MatchRule(String, String),
     State(String, String, String),
@@ -153,6 +154,10 @@ pub enum Op {
         id: String,
         session: Option<Json>,
     },
+    Role {
+        name: String,
+        role: Option<Json>,
+    },
     Namespace {
         ns: String,
         meta: Option<Json>,
@@ -202,9 +207,11 @@ impl Op {
             Op::Bulk(Bulk::DropNamespace { ns })
             | Op::Bulk(Bulk::RebuildIndexes { ns })
             | Op::Bulk(Bulk::CompactVectors { ns }) => Some(ns),
-            Op::Principal { .. } | Op::Account { .. } | Op::ApiKey { .. } | Op::Session { .. } => {
-                None
-            }
+            Op::Principal { .. }
+            | Op::Account { .. }
+            | Op::ApiKey { .. }
+            | Op::Session { .. }
+            | Op::Role { .. } => None,
         }
     }
 
@@ -221,6 +228,7 @@ impl Op {
             Op::Principal { name, .. } | Op::Account { name, .. } => Touch::Account(name.clone()),
             Op::ApiKey { name, .. } => Touch::ApiKey(name.clone()),
             Op::Session { id, .. } => Touch::Session(id.clone()),
+            Op::Role { name, .. } => Touch::Role(name.clone()),
             Op::Namespace { ns, .. } => Touch::Namespace(ns.clone()),
             Op::MatchRule { ns, label, .. } => Touch::MatchRule(ns.clone(), label.clone()),
             Op::State { ns, kind, key, .. } => Touch::State(ns.clone(), kind.clone(), key.clone()),
@@ -310,7 +318,11 @@ impl Touch {
             | Touch::State(ns, _, _)
             | Touch::Merge(ns, _)
             | Touch::Change(ns, _) => Some(ns),
-            Touch::Account(_) | Touch::ApiKey(_) | Touch::Session(_) | Touch::Bulk(_) => None,
+            Touch::Account(_)
+            | Touch::ApiKey(_)
+            | Touch::Session(_)
+            | Touch::Role(_)
+            | Touch::Bulk(_) => None,
         }
     }
 }
@@ -428,6 +440,16 @@ impl WriteTx {
                 name: name.clone(),
                 key: tx
                     .open_table(crate::access::API_KEYS)
+                    .map_err(storage)?
+                    .get(name.as_str())
+                    .map_err(storage)?
+                    .map(|guard| json_of(guard.value()))
+                    .transpose()?,
+            },
+            Touch::Role(name) => Op::Role {
+                name: name.clone(),
+                role: tx
+                    .open_table(crate::rights::ROLES)
                     .map_err(storage)?
                     .get(name.as_str())
                     .map_err(storage)?
@@ -564,7 +586,9 @@ impl WriteTx {
                 ops.push(self.after_image(&Touch::Namespace(ns))?);
             }
         }
-        let format = if ops.iter().any(|op| {
+        let format = if ops.iter().any(|op| matches!(op, Op::Role { .. })) {
+            4
+        } else if ops.iter().any(|op| {
             matches!(
                 op,
                 Op::Account { .. } | Op::ApiKey { .. } | Op::Session { .. }
@@ -793,6 +817,23 @@ impl WriteTx {
                         table.remove(name.as_str()).map_err(storage)?;
                     }
                 }
+                drop(table);
+                self.bump_access()?;
+            }
+            Op::Role { name, role } => {
+                let mut table = self.tx.open_table(crate::rights::ROLES).map_err(storage)?;
+                match role {
+                    Some(value) => {
+                        table
+                            .insert(name.as_str(), bytes_of(value)?.as_slice())
+                            .map_err(storage)?;
+                    }
+                    None => {
+                        table.remove(name.as_str()).map_err(storage)?;
+                    }
+                }
+                drop(table);
+                self.bump_access()?;
             }
             Op::ApiKey { name, key } => {
                 let mut table = self

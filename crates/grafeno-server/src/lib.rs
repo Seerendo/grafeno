@@ -13,6 +13,7 @@ pub mod http;
 pub mod keys;
 pub mod mcp;
 pub mod metrics;
+pub mod roles;
 pub mod service;
 pub mod shell;
 pub mod studio;

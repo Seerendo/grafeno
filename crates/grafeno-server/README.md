@@ -152,6 +152,30 @@ add up:
 | `write` | also create and change nodes and facts, merge, archive, touch |
 | `admin` | also indexes and constraints, rebuild, describe and drop the namespace, create it |
 
+**Roles** (14.2) go further: a role holds privileges, built-in levels on
+namespace patterns and other roles, and accounts hold roles. A privilege
+is an action on an object, granted or denied; a denial wins over any
+grant. On the server: `create_namespace`, `manage_accounts`,
+`manage_roles`, `backup`, `metrics`, `audit`, `cluster`. On a namespace
+pattern: `read`, `create`, `update`, `delete`, `merge`, `retract`,
+`import`, `export`, `schema`, `algorithms`, `drop`, `create_namespace`
+(the levels above are bundles of these: `GET /v1/privileges` lists them).
+On a label or a property: `read` and `write` (checked by queries from
+14.4). A role named `public`, when defined, is every account's.
+
+```bash
+curl -X PUT localhost:7810/v1/roles/team-reader -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"privileges": [
+        {"action": "read", "object": {"on": "namespace", "namespace": "team-*"}},
+        {"action": "read", "object": {"on": "namespace", "namespace": "team-secret"}, "deny": true}]}'
+```
+
+```bash
+curl -X PATCH localhost:7810/v1/accounts/ana -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{"roles": ["team-reader"]}'
+```
+
 An account may also be a **superuser** (everything, including managing
 accounts; `owner` in older answers) and may be limited to **its own
 records**: then it changes or deletes only
@@ -194,16 +218,21 @@ superuser, and from then on every request needs a credential.
 | `GET` | `/v1/auth/sessions` | `?account=` (superusers; `*` for all) | the sessions, `current` marking the caller's |
 | `DELETE` | `/v1/auth/sessions/{id}` | | ends one of the caller's (a superuser: anyone's) |
 | `POST` | `/v1/auth/password` | `{current_password, new_password}` | changes it; the other sessions end |
-| `GET`, `POST` | `/v1/accounts` | `{name, kind: user\|service, password?, grants, superuser, own_only, description}` | superusers |
-| `GET`, `PATCH`, `DELETE` | `/v1/accounts/{name}` | `{password?, grants?, superuser?, own_only?, disabled?, description?}` | superusers; disabling or a new password ends its sessions |
+| `GET`, `POST` | `/v1/accounts` | `{name, kind: user\|service, password?, grants, roles, superuser, own_only, description}` | `manage_accounts`; only superusers make superusers |
+| `GET`, `PATCH`, `DELETE` | `/v1/accounts/{name}` | `{password?, grants?, roles?, superuser?, own_only?, disabled?, description?}` | `manage_accounts`, not on superusers; disabling or a new password ends its sessions |
+| `GET` | `/v1/privileges` | | every action by object, and the built-in levels (anyone signed in) |
+| `GET` | `/v1/roles` | | the roles (`manage_roles`) |
+| `GET`, `PUT`, `DELETE` | `/v1/roles/{name}` | `{privileges: [{action, object: {on: server\|namespace\|label\|property, namespace?, label?, edges?, property?}, deny?}], grants, roles, description}` | a role; `PUT` defines or replaces it (201 when new), refusing cycles; `DELETE` takes it from everyone |
 | `GET`, `POST` | `/v1/keys` | `{name, account?, scope?: {namespaces, read_only}, expires_in_days?, description?}` | an account's own keys (superusers: all); the secret once |
 | `POST` | `/v1/keys/{name}/rotate` | | a new secret, once; the old one stops working |
 | `DELETE` | `/v1/keys/{name}` | | revokes it |
 
 An expired access token answers 401 `session_expired` (refresh it); an
 expired key `key_expired`; a disabled account `account_disabled`.
-`/v1/whoami` names the account, how it came (`via: {kind, name}`) and a
-key's `scope`. Sessions last 15 minutes (access) and 30 days (refresh) by
+`/v1/whoami` names the account, how it came (`via: {kind, name}`), a
+key's `scope` and every role it reaches (`effective_roles`). A refusal
+names the privilege missing (`` the account "carl" has no `delete`
+privilege on the namespace "other" ``). Sessions last 15 minutes (access) and 30 days (refresh) by
 default (`[auth]` in `grafeno.toml`).
 
 ## HTTP API

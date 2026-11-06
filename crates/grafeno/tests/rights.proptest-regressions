@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ed0f7834d74e54451fac2b7d40d7f4a5f6aae3ca5a85c5a1391796d3dff3b99b # shrinks to (roles, account) = ({"r0": RoleDef { name: "r0", privileges: [Privilege { action: Read, object: Label { namespace: "a", label: "Person", edges: false }, deny: true }], grants: [], roles: [], description: None, created_at: Timestamp(0) }}, Account { name: "acct", kind: User, password_hash: None, grants: [Grant { namespace: "*", role: Read }], roles: ["r0"], superuser: false, own_only: false, disabled: false, description: None, created_at: Timestamp(0) })

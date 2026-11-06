@@ -70,15 +70,16 @@ fn unauthorized(code: &'static str, message: impl Into<String>) -> ApiError {
 /// leader may still be on its way: it is looked for again for a second.
 pub fn authenticate(state: &AppState, token: &str) -> Result<Caller, ApiError> {
     let db = &state.db;
-    let read_account = |name: &str| -> Result<Arc<Account>, ApiError> {
-        let account = db
-            .begin_read()?
+    let read_account = |name: &str| -> Result<(Arc<Account>, Arc<grafeno::Rights>), ApiError> {
+        let read = db.begin_read()?;
+        let account = read
             .account(name)?
             .ok_or_else(|| unauthorized("unauthorized", "the account is gone"))?;
         if account.disabled {
             return Err(unauthorized("account_disabled", "the account is disabled"));
         }
-        Ok(Arc::new(account))
+        let rights = state.keys.rights(&read, &account)?;
+        Ok((Arc::new(account), rights))
     };
     if let Some((id, secret)) = auth::split_token(token, auth::ACCESS_PREFIX) {
         let mut session = db.begin_read()?.session(id)?;
@@ -107,8 +108,10 @@ pub fn authenticate(state: &AppState, token: &str) -> Result<Caller, ApiError> {
                 "the access token expired: refresh the session",
             ));
         }
+        let (account, rights) = read_account(&session.account)?;
         return Ok(Caller::Account {
-            account: read_account(&session.account)?,
+            account,
+            rights,
             scope: None,
             via: Via::Session(session.id),
         });
@@ -138,8 +141,10 @@ pub fn authenticate(state: &AppState, token: &str) -> Result<Caller, ApiError> {
             format!("the key {name:?} expired"),
         ));
     }
+    let (account, rights) = read_account(&key.account)?;
     Ok(Caller::Account {
-        account: read_account(&key.account)?,
+        account,
+        rights,
         scope: key.scope.clone(),
         via: Via::Key(key.name),
     })
@@ -154,6 +159,8 @@ pub struct AccountOutput {
     kind: AccountKind,
     has_password: bool,
     grants: Vec<Grant>,
+    /// Roles granted to it (14.2).
+    roles: Vec<String>,
     superuser: bool,
     /// `superuser`, under its name before 14.1.
     owner: bool,
@@ -171,6 +178,7 @@ impl From<&Account> for AccountOutput {
             kind: account.kind,
             has_password: account.password_hash.is_some(),
             grants: account.grants.clone(),
+            roles: account.roles.clone(),
             superuser: account.superuser,
             owner: account.superuser,
             own_only: account.own_only,
@@ -336,6 +344,7 @@ pub async fn setup(
         kind: AccountKind::User,
         password_hash: Some(auth::hash_password(&input.password)),
         grants: Vec::new(),
+        roles: Vec::new(),
         superuser: true,
         own_only: false,
         disabled: false,
@@ -613,11 +622,16 @@ pub async fn whoami() -> Json<Value> {
         Caller::Anonymous => json!({ "name": "anonymous" }),
         Caller::Account {
             account,
+            rights,
             scope,
             via,
         } => {
             let mut value =
                 serde_json::to_value(AccountOutput::from(account.as_ref())).unwrap_or(Value::Null);
+            // Every role it has, its own and those they have (14.2).
+            let mut reached = rights.roles.clone();
+            reached.sort();
+            value["effective_roles"] = json!(reached);
             let (kind, name) = match via {
                 Via::Key(name) => ("key", name),
                 Via::Session(id) => ("session", id),
@@ -643,6 +657,8 @@ pub struct NewAccount {
     password: Option<String>,
     #[serde(default)]
     grants: Vec<Grant>,
+    #[serde(default)]
+    roles: Vec<String>,
     #[serde(default)]
     superuser: bool,
     #[serde(default)]
@@ -675,11 +691,15 @@ pub async fn create_account(
         }
         (AccountKind::Service, None) => None,
     };
+    if input.superuser {
+        only_superusers("make a superuser")?;
+    }
     let account = Account {
         name: input.name,
         kind: input.kind,
         password_hash,
         grants: input.grants,
+        roles: input.roles,
         superuser: input.superuser,
         own_only: input.own_only,
         disabled: false,
@@ -710,6 +730,7 @@ pub async fn get_account(
 pub struct AccountChange {
     password: Option<String>,
     grants: Option<Vec<Grant>>,
+    roles: Option<Vec<String>>,
     superuser: Option<bool>,
     own_only: Option<bool>,
     disabled: Option<bool>,
@@ -730,6 +751,10 @@ pub async fn change_account(
         }
         None => None,
     };
+    if input.superuser.is_some() {
+        only_superusers("make or unmake a superuser")?;
+    }
+    guard_superuser(&state, &name)?;
     let input = Arc::new(input);
     let target = name.clone();
     let changed = crate::http::write(&state, move |tx| {
@@ -748,6 +773,9 @@ pub async fn change_account(
         }
         if let Some(grants) = &input.grants {
             account.grants = grants.clone();
+        }
+        if let Some(roles) = &input.roles {
+            account.roles = roles.clone();
         }
         if let Some(superuser) = input.superuser {
             account.superuser = superuser;
@@ -774,6 +802,27 @@ pub async fn change_account(
     Ok(Json(AccountOutput::from(&changed)))
 }
 
+/// 403 unless the caller is a superuser: managing accounts (14.2) does not
+/// reach superusers, or it would be a way to become one.
+fn only_superusers(what: &str) -> ApiResult<()> {
+    if auth::current().is_owner() {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden_message(format!(
+            "only superusers {what}"
+        )))
+    }
+}
+
+/// 403 if `name` is a superuser and the caller is not.
+fn guard_superuser(state: &AppState, name: &str) -> ApiResult<()> {
+    let target = state.db.begin_read()?.account(name)?;
+    if target.is_some_and(|account| account.superuser) {
+        only_superusers("change or delete a superuser")?;
+    }
+    Ok(())
+}
+
 /// The ids of an account's sessions, inside a write.
 fn tx_sessions(tx: &grafeno::WriteTx, account: &str) -> grafeno::Result<Vec<String>> {
     Ok(tx
@@ -789,6 +838,7 @@ pub async fn delete_account(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> ApiResult<StatusCode> {
+    guard_superuser(&state, &name)?;
     let target = name.clone();
     let removed = crate::http::write(&state, move |tx| tx.delete_account(&target)).await?;
     state.keys.reload(&state.db)?;
@@ -901,6 +951,7 @@ pub async fn create_key(
         kind: AccountKind::Service,
         password_hash: None,
         grants: input.grants.clone(),
+        roles: Vec::new(),
         superuser: input.owner,
         own_only: input.own_only,
         disabled: false,

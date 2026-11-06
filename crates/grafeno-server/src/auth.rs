@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use grafeno::{Account, Actor, Grafeno, KeyScope, Role};
+use grafeno::{Account, Act, Actor, Grafeno, KeyScope, Role};
 use sha2::{Digest, Sha256};
 
 /// The hex SHA-256 of a secret, as stored.
@@ -265,6 +265,9 @@ pub struct Credentials {
     by_hash: RwLock<HashMap<String, String>>,
     reloaded: Mutex<Option<Instant>>,
     accounts: std::sync::atomic::AtomicBool,
+    /// Each account's effective rights (14.2), with the access generation
+    /// they were computed at: any change of accounts or roles bumps it.
+    rights: RwLock<HashMap<String, (u64, Arc<grafeno::Rights>)>>,
 }
 
 impl Default for Credentials {
@@ -273,11 +276,37 @@ impl Default for Credentials {
             by_hash: RwLock::default(),
             reloaded: Mutex::new(None),
             accounts: std::sync::atomic::AtomicBool::new(false),
+            rights: RwLock::default(),
         }
     }
 }
 
 impl Credentials {
+    /// `account`'s rights as of `read`: cached until accounts or roles
+    /// change.
+    pub fn rights(
+        &self,
+        read: &grafeno::ReadTx,
+        account: &Account,
+    ) -> grafeno::Result<Arc<grafeno::Rights>> {
+        let generation = read.access_generation()?;
+        if let Some((at, rights)) = self
+            .rights
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&account.name)
+            && *at == generation
+        {
+            return Ok(rights.clone());
+        }
+        let rights = Arc::new(read.rights(account)?);
+        let mut cache = self.rights.write().unwrap_or_else(|e| e.into_inner());
+        // Entries of an older generation are all stale.
+        cache.retain(|_, (at, _)| *at >= generation);
+        cache.insert(account.name.clone(), (generation, rights.clone()));
+        Ok(rights)
+    }
+
     pub fn load(db: &Grafeno) -> grafeno::Result<Self> {
         let credentials = Self::default();
         credentials.reload(db)?;
@@ -354,6 +383,8 @@ pub enum Caller {
     Anonymous,
     Account {
         account: Arc<Account>,
+        /// Its effective rights (its grants and roles).
+        rights: Arc<grafeno::Rights>,
         /// A key's scope, narrowing the account's rights.
         scope: Option<KeyScope>,
         via: Via,
@@ -361,19 +392,37 @@ pub enum Caller {
 }
 
 impl Caller {
-    pub fn may(&self, ns: &str, role: Role) -> bool {
+    /// May the caller do `action` in `ns`?
+    pub fn can(&self, action: Act, ns: &str) -> bool {
         match self {
             Caller::Owner => true,
             Caller::Anonymous => false,
-            Caller::Account { account, scope, .. } => {
-                let have = account.role_in(ns);
-                let have = match scope {
-                    Some(scope) => scope.narrow(ns, have),
-                    None => have,
-                };
-                have.is_some_and(|have| have >= role)
+            Caller::Account { rights, scope, .. } => {
+                rights.on_namespace(action, ns)
+                    && scope
+                        .as_ref()
+                        .is_none_or(|scope| scope_allows(scope, action, ns))
             }
         }
+    }
+
+    /// May the caller do every one of `actions` in `ns`?
+    pub fn can_all(&self, actions: &[Act], ns: &str) -> bool {
+        actions.iter().all(|action| self.can(*action, ns))
+    }
+
+    /// May the caller do `action` on the server? A scoped key never may.
+    pub fn can_server(&self, action: Act) -> bool {
+        match self {
+            Caller::Owner => true,
+            Caller::Anonymous => false,
+            Caller::Account { rights, scope, .. } => scope.is_none() && rights.on_server(action),
+        }
+    }
+
+    /// What a built-in level stood for before 14.2 (see [`role_actions`]).
+    pub fn may(&self, ns: &str, role: Role) -> bool {
+        self.can_all(role_actions(role), ns)
     }
 
     /// Every right: the static token, an open server, or a superuser not
@@ -413,28 +462,64 @@ impl Caller {
         }
     }
 
-    /// Why a request is refused: `role` on `ns` is missing.
-    pub fn refusal(&self, ns: &str, role: Role) -> String {
-        let role = match role {
-            Role::Read => "read",
-            Role::Write => "write",
-            Role::Admin => "admin",
-        };
+    /// Why a request is refused: one of `actions` on `ns` is missing.
+    pub fn refusal(&self, ns: &str, actions: &[Act]) -> String {
+        let missing = actions
+            .iter()
+            .find(|action| !self.can(**action, ns))
+            .or(actions.first())
+            .map(|action| action.name())
+            .unwrap_or_default();
+        let role = format!("`{missing}`");
         match self {
             Caller::Account {
                 via: Via::Key(key),
                 scope: Some(_),
                 ..
             } => format!(
-                "the key {key:?} (of {:?}) has no {role} access to the namespace {ns:?} within its scope",
+                "the key {key:?} (of {:?}) has no {role} privilege on the namespace {ns:?} within its scope",
                 self.name()
             ),
             _ => format!(
-                "the account {:?} has no {role} access to the namespace {ns:?}",
+                "the account {:?} has no {role} privilege on the namespace {ns:?}",
                 self.name()
             ),
         }
     }
+
+    /// Why a request is refused: `action` on the server is missing.
+    pub fn server_refusal(&self, action: Act) -> String {
+        match self {
+            Caller::Account { scope: Some(_), .. } => format!(
+                "{:?} uses a scoped key: server privileges (`{}`) need an unscoped one",
+                self.name(),
+                action.name()
+            ),
+            _ => format!(
+                "the account {:?} has no `{}` privilege on the server",
+                self.name(),
+                action.name()
+            ),
+        }
+    }
+}
+
+/// The actions a built-in level stands for in a check: reading is `read`,
+/// writing is creating, updating and deleting, administering is changing
+/// the schema.
+pub fn role_actions(role: Role) -> &'static [Act] {
+    match role {
+        Role::Read => &[Act::Read],
+        Role::Write => &[Act::Create, Act::Update, Act::Delete],
+        Role::Admin => &[Act::Schema],
+    }
+}
+
+/// Whether a key's scope lets `action` in `ns` through: only its
+/// namespaces, and only reading if it is read-only.
+fn scope_allows(scope: &KeyScope, action: Act, ns: &str) -> bool {
+    scope.narrow(ns, Some(Role::Admin)).is_some()
+        && (!scope.read_only || matches!(action, Act::Read | Act::Export | Act::Algorithms))
 }
 
 tokio::task_local! {
@@ -457,9 +542,11 @@ pub enum Need {
     Caller,
     /// The owner (keys, import).
     Owner,
-    /// A role on a namespace; the handler may ask for more (writing
+    /// A privilege on the server.
+    Server(Act),
+    /// Privileges on a namespace; the handler may ask for more (writing
     /// queries, writing algorithms).
-    Namespace(String, Role),
+    Namespace(String, &'static [Act]),
 }
 
 /// A percent-encoded path segment, decoded.
@@ -497,53 +584,79 @@ pub fn need(method: &str, path: &str) -> Need {
         }
         // Their own sessions, password and keys; the handlers check more.
         ["auth", ..] | ["keys", ..] => Need::Caller,
-        ["accounts", ..] => Need::Owner,
-        ["algorithms"] | ["whoami"] | ["metrics"] => Need::Caller,
+        ["accounts", ..] => Need::Server(Act::ManageAccounts),
+        ["roles", ..] => Need::Server(Act::ManageRoles),
+        ["algorithms"] | ["whoami"] | ["privileges"] => Need::Caller,
+        ["metrics"] => Need::Server(Act::Metrics),
         // Listing filters what the caller may read; creating checks the
         // name in the handler.
         ["namespaces"] => Need::Caller,
         ["namespaces", ns] => Need::Namespace(
             decode(ns),
-            if method == "GET" {
-                Role::Read
-            } else {
-                Role::Admin
+            match method {
+                "GET" => &[Act::Read],
+                "DELETE" => &[Act::Drop],
+                _ => &[Act::Schema],
             },
         ),
         // Export checks each namespace it writes out.
         ["export"] => Need::Caller,
-        ["import"] | ["backup"] | ["background"] | ["cluster", ..] => Need::Owner,
-        [ns, rest @ ..] => {
-            let ns = decode(ns);
-            let reads = matches!(
-                rest,
-                ["k-hop"]
-                    | ["path"]
-                    | ["subgraph"]
-                    | ["search", ..]
-                    | ["recall"]
-                    | ["context"]
-                    | ["query"]
-                    | ["query", "part"]
-                    | ["algo", ..]
-                    | ["match"]
-            );
-            let role = if rest == ["rebuild"]
-                || rest == ["compact"]
-                // A webhook makes the server send requests: admins only.
-                || rest.first() == Some(&"webhooks")
-                || (rest.first() == Some(&"import") && method != "GET")
-                || (rest.first() == Some(&"match-rules") && method != "GET")
-            {
-                Role::Admin
-            } else if method == "GET" || (method == "POST" && reads) {
-                Role::Read
-            } else {
-                Role::Write
-            };
-            Need::Namespace(ns, role)
-        }
+        ["backup"] => Need::Server(Act::Backup),
+        ["cluster", ..] => Need::Server(Act::Cluster),
+        ["import"] | ["background"] => Need::Owner,
+        [ns, rest @ ..] => Need::Namespace(decode(ns), namespace_actions(method, rest)),
         [] => Need::Caller,
+    }
+}
+
+/// What `method` on a route under a namespace needs (`rest` is the path
+/// after the namespace).
+fn namespace_actions(method: &str, rest: &[&str]) -> &'static [Act] {
+    const READ: &[Act] = &[Act::Read];
+    const WRITE: &[Act] = &[Act::Create, Act::Update, Act::Delete];
+    let first = rest.first().copied().unwrap_or("");
+    // Changing how the namespace works; a webhook also makes the server
+    // send requests.
+    let schema = matches!(first, "rebuild" | "compact" | "webhooks" | "indexes")
+        || (matches!(first, "match-rules" | "constraints") && method != "GET");
+    if schema {
+        return &[Act::Schema];
+    }
+    if first.starts_with("export") {
+        return &[Act::Export];
+    }
+    if method == "GET" {
+        return READ;
+    }
+    match (method, rest) {
+        (_, ["import", ..]) => &[Act::Import],
+        ("POST", ["algo", ..]) => &[Act::Algorithms],
+        (
+            "POST",
+            ["k-hop"]
+            | ["path"]
+            | ["subgraph"]
+            | ["search", ..]
+            | ["recall"]
+            | ["context"]
+            | ["query"]
+            | ["query", "part"]
+            | ["match"],
+        ) => READ,
+        (_, ["merge"] | ["merges", _, "undo"]) => &[Act::Merge],
+        (_, ["edges", _, "retract" | "invalidate"] | ["nodes", _, "retract" | "invalidate"]) => {
+            &[Act::Retract]
+        }
+        ("POST", ["nodes"] | ["edges"] | ["ingest"] | ["extract"] | ["nodes", _, "mentions"]) => {
+            &[Act::Create]
+        }
+        ("DELETE", _) => &[Act::Delete],
+        ("PATCH" | "PUT", _) => &[Act::Update],
+        (
+            "POST",
+            ["touch"] | ["archive"] | ["summaries"] | ["communities", "refresh"] | ["review", _],
+        ) => &[Act::Update],
+        _ => WRITE,
     }
 }
 
@@ -553,28 +666,60 @@ mod tests {
 
     #[test]
     fn routes_need_roles() {
-        let ns = |name: &str, role| Need::Namespace(name.into(), role);
-        assert_eq!(need("GET", "/vault/nodes"), ns("vault", Role::Read));
-        assert_eq!(need("POST", "/vault/nodes"), ns("vault", Role::Write));
-        assert_eq!(need("POST", "/vault/search/text"), ns("vault", Role::Read));
-        assert_eq!(need("POST", "/vault/query"), ns("vault", Role::Read));
-        assert_eq!(need("POST", "/vault/merge"), ns("vault", Role::Write));
-        assert_eq!(need("POST", "/vault/match"), ns("vault", Role::Read));
-        assert_eq!(need("GET", "/vault/match-rules"), ns("vault", Role::Read));
+        let ns = |name: &str, actions| Need::Namespace(name.into(), actions);
+        assert_eq!(need("GET", "/vault/nodes"), ns("vault", &[Act::Read]));
+        assert_eq!(need("POST", "/vault/nodes"), ns("vault", &[Act::Create]));
+        assert_eq!(need("PATCH", "/vault/nodes/x"), ns("vault", &[Act::Update]));
+        assert_eq!(
+            need("POST", "/vault/search/text"),
+            ns("vault", &[Act::Read])
+        );
+        assert_eq!(need("POST", "/vault/query"), ns("vault", &[Act::Read]));
+        assert_eq!(need("POST", "/vault/merge"), ns("vault", &[Act::Merge]));
+        assert_eq!(need("POST", "/vault/match"), ns("vault", &[Act::Read]));
+        assert_eq!(
+            need("POST", "/vault/algo/pagerank"),
+            ns("vault", &[Act::Algorithms])
+        );
+        assert_eq!(need("GET", "/vault/match-rules"), ns("vault", &[Act::Read]));
         assert_eq!(
             need("PUT", "/vault/match-rules/Person"),
-            ns("vault", Role::Admin)
+            ns("vault", &[Act::Schema])
         );
-        assert_eq!(need("POST", "/vault/rebuild"), ns("vault", Role::Admin));
-        assert_eq!(need("DELETE", "/vault/edges/x"), ns("vault", Role::Write));
+        assert_eq!(need("POST", "/vault/rebuild"), ns("vault", &[Act::Schema]));
+        assert_eq!(need("GET", "/vault/webhooks"), ns("vault", &[Act::Schema]));
+        assert_eq!(
+            need("DELETE", "/vault/edges/x"),
+            ns("vault", &[Act::Delete])
+        );
+        assert_eq!(
+            need("POST", "/vault/edges/x/retract"),
+            ns("vault", &[Act::Retract])
+        );
+        assert_eq!(
+            need("GET", "/vault/export.graphml"),
+            ns("vault", &[Act::Export])
+        );
+        assert_eq!(
+            need("POST", "/vault/import/graphml"),
+            ns("vault", &[Act::Import])
+        );
+        assert_eq!(
+            need("POST", "/vault/batch"),
+            ns("vault", &[Act::Create, Act::Update, Act::Delete])
+        );
         assert_eq!(
             need("DELETE", "/namespaces/team%2Da"),
-            ns("team-a", Role::Admin)
+            ns("team-a", &[Act::Drop])
         );
-        assert_eq!(need("GET", "/namespaces/demo"), ns("demo", Role::Read));
+        assert_eq!(need("GET", "/namespaces/demo"), ns("demo", &[Act::Read]));
         assert_eq!(need("POST", "/import"), Need::Owner);
         assert_eq!(need("DELETE", "/keys/ana"), Need::Caller);
-        assert_eq!(need("POST", "/accounts"), Need::Owner);
+        assert_eq!(need("POST", "/accounts"), Need::Server(Act::ManageAccounts));
+        assert_eq!(need("PUT", "/roles/x"), Need::Server(Act::ManageRoles));
+        assert_eq!(need("GET", "/metrics"), Need::Server(Act::Metrics));
+        assert_eq!(need("POST", "/backup"), Need::Server(Act::Backup));
+        assert_eq!(need("GET", "/cluster/status"), Need::Server(Act::Cluster));
         assert_eq!(need("POST", "/auth/signin"), Need::Public);
         assert_eq!(need("POST", "/auth/signout"), Need::Caller);
         assert_eq!(need("GET", "/namespaces"), Need::Caller);

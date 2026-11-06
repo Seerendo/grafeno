@@ -37,6 +37,7 @@ mod namespace;
 mod planstats;
 mod replication;
 mod resolve;
+mod rights;
 mod state;
 mod stats;
 mod store;
@@ -70,6 +71,10 @@ pub use namespace::{DropStats, MAX_NAMESPACE_LENGTH, RESERVED, check_new_namespa
 pub use planstats::{BUCKETS, COMMON_VALUES, EdgeLabelStats, IndexStats, PlannerStats};
 pub use replication::{Bulk, ENTRY_FORMAT, Entry, FENCE, LogPosition, Op};
 pub use resolve::{Decision, FieldRule, FieldScore, Match, MatchRule, Probe, SCAN_LIMIT, score};
+pub use rights::{
+    Act, BUILT_IN_ROLES, Object, PUBLIC, Privilege, Rights, RoleDef, check_role_name,
+    level_actions, level_name,
+};
 pub use stats::{NamespaceInfo, NamespaceStats};
 pub use text::tokenize;
 pub use traverse::{Direction, EdgeFilter, Neighbor, Path, Subgraph};

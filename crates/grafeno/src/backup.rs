@@ -17,6 +17,7 @@ use crate::index::{INDEX_ENTRIES, INDEXES};
 use crate::merge::MERGES;
 use crate::namespace::NAMESPACES;
 use crate::resolve::MATCH_RULES;
+use crate::rights::ROLES;
 use crate::state::STATE;
 use crate::store::{
     ADJ_IN, ADJ_OUT, EDGE_LABEL_COUNTS, EDGES, HNSW_LINKS, LABEL_COUNTS, MEMORY, META, NAMES,
@@ -84,6 +85,7 @@ pub(crate) fn restore_into(from: &ReadTransaction, to: &WriteTransaction) -> Res
         ACCOUNTS,
         API_KEYS,
         SESSIONS,
+        ROLES,
         MERGES,
         MATCH_RULES,
         STATE,
@@ -137,6 +139,7 @@ impl ReadTx {
                 ACCOUNTS.name(),
                 API_KEYS.name(),
                 SESSIONS.name(),
+                ROLES.name(),
                 MERGES.name(),
                 MATCH_RULES.name(),
                 STATE.name(),
@@ -178,6 +181,7 @@ impl ReadTx {
             entries += copy(from, &tx, ACCOUNTS)?;
             entries += copy(from, &tx, API_KEYS)?;
             entries += copy(from, &tx, SESSIONS)?;
+            entries += copy(from, &tx, ROLES)?;
             entries += copy(from, &tx, MERGES)?;
             entries += copy(from, &tx, MATCH_RULES)?;
             entries += copy(from, &tx, STATE)?;

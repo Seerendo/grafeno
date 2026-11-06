@@ -111,6 +111,7 @@ pub fn create(target: &Target, new: NewAccount) -> Result<(), String> {
                 kind,
                 password_hash: new.password.as_deref().map(hash_password),
                 grants: new.grants,
+                roles: Vec::new(),
                 superuser: new.superuser,
                 own_only: new.own_only,
                 disabled: false,

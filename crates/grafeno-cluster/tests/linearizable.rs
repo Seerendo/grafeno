@@ -175,7 +175,7 @@ fn register_stays_linearizable_under_faults() {
         .map(|client| {
             let (cluster, running, history) = (cluster.clone(), running.clone(), history.clone());
             std::thread::spawn(move || {
-                let mut rng = Rng(seed ^ (client * 0x9E37_79B9_7F4A_7C15));
+                let mut rng = Rng(seed ^ client.wrapping_mul(0x9E37_79B9_7F4A_7C15));
                 let mut target = rng.between(1, MEMBERS);
                 let unsafe_reads = unsafe_reads;
                 let mut counter = 0u64;

@@ -19,6 +19,7 @@ use crate::merge::MERGES;
 use crate::namespace::{NAMESPACES, NamespaceMeta};
 use crate::replication::Touch;
 use crate::resolve::MATCH_RULES;
+use crate::rights::ROLES;
 use crate::state::STATE;
 use crate::stats::{
     NamespaceInfo, NamespaceStats, bump_edge_label, bump_namespace, bump_node_label, label_counts,
@@ -57,7 +58,8 @@ use crate::{Hit, text, vector};
 /// 14. Adds `replication_log`.
 /// 15. Replaces `principals` with `accounts`, `api_keys` and `sessions`:
 ///     each principal becomes a service account and a key (14.1).
-pub const SCHEMA_VERSION: u64 = 15;
+/// 16. Adds `roles` (14.2), empty until one is defined.
+pub const SCHEMA_VERSION: u64 = 16;
 
 /// The tables replaced in version 3, by name (their types no longer matter).
 const OLD_ADJ_OUT: TableDefinition<AdjKey, u128> = TableDefinition::new("adj_out");
@@ -240,6 +242,7 @@ impl Grafeno {
         tx.open_table(ACCOUNTS).map_err(storage)?;
         tx.open_table(API_KEYS).map_err(storage)?;
         tx.open_table(SESSIONS).map_err(storage)?;
+        tx.open_table(ROLES).map_err(storage)?;
         tx.open_table(MERGES).map_err(storage)?;
         tx.open_table(MATCH_RULES).map_err(storage)?;
         tx.open_table(STATE).map_err(storage)?;
