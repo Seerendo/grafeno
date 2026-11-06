@@ -74,6 +74,19 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
+/// A setup write, tried again while a change of leader loses it (`busy`
+/// means it was not committed): a slow machine may elect again early on.
+fn seed(api: u16, statement: &str) -> (u16, Value) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (code, body) = query(api, statement, "off");
+        if code != 503 || Instant::now() > deadline {
+            return (code, body);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 fn query(port: u16, text: &str, split: &str) -> (u16, Value) {
     let mut response = agent()
         .post(&format!("http://127.0.0.1:{port}/v1/c/query"))
@@ -133,25 +146,22 @@ fn split_reads_return_what_one_member_does() {
         std::thread::sleep(Duration::from_millis(100));
     };
     // 3 000 people, 20 companies, some acquaintances.
-    let (code, body) = query(
+    let (code, body) = seed(
         members[leader].api,
         "UNWIND range(0, 19) AS c CREATE (:Company {name: 'company ' + toString(c), c: c})",
-        "off",
     );
     assert_eq!(code, 200, "{body}");
-    let (code, body) = query(
+    let (code, body) = seed(
         members[leader].api,
         "UNWIND range(1, 3000) AS i \
          CREATE (p:Person {i: i, name: 'person ' + toString(i), age: i % 80, score: (i * 7919 % 1000) / 10.0, \
                  city: ['Lima', 'Quito', 'Bogotá', 'La Paz', 'Santiago'][i % 5]}) \
          WITH p, i MATCH (c:Company {c: i % 20}) CREATE (p)-[:works_at]->(c)",
-        "off",
     );
     assert_eq!(code, 200, "{body}");
-    let (code, body) = query(
+    let (code, body) = seed(
         members[leader].api,
         "MATCH (a:Person), (b:Person) WHERE a.i % 50 = 0 AND b.i = a.i + 1 CREATE (a)-[:knows]->(b)",
-        "off",
     );
     assert_eq!(code, 200, "{body}");
     // Every member has it all.
