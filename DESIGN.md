@@ -400,7 +400,12 @@ without a current user. They remain possible for embedded use.
     a complete role-based access control, as most databases have: users who
     sign in, roles and privileges granted with `GRANT` and `REVOKE`, rights
     down to labels, properties and records, and an audit log.
-15. **Integrations**: Grafito first, Python bindings.
+15. **Engine and interface apart** (planned, in four steps; see below):
+    the engine's installers install only the engine (Windows `.exe`, Linux
+    `.deb` and `.rpm`), and the interface becomes a separate desktop
+    product with installers of its own, talking to engines only through
+    their public API.
+16. **Integrations**: Grafito first, Python bindings.
 
 ### Phase 8 plan
 
@@ -2008,6 +2013,107 @@ policies) against 13's numbers; sign-ins per second and their CPU with the
 chosen Argon2id parameters; vector search recall and latency with
 visibility filters.
 
+### Phase 15 plan: engine and interface apart
+
+**Where it starts from.** The engine and the interface are tied both ways.
+The `grafeno` binary embeds Grafeno Studio (the `studio` feature,
+`include_dir` of `studio/dist`) and serves it at `/studio/`; its Windows
+installer adds Studio shortcuts and opens it after installing, and its
+`.deb` and `.rpm` add a `grafeno-studio.desktop` entry. Grafeno Desktop
+(9.4, Tauri) links the engine crates (`grafeno`, `grafeno-server`) and runs
+the engine inside its own process to open database files, reaching its
+HTTP router without a socket. So installing the server brings a web
+interface, and installing the desktop app brings a whole engine.
+
+**The goal.** Two products with their own installers, versions and
+releases:
+
+- **Grafeno**, the engine: the `grafeno` binary (server, HTTP API, MCP,
+  shell, administration commands) and nothing else, for servers, containers
+  and machines without a screen. Windows setup `.exe` (with the service),
+  Linux `.deb` and `.rpm` (with the systemd unit), plus the `.tar.gz`,
+  `install.sh` and the Docker image.
+- **Grafeno Desktop**, the interface: the Studio as a desktop application,
+  Windows `.exe` (and `.msi`), Linux `.deb`, `.rpm` (and `.AppImage`). It
+  contains no engine: it talks to engines (on the same machine or others,
+  one server or a cluster) only through their public HTTP API, as any
+  other client does.
+
+Phases 13 and 14 add views to the Studio as it is (cluster status, sign-in,
+users and roles); this phase moves them with it. Each step ends with tests,
+documentation and its own commit.
+
+**15.1 The engine alone.**
+
+- The Studio leaves the engine: no `studio` feature, no `include_dir`, no
+  `/studio/` route (it answers with a short note pointing to Grafeno
+  Desktop), no Node or Vite step in the engine's build.
+- The engine's packages install only the engine: the binary, `grafeno.toml`,
+  the service (Windows) or systemd unit (Linux), the icon of the binary and
+  the documentation. No shortcuts to a web interface, no `.desktop` entry,
+  no dependency on a graphical stack (no WebKit or GTK in the `.deb` and
+  `.rpm`).
+- The binary's size before and after is measured; the release notes say
+  where the interface went.
+- Done when: the engine builds and passes every test without Node installed,
+  and installing its packages on a clean Windows and in clean Debian and
+  Fedora containers brings no graphical files or dependencies.
+
+**15.2 The public API as the only contract.**
+
+- Everything the interface does goes through the documented HTTP API:
+  whatever it reaches today in-process or through app-only commands
+  (opening files, import and export, the database's own settings) gets an
+  endpoint, or stays in the interface as a file it reads and sends.
+- Versioning: the engine reports its version, its API version and its
+  capabilities (`GET /v1/about`: authentication modes, cluster, features
+  added by later phases); the interface states the API versions it speaks,
+  checks them on connecting, and turns off what an older engine lacks
+  instead of failing.
+- The TypeScript client becomes the published contract (its own version,
+  generated types where possible), and a contract test runs the interface's
+  client against the real engine binary of each supported version.
+- Done when: the interface has no call outside the public API, and the
+  contract tests pass against the current engine and the previous release.
+
+**15.3 The desktop application without an engine.**
+
+- Grafeno Desktop stops linking the engine crates. Its sources (the Studio
+  and the native shell) live in one place, `apps/desktop`, with no build
+  dependency on the engine's workspace.
+- Connections: saved servers (an address, a sign-in from phase 14 or a key),
+  several open at once, clusters by their members (phase 13), the local
+  service found on its default address.
+- Local databases, without embedding the engine: when the user opens a
+  file, the app asks an installed engine to serve it, by starting the
+  `grafeno` binary found on the machine as a child process on a loopback
+  port with a token for that session, and stopping it on close. If no
+  engine is installed, the app says so and links to the engine's installer.
+- Tauri or Electron: Tauri is what 9.4 built (the system web view, a Rust
+  shell, installers of a few megabytes); Electron bundles Chromium (one
+  rendering engine everywhere, installers of about a hundred megabytes).
+  The choice is measured (installer size, memory, start time, rendering of
+  the graph view on WebKitGTK) and recorded here; Tauri is kept unless the
+  measurements say otherwise.
+- Done when: the app, built with no engine crate, opens a local file through
+  an installed engine, connects to a remote server and to a cluster, and
+  passes its end-to-end tests against the engine binary.
+
+**15.4 Two products, two releases.**
+
+- Separate versions and change logs; separate release workflows, started by
+  their own tags (`engine-v…`, `desktop-v…`), each building its installers
+  on Windows and Linux, signing them where certificates exist, and
+  publishing checksums.
+- Install tests per product in clean machines (Windows, Debian, Fedora):
+  the engine package brings no graphical files; the desktop package
+  installs no service and no engine; installing, upgrading and removing
+  either leaves the other untouched, and data stays where it was.
+- Documentation split: `docs/install.md` for the engine; the desktop app's
+  own guide, with the engine versions it supports.
+- Done when: a tagged release of each product builds and passes its install
+  tests on its own.
+
 ## Measurements and test environments
 
 What Grafeno has been measured to do, where, and how; the base for the
@@ -2211,3 +2317,7 @@ docker run --rm --memory 512m --memory-swap 512m -e CACHE_MB=128 -e PROJECTION_C
   properties are absent or masked; session tokens signed (stateless,
   checked on any member) or stored (revocable at once); and the names of
   the built-in roles.
+- Phase 15: Tauri or Electron for Grafeno Desktop; whether the interface is
+  also published as static files for a web server of one's own (never
+  served by the engine); and whether the desktop app may download an engine
+  when none is installed or only points to its installer.
