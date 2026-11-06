@@ -258,6 +258,29 @@ def scenario(window, files, artifacts):
     window.wait(lambda: window.text("main .cards .card:first-child .value") == "1", "mostrar la recuperación del puente binario")
     window.capture(artifacts, "07-puente-binario")
     checks.append("Transferir un respaldo binario por el puente Tauri y recuperar sus datos sin alterarlos.")
+    session = window.invoke("session")
+    page = window.invoke("request", {"method": "GET", "url": session["url"] + "/v1/default/nodes", "headers": {}})
+    assert page["status"] == 200, page
+    node = json.loads(page["body"])["items"][0]["id"]
+    created = window.invoke("request", {
+        "method": "POST", "url": session["url"] + "/v1/default/edges",
+        "headers": {"content-type": "application/json"},
+        "body": json.dumps({"from": node, "to": node, "label": "related"}),
+    })
+    assert created["status"] == 201, created
+    edge = json.loads(created["body"])["id"]
+    absent = "00000000-0000-0000-0000-000000000000"
+    batch = window.invoke("request", {
+        "method": "POST", "url": session["url"] + "/v1/default/read-many",
+        "headers": {"content-type": "application/json"},
+        "body": json.dumps({"nodes": [node, absent, node], "edges": [edge, absent]}),
+    })
+    assert batch["status"] == 200, batch
+    records = json.loads(batch["body"])
+    assert records["nodes"][0]["props"]["name"] == "Ana de prueba", records
+    assert records["nodes"][1] is None and records["nodes"][0] == records["nodes"][2], records
+    assert records["edges"][0]["id"] == edge and records["edges"][1] is None, records
+    checks.append("Leer varios nodos y aristas por Tauri conservando orden, duplicados y ausentes.")
     for check in checks:
         print(f"OK: {check}", flush=True)
     return checks

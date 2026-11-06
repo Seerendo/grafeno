@@ -1475,3 +1475,77 @@ async fn community_endpoints() {
     assert_eq!(custom["text"], "The compiler team.");
     assert_eq!(custom["custom"], true);
 }
+
+#[tokio::test]
+async fn read_many_keeps_positions_text_and_memory_like_individual_reads() {
+    let app = app(None);
+    let (_, a) = call(
+        &app,
+        "POST",
+        "/v1/lab/nodes",
+        Some(json!({"labels":["Person"],"text":"Memoria de Ana"})),
+    )
+    .await;
+    let (_, b) = call(
+        &app,
+        "POST",
+        "/v1/lab/nodes",
+        Some(json!({"labels":["Person"]})),
+    )
+    .await;
+    let (_, edge) = call(
+        &app,
+        "POST",
+        "/v1/lab/edges",
+        Some(json!({"from":id(&a),"to":id(&b),"label":"knows"})),
+    )
+    .await;
+    let (_, full) = call(&app, "GET", &format!("/v1/lab/nodes/{}", id(&a)), None).await;
+    let missing = grafeno::NodeId::new().to_string();
+    let (status, result) = call(
+        &app,
+        "POST",
+        "/v1/lab/read-many",
+        Some(json!({"nodes":[id(&a),missing,id(&a)],"edges":[id(&edge)]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["nodes"], json!([full, null, full]));
+    let (_, full_edge) = call(&app, "GET", &format!("/v1/lab/edges/{}", id(&edge)), None).await;
+    assert_eq!(result["edges"], json!([full_edge]));
+    let (_, other) = call(
+        &app,
+        "POST",
+        "/v1/otro/read-many",
+        Some(json!({"nodes":[id(&a)],"edges":[id(&edge)]})),
+    )
+    .await;
+    assert_eq!(other, json!({"nodes":[null],"edges":[null]}));
+    let (_, empty) = call(&app, "POST", "/v1/lab/read-many", Some(json!({}))).await;
+    assert_eq!(empty, json!({"nodes":[],"edges":[]}));
+}
+
+#[tokio::test]
+async fn read_many_rejects_bad_ids_unknown_fields_and_oversized_combined_lists() {
+    let app = app(None);
+    let node = grafeno::NodeId::new().to_string();
+    let edge = grafeno::EdgeId::new().to_string();
+    let (status, result) = call(
+        &app,
+        "POST",
+        "/v1/lab/read-many",
+        Some(json!({"nodes":vec![&node;511],"edges":[edge]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["nodes"].as_array().unwrap().len(), 511);
+    for input in [
+        json!({"nodes":vec![&node;512],"edges":[edge]}),
+        json!({"nodes":["invalid"]}),
+        json!({"edges":["invalid"]}),
+        json!({"unknown":[]}),
+    ] {
+        let (status, result) = call(&app, "POST", "/v1/lab/read-many", Some(input)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{result}");
+    }
+}

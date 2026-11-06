@@ -184,3 +184,7 @@ Las pruebas verifican texto Unicode, bytes de 0 a 255, transporte remoto real
 por HTTP, estados de error, objetos Request, cancelación y el formato JSON del
 contrato. La prueba de ventana obtiene un respaldo binario por el comando
 Tauri, lo recupera y comprueba los datos en la base resultante.
+
+La API de [lecturas por lotes](../../docs/lecturas-por-lotes.md) también funciona
+por el puente local. La prueba de ventana comprueba nodos, aristas, duplicados
+y ausentes en una llamada `read-many`.

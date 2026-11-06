@@ -44,3 +44,15 @@ cargo build -p grafeno-server
 ```bash
 npm test
 ```
+
+## Read nodes and edges together
+
+```ts
+const records = await vault.readMany({ nodes: [noteId, otherId], edges: [edgeId] });
+```
+
+One request reads one snapshot, preserving input order and duplicate IDs. Missing
+records are `null`; nodes include the same text and memory fields as `getNode`.
+The server accepts at most 512 IDs across both lists and requires read access to
+that namespace. This is a read operation, separate from the writing `batch` API.
+See the [method and measurements](../../docs/read-many.md) or [Español](../../docs/lecturas-por-lotes.md).

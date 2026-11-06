@@ -61,6 +61,8 @@ jobs:
         run: cargo build --locked -p grafeno-server
       - name: Probar el cliente contra el servidor real
         run: npm test --prefix clients/typescript
+      - name: Verificar el script de medición sin umbrales de rendimiento
+        run: GRAFENO_BENCH_ROUNDS=1 node clients/typescript/bench/read-many.mjs
 
   desktop:
     name: Aplicación de escritorio Tauri

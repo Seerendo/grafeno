@@ -250,3 +250,19 @@ test("errors carry status and code", async () => {
   await assert.rejects(vault.getNode("0190f5c2-7a3e-7cde-8f01-0000000000ff"), { status: 404, code: "not_found" });
   await assert.rejects(vault.createNode({ labels: [] }), { status: 400, code: "invalid" });
 });
+
+
+test("lectura por lotes conserva orden, texto, aristas y ausentes", async () => {
+  const lab = new Grafeno({ url, token }).namespace("lecturas-lotes");
+  const a = await lab.createNode({ labels: ["Person"], text: "Memoria de Ana" });
+  const b = await lab.createNode({ labels: ["Person"] });
+  const edge = await lab.createEdge({ from: a.id, to: b.id, label: "knows" });
+  const full = await lab.getNode(a.id);
+  const result = await lab.readMany({ nodes: [b.id, a.id, a.id], edges: [edge.id] });
+  assert.equal(result.nodes[0]?.id, b.id);
+  assert.deepEqual(result.nodes.slice(1), [full, full]);
+  assert.equal(result.edges[0]?.id, edge.id);
+  const foreign = await new Grafeno({ url, token }).namespace("otro-lote").readMany({ nodes: [a.id], edges: [edge.id] });
+  assert.deepEqual(foreign, { nodes: [null], edges: [null] });
+  await assert.rejects(lab.readMany({ nodes: Array(513).fill(a.id) }), (error: unknown) => error instanceof GrafenoError && error.status === 400);
+});

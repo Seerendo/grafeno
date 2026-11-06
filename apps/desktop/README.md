@@ -192,3 +192,7 @@ Tests cover Unicode, byte values 0 through 255, real remote HTTP transport,
 error statuses, Request objects, cancellation and the JSON wire format. The
 window test obtains a binary backup through the Tauri command, restores it
 and checks the resulting database contents.
+
+The [batched read API](../../docs/read-many.md) also works through the local
+bridge. The window test checks nodes, edges, duplicates and missing records
+in one `read-many` request.

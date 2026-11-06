@@ -187,6 +187,7 @@ pub fn need(method: &str, path: &str) -> Need {
             let reads = matches!(
                 rest,
                 ["k-hop"]
+                    | ["read-many"]
                     | ["path"]
                     | ["subgraph"]
                     | ["search", ..]

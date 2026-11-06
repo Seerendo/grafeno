@@ -44,6 +44,18 @@ export interface NodeWithText extends Node {
   memory: MemoryState;
 }
 
+/** IDs de un namespace; el servidor admite hasta 512 posiciones entre ambas listas. */
+export interface ReadManyInput {
+  nodes?: Id[];
+  edges?: Id[];
+}
+
+/** Una posición por ID, en el orden solicitado; null indica que no existe. */
+export interface ReadManyResult {
+  nodes: (NodeWithText | null)[];
+  edges: (Edge | null)[];
+}
+
 export interface Edge {
   id: Id;
   label: string;
@@ -701,6 +713,11 @@ export class Namespace {
 
   getNode(id: Id): Promise<NodeWithText> {
     return this.#call("GET", `/nodes/${encodeURIComponent(id)}`);
+  }
+
+  /** Lee nodos y aristas en una sola instantánea y una sola solicitud. */
+  readMany(input: ReadManyInput): Promise<ReadManyResult> {
+    return this.#call("POST", "/read-many", input);
   }
 
   /** A page of nodes in creation order, only those with `label` if given. */

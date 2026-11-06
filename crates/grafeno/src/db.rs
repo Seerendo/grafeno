@@ -580,6 +580,16 @@ impl ReadTx {
         read_record(&self.edges, ns, id.as_u128())
     }
 
+    /// Lee varios IDs en esta instantánea. Conserva orden, duplicados y ausentes.
+    pub fn nodes_by_id(&self, ns: &str, ids: &[NodeId]) -> Result<Vec<Option<Node>>> {
+        ids.iter().map(|&id| self.node(ns, id)).collect()
+    }
+
+    /// Lee aristas por ID, incluidas las retractadas, como [`ReadTx::edge`].
+    pub fn edges_by_id(&self, ns: &str, ids: &[EdgeId]) -> Result<Vec<Option<Edge>>> {
+        ids.iter().map(|&id| self.edge(ns, id)).collect()
+    }
+
     /// Every node of the namespace. Prefer [`ReadTx::nodes_page`] for large ones.
     pub fn nodes(&self, ns: &str) -> Result<Vec<Node>> {
         scan_records(&self.nodes, ns)
