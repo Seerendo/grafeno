@@ -3,3 +3,5 @@
 /dist
 .claude
 /apps/desktop/gen
+/reports/desktop-e2e/
+__pycache__/

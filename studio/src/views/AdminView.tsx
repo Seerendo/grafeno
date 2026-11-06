@@ -97,17 +97,17 @@ export function AdminView() {
           >
             Export everything
           </button>
-          {(!isDesktop || connection.url === LOCAL_URL) && (
+          {(!isDesktop || connection.url.startsWith(`${LOCAL_URL}/session/`)) && (
             <button
               disabled={busy !== null}
-              title="A copy of the whole database file (every namespace and the keys), taken while it keeps working. Owners only."
+              title="A copy of the whole database file (every namespace and the keys), taken while it keeps working. Choose a new file; existing files are preserved. Owners only."
               onClick={() =>
                 void task("backup", async () => {
                   const name = `grafeno-${day}.redb`;
                   if (isDesktop) {
                     const path = await desktop.pickSave(name, "redb");
                     if (!path) return;
-                    const bytes = await desktop.backupTo(path);
+                    const bytes = await desktop.backupTo(path, connection.url);
                     toast(`Backup written (${Math.round(bytes / 1024)} KiB).`, "ok");
                     return;
                   }

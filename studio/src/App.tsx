@@ -18,7 +18,7 @@ import { EdgeForm, NodeForm } from "./components/Forms.tsx";
 import { type ConfirmOptions, type NewEdgeOptions, type NewNodeOptions, type Studio, StudioContext, useStudio } from "./context.ts";
 import { Icon, type IconName, Logo } from "./icons.tsx";
 import { Modal, useNodeSearch } from "./ui.tsx";
-import { type DesktopSession, LOCAL_URL, desktop, isDesktop, saveText } from "./desktop.ts";
+import { type DesktopSession, desktop, isDesktop, saveText } from "./desktop.ts";
 import { AdminView } from "./views/AdminView.tsx";
 import { ClusterView } from "./views/ClusterView.tsx";
 import { ExplorerView } from "./views/ExplorerView.tsx";
@@ -452,6 +452,12 @@ export function App() {
   // The database file open in the desktop app, when the Studio runs there.
   const [local, setLocal] = useState<DesktopSession | null>(null);
 
+  const toast = useCallback((message: string, kind: Toast["kind"] = "info") => {
+    const id = Date.now() + Math.random();
+    setToasts((list) => [...list.slice(-3), { id, message, kind }]);
+    window.setTimeout(() => setToasts((list) => list.filter((item) => item.id !== id)), kind === "error" ? 7000 : 3500);
+  }, []);
+
   const connect = useCallback(async (candidate: Connection, remember?: boolean) => {
     setChecking(true);
     try {
@@ -480,7 +486,7 @@ export function App() {
             return;
           }
           setLocal(session);
-          return connect({ url: LOCAL_URL, token: "" });
+          return connect({ url: session.url, token: "" });
         })
         .catch((problem) => {
           setError(describeError(problem));
@@ -499,16 +505,28 @@ export function App() {
       setChecking(true);
       try {
         const session = await desktop.open(path);
+        if (local?.url !== session.url) {
+          // A draft and its suggestions belong to the previous database.
+          setNodeForm(null);
+          setEdgeForm(null);
+          setPalette(false);
+          setToasts([]);
+          setNamespaces([]);
+          setNamespaceState("");
+          setSchema({ labels: {}, edgeLabels: {} });
+          go("overview");
+        }
         setLocal(session);
-        await connect({ url: LOCAL_URL, token: "" });
+        await connect({ url: session.url, token: "" });
       } catch (problem) {
-        setError(describeError(problem));
-        setLocal(null);
-        setConnection(null);
+        // A failed open keeps the previous session in the engine and the UI.
+        const message = describeError(problem);
+        setError(message);
+        toast(message, "error");
         setChecking(false);
       }
     },
-    [connect],
+    [connect, toast, local],
   );
 
   const closeLocal = useCallback(async () => {
@@ -537,31 +555,36 @@ export function App() {
   const client = useMemo(() => (connection ? clientFor(connection) : null), [connection]);
   const current = namespace || "default";
 
-  const toast = useCallback((message: string, kind: Toast["kind"] = "info") => {
-    const id = Date.now() + Math.random();
-    setToasts((list) => [...list.slice(-3), { id, message, kind }]);
-    window.setTimeout(() => setToasts((list) => list.filter((item) => item.id !== id)), kind === "error" ? 7000 : 3500);
-  }, []);
-
   useEffect(() => {
     if (!client) return;
+    let cancelled = false;
     client
       .namespaces()
       .then((list) => {
+        if (cancelled) return;
         setNamespaces(list);
         // A remembered namespace that was dropped falls back to the first one.
         setNamespaceState((value) => (list.some((info) => info.name === value) ? value : list[0]?.name || value || "default"));
       })
-      .catch((problem) => toast(describeError(problem), "error"));
+      .catch((problem) => {
+        if (!cancelled) toast(describeError(problem), "error");
+      });
+    return () => { cancelled = true; };
   }, [client, revision, toast]);
 
   useEffect(() => {
     if (!client) return;
+    let cancelled = false;
     client
       .namespace(current)
       .stats()
-      .then((stats) => setSchema({ labels: stats.node_labels, edgeLabels: stats.edge_labels }))
-      .catch(() => setSchema({ labels: {}, edgeLabels: {} }));
+      .then((stats) => {
+        if (!cancelled) setSchema({ labels: stats.node_labels, edgeLabels: stats.edge_labels });
+      })
+      .catch(() => {
+        if (!cancelled) setSchema({ labels: {}, edgeLabels: {} });
+      });
+    return () => { cancelled = true; };
   }, [client, current, revision]);
 
   const setNamespace = useCallback((name: string) => {
@@ -676,7 +699,7 @@ export function App() {
 
   return (
     <StudioContext.Provider value={studio}>
-      <div className={collapsed ? "app collapsed" : "app"}>
+      <div className={collapsed ? "app collapsed" : "app"} aria-busy={checking}>
         <nav className="sidebar">
           <a className="sidebar-brand" href="#/overview">
             <Logo size={30} />
@@ -743,7 +766,7 @@ export function App() {
             <Icon name="logout" />
           </button>
         </header>
-        <main className={layout} key={`${current}-${view}`}>
+        <main className={layout} key={`${connection.url}-${current}-${view}`}>
           {view === "overview" && <OverviewView />}
           {view === "explorer" && <ExplorerView selected={route.param} />}
           {view === "graph" && <GraphView seed={route.param} />}

@@ -276,6 +276,7 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `POST`   | `/v1/{ns}/nodes`                      | node (with `id`: upsert)                                | `{id, created}`               |
 | `GET`    | `/v1/{ns}/nodes`                      | `?label=&after=&limit=`                                 | `{items, next}`               |
 | `GET`    | `/v1/{ns}/edges`                      | `?label=&after=&limit=`                                 | `{items, next}`               |
+| `POST`   | `/v1/{ns}/read-many`                  | `{nodes: [id], edges: [id]}` (512 at most together)     | `{nodes, edges}` in the order asked, `null` for missing ones, one snapshot (`read`) |
 | `GET`    | `/v1/{ns}/nodes/{id}`                 |                                                         | node with `text` and `memory` |
 | `PUT`    | `/v1/{ns}/nodes/{id}`                 | node                                                    | `{id, created}`               |
 | `PATCH`  | `/v1/{ns}/nodes/{id}`                 | patch                                                   | node with `text`              |
@@ -286,6 +287,7 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `DELETE` | `/v1/{ns}/edges/{id}`                 |                                                         | 204                           |
 | `POST`   | `/v1/{ns}/edges/{id}/invalidate`      | `{at}`                                                  | edge                          |
 | `POST`   | `/v1/{ns}/edges/{id}/retract`         |                                                         | edge                          |
+| `POST`   | `/v1/{ns}/neighborhoods`              | `{seeds: [id] (8 at most), direction, filter}`          | a depth-one subgraph per seed, in order, one snapshot (`read`) |
 | `POST`   | `/v1/{ns}/k-hop`                      | `{start, depth, direction, filter}`                     | `[{node, hops}]`              |
 | `POST`   | `/v1/{ns}/path`                       | `{from, to, max_depth, direction, filter}`              | `{path}` (or `null`)          |
 | `POST`   | `/v1/{ns}/subgraph`                   | `{seeds, depth, direction, filter}`                     | `{nodes, edges}`              |

@@ -11,35 +11,23 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
-use axum::Router;
-use axum::body::Body;
-use grafeno::Grafeno;
-use grafeno_server::http::{AppState, Options, router_with};
-use http_body_util::BodyExt;
 use serde::Serialize;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
-use tower::ServiceExt;
 
-/// The address the Studio uses for the database opened in the app. Requests
-/// to it never leave the process.
-const LOCAL_URL: &str = "http://grafeno.local";
+mod bridge;
+mod local_database;
+use bridge::{Reply, local_request, remote_request, request_body};
+use local_database::{
+    Session, SessionInfo, backup_target, file_name, info, local_path, open_session, request_target,
+};
+
 /// Recent databases kept in the menu and on the start screen.
 const RECENT: usize = 10;
-
-/// An open database and the router that serves it.
-struct Session {
-    path: PathBuf,
-    db: Arc<Grafeno>,
-    router: Router,
-    /// The app is the owner of the files it opens: its requests carry this
-    /// token, so keys created in the file never lock the app out.
-    token: String,
-}
 
 #[derive(Default)]
 struct Desktop {
@@ -49,39 +37,10 @@ struct Desktop {
 }
 
 #[derive(Serialize)]
-struct SessionInfo {
-    url: &'static str,
-    path: String,
-    name: String,
-}
-
-#[derive(Serialize)]
 struct RecentItem {
     path: String,
     name: String,
     exists: bool,
-}
-
-#[derive(Serialize)]
-struct Reply {
-    status: u16,
-    headers: BTreeMap<String, String>,
-    body: String,
-}
-
-fn file_name(path: &Path) -> String {
-    path.file_name().map_or_else(
-        || path.display().to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    )
-}
-
-fn info(session: &Session) -> SessionInfo {
-    SessionInfo {
-        url: LOCAL_URL,
-        path: session.path.display().to_string(),
-        name: file_name(&session.path),
-    }
 }
 
 fn recent_file(app: &AppHandle) -> Option<PathBuf> {
@@ -112,34 +71,14 @@ fn set_title(app: &AppHandle, title: &str) {
     }
 }
 
-/// Opens (or creates) a database file and makes it the session.
+/// Switches databases only if the new one opens.
 fn open_path(app: &AppHandle, desktop: &Desktop, path: PathBuf) -> Result<SessionInfo, String> {
-    let path = std::path::absolute(&path).unwrap_or(path);
-    // A second open of the same file would fail on redb's lock: close first.
-    let previous = desktop.session.lock().expect("not poisoned").take();
-    drop(previous);
-    let db = Grafeno::open(&path).map_err(|error| {
-        let text = error.to_string();
-        if text.contains("lock") || text.contains("already open") {
-            format!(
-                "{} is open in another program (a Grafeno service or another window)",
-                path.display()
-            )
-        } else {
-            format!("cannot open {}: {text}", path.display())
-        }
-    })?;
-    let token = grafeno_server::auth::new_secret();
-    let db = Arc::new(db);
-    let router = router_for(db.clone(), Some(&token));
-    let session = Session {
-        path: path.clone(),
-        db,
-        router,
-        token,
+    let (reply, path) = {
+        let mut current = desktop.session.lock().expect("not poisoned");
+        let reply = open_session(&mut current, path)?;
+        let path = current.as_ref().expect("sesión abierta").path.clone();
+        (reply, path)
     };
-    let reply = info(&session);
-    *desktop.session.lock().expect("not poisoned") = Some(session);
     let mut recent = desktop.recent.lock().expect("not poisoned");
     recent.retain(|other| other != &path);
     recent.insert(0, path.clone());
@@ -249,25 +188,32 @@ async fn pick_open(app: AppHandle, extensions: Vec<String>) -> Option<String> {
         .map(|path| path.display().to_string())
 }
 
-/// Writes a backup of the open database to `path` (a new file).
+/// The backup is of the session chosen before the dialog. It never overwrites.
 #[tauri::command]
-async fn backup_database(desktop: State<'_, Desktop>, path: String) -> Result<u64, String> {
-    let db = desktop
-        .session
-        .lock()
-        .expect("not poisoned")
-        .as_ref()
-        .map(|session| session.db.clone())
-        .ok_or("no database is open")?;
+async fn backup_database(
+    desktop: State<'_, Desktop>,
+    path: String,
+    session_url: String,
+) -> Result<u64, String> {
+    let db = backup_target(
+        desktop.session.lock().expect("not poisoned").as_ref(),
+        &session_url,
+    )?;
     tokio::task::spawn_blocking(move || {
-        let path = PathBuf::from(path);
-        // The save dialog has already asked about replacing a file.
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(|error| error.to_string())?;
-        }
         db.begin_read()
-            .and_then(|read| read.backup(&path))
+            .and_then(|read| read.backup(Path::new(&path)))
             .map(|stats| stats.bytes)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Recovers into a new file without changing the session or the backup.
+#[tauri::command]
+async fn restore_database(source: String, path: String) -> Result<u64, String> {
+    tokio::task::spawn_blocking(move || {
+        grafeno::Grafeno::recover_backup(Path::new(&source), Path::new(&path))
             .map_err(|error| error.to_string())
     })
     .await
@@ -294,46 +240,6 @@ fn open_external(app: AppHandle, url: String) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-/// A request to the open database's router, in this process.
-async fn local_request(
-    router: Router,
-    method: &str,
-    path: &str,
-    headers: &BTreeMap<String, String>,
-    body: Option<String>,
-) -> Result<Reply, String> {
-    let mut builder = axum::http::Request::builder()
-        .method(method)
-        .uri(if path.is_empty() { "/" } else { path });
-    for (name, value) in headers {
-        builder = builder.header(name, value);
-    }
-    let request = builder
-        .body(Body::from(body.unwrap_or_default()))
-        .map_err(|error| error.to_string())?;
-    let response = router
-        .oneshot(request)
-        .await
-        .map_err(|error| error.to_string())?;
-    let status = response.status().as_u16();
-    let headers = response
-        .headers()
-        .iter()
-        .filter_map(|(name, value)| Some((name.to_string(), value.to_str().ok()?.to_owned())))
-        .collect();
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .map_err(|error| error.to_string())?
-        .to_bytes();
-    Ok(Reply {
-        status,
-        headers,
-        body: String::from_utf8_lossy(&bytes).into_owned(),
-    })
-}
-
 /// One HTTP request from the Studio: to the open database in-process, or
 /// to a remote server.
 #[tauri::command]
@@ -343,19 +249,17 @@ async fn request(
     url: String,
     headers: BTreeMap<String, String>,
     body: Option<String>,
+    body_base64: Option<String>,
 ) -> Result<Reply, String> {
-    if let Some(path) = url.strip_prefix(LOCAL_URL) {
-        let router = desktop
-            .session
-            .lock()
-            .expect("not poisoned")
-            .as_ref()
-            .map(|session| (session.router.clone(), session.token.clone()))
-            .ok_or("no database is open")?;
-        let (router, token) = router;
+    let body = request_body(body, body_base64)?;
+    if let Some(path) = local_path(&url) {
+        let (router, token, path) = {
+            let current = desktop.session.lock().expect("not poisoned");
+            request_target(current.as_ref(), path)?
+        };
         let mut headers = headers;
         headers.insert("authorization".into(), format!("Bearer {token}"));
-        return local_request(router, &method, path, &headers, body).await;
+        return local_request(router, &method, &path, &headers, body).await;
     }
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(format!("not a web address: {url}"));
@@ -374,43 +278,6 @@ async fn request(
     tokio::task::spawn_blocking(move || remote_request(&agent, &method, &url, &headers, body))
         .await
         .map_err(|error| error.to_string())?
-}
-
-/// A request to a Grafeno server, sent by the app (blocking).
-fn remote_request(
-    agent: &ureq::Agent,
-    method: &str,
-    url: &str,
-    headers: &BTreeMap<String, String>,
-    body: Option<String>,
-) -> Result<Reply, String> {
-    let mut builder = ureq::http::Request::builder().method(method).uri(url);
-    for (name, value) in headers {
-        builder = builder.header(name, value);
-    }
-    let request = builder
-        .body(body.unwrap_or_default())
-        .map_err(|error| error.to_string())?;
-    let mut response = agent
-        .run(request)
-        .map_err(|error| format!("cannot reach {url}: {error}"))?;
-    let status = response.status().as_u16();
-    let headers = response
-        .headers()
-        .iter()
-        .filter_map(|(name, value)| Some((name.to_string(), value.to_str().ok()?.to_owned())))
-        .collect();
-    let body = response
-        .body_mut()
-        .with_config()
-        .limit(1 << 30)
-        .read_to_string()
-        .map_err(|error| format!("cannot read the response: {error}"))?;
-    Ok(Reply {
-        status,
-        headers,
-        body,
-    })
 }
 
 // ------------------------------------------------------------ menu
@@ -560,17 +427,6 @@ fn path_argument(args: &[String]) -> Option<String> {
         .cloned()
 }
 
-/// The router for a database, as the app serves it (no Studio).
-fn router_for(db: Arc<Grafeno>, token: Option<&str>) -> Router {
-    router_with(
-        AppState::new(db, token),
-        &Options {
-            studio: false,
-            cors_origins: Vec::new(),
-        },
-    )
-}
-
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
@@ -615,6 +471,7 @@ fn main() {
             read_text,
             open_external,
             backup_database,
+            restore_database,
             request,
         ])
         .run(tauri::generate_context!())
@@ -624,96 +481,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    async fn call(router: &Router, method: &str, path: &str, body: Option<&str>) -> Reply {
-        let headers = BTreeMap::from([("content-type".to_owned(), "application/json".to_owned())]);
-        local_request(
-            router.clone(),
-            method,
-            path,
-            &headers,
-            body.map(str::to_owned),
-        )
-        .await
-        .unwrap()
-    }
-
-    #[tokio::test]
-    async fn the_bridge_reads_and_writes_in_process() {
-        let router = router_for(Arc::new(Grafeno::in_memory().unwrap()), None);
-        let health = call(&router, "GET", "/health", None).await;
-        assert_eq!(health.status, 200);
-        let created = call(&router, "POST", "/v1/namespaces", Some(r#"{"name":"lab"}"#)).await;
-        assert_eq!(created.status, 201, "{}", created.body);
-        let wrote = call(
-            &router,
-            "POST",
-            "/v1/lab/query",
-            Some(r#"{"query":"CREATE (:Person {name: 'Ana'})-[:knows]->(:Person {name: 'Bob'})"}"#),
-        )
-        .await;
-        assert_eq!(wrote.status, 200, "{}", wrote.body);
-        let read = call(
-            &router,
-            "POST",
-            "/v1/lab/query",
-            Some(r#"{"query":"MATCH (p:Person) RETURN count(p)"}"#),
-        )
-        .await;
-        assert!(read.body.contains("[[2]]"), "{}", read.body);
-        assert!(
-            read.headers
-                .get("content-type")
-                .is_some_and(|t| t.contains("json"))
-        );
-        let deleted = call(&router, "DELETE", "/v1/namespaces/lab", None).await;
-        assert_eq!(deleted.status, 200);
-        let missing = call(&router, "GET", "/v1/namespaces/lab", None).await;
-        assert_eq!(missing.status, 404);
-        // The Studio is not served from the app's router.
-        assert_eq!(call(&router, "GET", "/studio/", None).await.status, 404);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn the_bridge_reaches_a_server() {
-        let router = router_for(Arc::new(Grafeno::in_memory().unwrap()), None);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        let agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .build()
-            .new_agent();
-        let url = format!("http://{address}");
-        let reply = tokio::task::spawn_blocking(move || {
-            let headers =
-                BTreeMap::from([("content-type".to_owned(), "application/json".to_owned())]);
-            let created = remote_request(
-                &agent,
-                "POST",
-                &format!("{url}/v1/namespaces"),
-                &headers,
-                Some(r#"{"name":"far"}"#.into()),
-            )
-            .unwrap();
-            let missing = remote_request(
-                &agent,
-                "GET",
-                &format!("{url}/v1/namespaces/nope"),
-                &headers,
-                None,
-            )
-            .unwrap();
-            (created, missing)
-        })
-        .await
-        .unwrap();
-        assert_eq!(reply.0.status, 201, "{}", reply.0.body);
-        assert_eq!(
-            reply.1.status, 404,
-            "errors come back as answers, not failures"
-        );
-    }
 
     #[test]
     fn a_database_path_on_the_command_line() {

@@ -103,6 +103,18 @@ fn routes(
     let p = |rest: &str| format!("/v1/{ns}/{rest}");
     vec![
         ("GET", p("stats"), None, false),
+        (
+            "POST",
+            p("neighborhoods"),
+            Some(json!({"seeds":[node,other]})),
+            false,
+        ),
+        (
+            "POST",
+            p("read-many"),
+            Some(json!({"nodes":[node,other],"edges":[edge]})),
+            false,
+        ),
         ("GET", p("check"), None, false),
         ("POST", p("rebuild"), None, true),
         ("GET", p("nodes"), None, false),

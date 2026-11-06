@@ -44,6 +44,18 @@ export interface NodeWithText extends Node {
   memory: MemoryState;
 }
 
+/** IDs in a namespace; the server takes up to 512 positions across both lists. */
+export interface ReadManyInput {
+  nodes?: Id[];
+  edges?: Id[];
+}
+
+/** One position per ID, in the order asked; null when it does not exist. */
+export interface ReadManyResult {
+  nodes: (NodeWithText | null)[];
+  edges: (Edge | null)[];
+}
+
 export interface Edge {
   id: Id;
   label: string;
@@ -989,6 +1001,11 @@ export class Namespace {
     return this.#call("GET", `/nodes/${encodeURIComponent(id)}`);
   }
 
+  /** Reads nodes and edges in one snapshot and one request. */
+  readMany(input: ReadManyInput): Promise<ReadManyResult> {
+    return this.#call("POST", "/read-many", input);
+  }
+
   /** A page of nodes in creation order, only those with `label` if given. */
   listNodes(options: ListOptions = {}): Promise<Page<Node>> {
     return this.#call("GET", `/nodes${listQuery(options)}`);
@@ -1092,6 +1109,14 @@ export class Namespace {
     options: { depth?: number; direction?: Direction; filter?: EdgeFilter } = {},
   ): Promise<Subgraph> {
     return this.#call("POST", "/subgraph", { seeds, ...options });
+  }
+
+  /** Depth-one neighborhoods of up to eight roots, in one snapshot. */
+  neighborhoods(
+    seeds: Id[],
+    options: { direction?: Direction; filter?: EdgeFilter } = {},
+  ): Promise<Subgraph[]> {
+    return this.#call("POST", "/neighborhoods", { seeds, ...options });
   }
 
   // Retrieval

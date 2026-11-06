@@ -1535,3 +1535,176 @@ async fn csv_and_graphml_endpoints() {
     .await;
     assert_eq!(found["rows"], json!([["Ana", 2020, "Bob"]]));
 }
+
+#[tokio::test]
+async fn read_many_keeps_positions_text_and_memory_like_individual_reads() {
+    let app = app(None);
+    let (_, a) = call(
+        &app,
+        "POST",
+        "/v1/lab/nodes",
+        Some(json!({"labels":["Person"],"text":"Memoria de Ana"})),
+    )
+    .await;
+    let (_, b) = call(
+        &app,
+        "POST",
+        "/v1/lab/nodes",
+        Some(json!({"labels":["Person"]})),
+    )
+    .await;
+    let (_, edge) = call(
+        &app,
+        "POST",
+        "/v1/lab/edges",
+        Some(json!({"from":id(&a),"to":id(&b),"label":"knows"})),
+    )
+    .await;
+    let (_, full) = call(&app, "GET", &format!("/v1/lab/nodes/{}", id(&a)), None).await;
+    let missing = grafeno::NodeId::new().to_string();
+    let (status, result) = call(
+        &app,
+        "POST",
+        "/v1/lab/read-many",
+        Some(json!({"nodes":[id(&a),missing,id(&a)],"edges":[id(&edge)]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["nodes"], json!([full, null, full]));
+    let (_, full_edge) = call(&app, "GET", &format!("/v1/lab/edges/{}", id(&edge)), None).await;
+    assert_eq!(result["edges"], json!([full_edge]));
+    let (_, other) = call(
+        &app,
+        "POST",
+        "/v1/otro/read-many",
+        Some(json!({"nodes":[id(&a)],"edges":[id(&edge)]})),
+    )
+    .await;
+    assert_eq!(other, json!({"nodes":[null],"edges":[null]}));
+    let (_, empty) = call(&app, "POST", "/v1/lab/read-many", Some(json!({}))).await;
+    assert_eq!(empty, json!({"nodes":[],"edges":[]}));
+}
+
+#[tokio::test]
+async fn read_many_rejects_bad_ids_unknown_fields_and_oversized_combined_lists() {
+    let app = app(None);
+    let node = grafeno::NodeId::new().to_string();
+    let edge = grafeno::EdgeId::new().to_string();
+    let (status, result) = call(
+        &app,
+        "POST",
+        "/v1/lab/read-many",
+        Some(json!({"nodes":vec![&node;511],"edges":[edge]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["nodes"].as_array().unwrap().len(), 511);
+    for input in [
+        json!({"nodes":vec![&node;512],"edges":[edge]}),
+        json!({"nodes":["invalid"]}),
+        json!({"edges":["invalid"]}),
+        json!({"unknown":[]}),
+    ] {
+        let (status, result) = call(&app, "POST", "/v1/lab/read-many", Some(input)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{result}");
+    }
+}
+
+#[tokio::test]
+async fn neighborhoods_match_individual_subgraphs_with_directions_and_filters() {
+    let app = app(None);
+    let (_, a) = call(
+        &app,
+        "POST",
+        "/v1/lab/nodes",
+        Some(json!({"labels":["Person"]})),
+    )
+    .await;
+    let (_, b) = call(
+        &app,
+        "POST",
+        "/v1/lab/nodes",
+        Some(json!({"labels":["Person"]})),
+    )
+    .await;
+    let (a, b) = (id(&a), id(&b));
+    call(&app, "POST", "/v1/lab/edges", Some(json!({"from":a,"to":b,"label":"knows","valid_from":"2020-01-01","valid_to":"2027-01-01"}))).await;
+    for direction in ["out", "in", "both"] {
+        for filter in [
+            json!({}),
+            json!({"valid_at":"2026-06-01"}),
+            json!({"valid_at":"2030-01-01"}),
+            json!({"known_at":"2019-01-01"}),
+            json!({"labels":["other"]}),
+        ] {
+            let (status, actual) = call(
+                &app,
+                "POST",
+                "/v1/lab/neighborhoods",
+                Some(json!({"seeds":[a,b,a],"direction":direction,"filter":filter})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{actual}");
+            let mut expected = Vec::new();
+            for seed in [&a, &b, &a] {
+                let (status, graph) = call(
+                    &app,
+                    "POST",
+                    "/v1/lab/subgraph",
+                    Some(json!({"seeds":[seed],"depth":1,"direction":direction,"filter":filter})),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK);
+                expected.push(graph);
+            }
+            assert_eq!(actual, json!(expected), "{direction} {filter}");
+        }
+    }
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/otro/neighborhoods",
+        Some(json!({"seeds":[a]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn neighborhoods_validate_root_limits_ids_and_options() {
+    let app = app(None);
+    let (_, root) = call(
+        &app,
+        "POST",
+        "/v1/lab/nodes",
+        Some(json!({"labels":["Person"]})),
+    )
+    .await;
+    let root = id(&root);
+    let (status, result) = call(
+        &app,
+        "POST",
+        "/v1/lab/neighborhoods",
+        Some(json!({"seeds":vec![&root;8]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result.as_array().unwrap().len(), 8);
+    let (_, empty) = call(
+        &app,
+        "POST",
+        "/v1/lab/neighborhoods",
+        Some(json!({"seeds":[]})),
+    )
+    .await;
+    assert_eq!(empty, json!([]));
+    for input in [
+        json!({"seeds":vec![&root;9]}),
+        json!({"seeds":["invalid"]}),
+        json!({"seeds":[root],"depth":2}),
+        json!({"seeds":[root],"filter":{"valid_at":"invalid"}}),
+    ] {
+        let (status, result) = call(&app, "POST", "/v1/lab/neighborhoods", Some(input)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{result}");
+    }
+}

@@ -129,3 +129,183 @@ fn a_backup_is_the_snapshot_while_writes_go_on() {
     let _ = std::fs::remove_file(&source);
     let _ = std::fs::remove_file(&target);
 }
+
+#[test]
+fn restore_preserves_the_backup_and_recovers_an_independent_database() {
+    let files = tempfile::tempdir().unwrap();
+    let source = files.path().join("activa.redb");
+    let backup = files.path().join("copia íntegra.redb");
+    let restored = files.path().join("memoria recuperada.redb");
+    let db = Grafeno::open(&source).unwrap();
+    let id = db
+        .write(|tx| {
+            tx.create_node(
+                "lab",
+                NewNode::new("Person")
+                    .prop("name", "Ana")
+                    .text("memoria de grafos"),
+            )
+        })
+        .unwrap();
+    db.begin_read().unwrap().backup(&backup).unwrap();
+    let original = std::fs::read(&backup).unwrap();
+    let expected = content(&db);
+    assert!(Grafeno::recover_backup(&backup, &restored).unwrap() > 0);
+    assert_eq!(std::fs::read(&backup).unwrap(), original);
+    let recovered = Grafeno::open(&restored).unwrap();
+    assert_eq!(content(&recovered), expected);
+    assert_eq!(
+        recovered
+            .begin_read()
+            .unwrap()
+            .search_text("lab", "grafos", 5)
+            .unwrap()[0]
+            .node,
+        id
+    );
+    recovered
+        .write(|tx| tx.create_node("lab", NewNode::new("OnlyRecovered")))
+        .unwrap();
+    assert_eq!(content(&db), expected);
+    assert_eq!(std::fs::read(&backup).unwrap(), original);
+}
+
+#[test]
+fn backup_preserves_existing_destinations_and_legacy_partial_files() {
+    let files = tempfile::tempdir().unwrap();
+    let active = files.path().join("activa.redb");
+    let db = Grafeno::open(&active).unwrap();
+    let target = files.path().join("copia.redb");
+    let legacy = target.with_extension("partial");
+    std::fs::write(&legacy, b"archivo ajeno").unwrap();
+    db.begin_read().unwrap().backup(&target).unwrap();
+    let original = std::fs::read(&target).unwrap();
+    assert!(db.begin_read().unwrap().backup(&target).is_err());
+    assert!(db.begin_read().unwrap().backup(&active).is_err());
+    assert_eq!(std::fs::read(&target).unwrap(), original);
+    assert_eq!(std::fs::read(&legacy).unwrap(), b"archivo ajeno");
+    assert!(
+        db.write(|tx| tx.create_node("lab", NewNode::new("StillUsable")))
+            .is_ok()
+    );
+}
+
+#[test]
+fn concurrent_backups_to_one_destination_have_exactly_one_winner() {
+    let files = tempfile::tempdir().unwrap();
+    let db = Arc::new(Grafeno::in_memory().unwrap());
+    let target = files.path().join("concurrente.redb");
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let threads: Vec<_> = (0..2)
+        .map(|_| {
+            let (db, target, barrier) = (db.clone(), target.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                let read = db.begin_read().unwrap();
+                barrier.wait();
+                read.backup(&target)
+            })
+        })
+        .collect();
+    let results: Vec<_> = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    let recovered = Grafeno::open(&target).unwrap();
+    assert!(
+        recovered
+            .begin_read()
+            .unwrap()
+            .namespaces()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(std::fs::read_dir(files.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn invalid_or_missing_backups_leave_no_destination_or_temporary_files() {
+    let files = tempfile::tempdir().unwrap();
+    let source = files.path().join("invalida.redb");
+    let target = files.path().join("recuperada.redb");
+    for bytes in [b"".as_slice(), b"no es una base", &[0; 256]] {
+        std::fs::write(&source, bytes).unwrap();
+        assert!(Grafeno::recover_backup(&source, &target).is_err());
+        assert!(!target.exists());
+        assert_eq!(std::fs::read(&source).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(files.path()).unwrap().count(), 1);
+    }
+    assert!(Grafeno::recover_backup(&files.path().join("ausente.redb"), &target).is_err());
+    assert!(!target.exists());
+    assert_eq!(std::fs::read_dir(files.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn recovery_refuses_existing_files_and_directories_without_changes() {
+    let files = tempfile::tempdir().unwrap();
+    let source = files.path().join("copia.redb");
+    let db = Grafeno::in_memory().unwrap();
+    db.begin_read().unwrap().backup(&source).unwrap();
+    let original = std::fs::read(&source).unwrap();
+    assert!(Grafeno::recover_backup(&source, &source).is_err());
+    let target = files.path().join("existente.redb");
+    std::fs::write(&target, b"no borrar").unwrap();
+    assert!(Grafeno::recover_backup(&source, &target).is_err());
+    assert!(Grafeno::recover_backup(&source, files.path()).is_err());
+    assert!(Grafeno::recover_backup(&source, &files.path().join("ausente/copia.redb")).is_err());
+    assert_eq!(std::fs::read(&source).unwrap(), original);
+    assert_eq!(std::fs::read(&target).unwrap(), b"no borrar");
+    assert_eq!(std::fs::read_dir(files.path()).unwrap().count(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn backup_and_recovery_refuse_symbolic_and_hard_links_even_if_dangling() {
+    use std::os::unix::fs::symlink;
+    let files = tempfile::tempdir().unwrap();
+    let active = files.path().join("activa.redb");
+    let db = Grafeno::open(&active).unwrap();
+    let backup = files.path().join("copia.redb");
+    db.begin_read().unwrap().backup(&backup).unwrap();
+    let original = std::fs::read(&backup).unwrap();
+    let hard = files.path().join("duro.redb");
+    std::fs::hard_link(&active, &hard).unwrap();
+    let symbolic = files.path().join("simbolico.redb");
+    symlink(&active, &symbolic).unwrap();
+    let missing = files.path().join("no-existe.redb");
+    let dangling = files.path().join("colgante.redb");
+    symlink(&missing, &dangling).unwrap();
+    for path in [&hard, &symbolic, &dangling] {
+        assert!(db.begin_read().unwrap().backup(path).is_err());
+        assert!(Grafeno::recover_backup(&backup, path).is_err());
+    }
+    assert_eq!(std::fs::read(&backup).unwrap(), original);
+    assert!(!missing.exists());
+    assert!(std::fs::symlink_metadata(&dangling).unwrap().is_symlink());
+    assert!(
+        db.write(|tx| tx.create_node("lab", NewNode::new("Preserved")))
+            .is_ok()
+    );
+}
+
+#[test]
+fn truncated_backups_and_unrelated_redb_files_are_not_published() {
+    let files = tempfile::tempdir().unwrap();
+    let source = files.path().join("copia.redb");
+    let target = files.path().join("recuperada.redb");
+    let db = Grafeno::in_memory().unwrap();
+    db.begin_read().unwrap().backup(&source).unwrap();
+    let mut bytes = std::fs::read(&source).unwrap();
+    bytes.truncate(bytes.len() / 2);
+    std::fs::write(&source, &bytes).unwrap();
+    assert!(Grafeno::recover_backup(&source, &target).is_err());
+    assert_eq!(std::fs::read(&source).unwrap(), bytes);
+    assert!(!target.exists());
+    let unrelated = files.path().join("ajena.redb");
+    drop(redb::Database::create(&unrelated).unwrap());
+    let original = std::fs::read(&unrelated).unwrap();
+    assert!(Grafeno::recover_backup(&unrelated, &target).is_err());
+    assert_eq!(std::fs::read(&unrelated).unwrap(), original);
+    assert!(!target.exists());
+    assert_eq!(std::fs::read_dir(files.path()).unwrap().count(), 2);
+}

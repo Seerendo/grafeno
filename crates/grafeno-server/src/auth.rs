@@ -634,8 +634,10 @@ fn namespace_actions(method: &str, rest: &[&str]) -> &'static [Act] {
         (
             "POST",
             ["k-hop"]
+            | ["read-many"]
             | ["path"]
             | ["subgraph"]
+            | ["neighborhoods"]
             | ["search", ..]
             | ["recall"]
             | ["context"]
@@ -677,6 +679,11 @@ mod tests {
         assert_eq!(need("POST", "/vault/query"), ns("vault", &[Act::Read]));
         assert_eq!(need("POST", "/vault/merge"), ns("vault", &[Act::Merge]));
         assert_eq!(need("POST", "/vault/match"), ns("vault", &[Act::Read]));
+        assert_eq!(need("POST", "/vault/read-many"), ns("vault", &[Act::Read]));
+        assert_eq!(
+            need("POST", "/vault/neighborhoods"),
+            ns("vault", &[Act::Read])
+        );
         assert_eq!(
             need("POST", "/vault/algo/pagerank"),
             ns("vault", &[Act::Algorithms])

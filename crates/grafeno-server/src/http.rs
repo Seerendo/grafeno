@@ -347,6 +347,7 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/backup", get(backup))
         .route("/import", post(import))
         .route("/{ns}/stats", get(stats))
+        .route("/{ns}/read-many", post(read_many))
         .route("/{ns}/check", get(check))
         .route("/{ns}/rebuild", post(rebuild))
         .route("/{ns}/compact", post(compact))
@@ -367,6 +368,7 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/{ns}/k-hop", post(k_hop))
         .route("/{ns}/path", post(path))
         .route("/{ns}/subgraph", post(subgraph))
+        .route("/{ns}/neighborhoods", post(neighborhoods))
         .route("/{ns}/search/text", post(search_text))
         .route("/{ns}/search/vector", post(search_vector))
         .route("/{ns}/recall", post(recall_handler))
@@ -1065,6 +1067,51 @@ async fn list_edges(
     Ok(Json(Page::new(edges, limit, |edge| edge.id.to_string())))
 }
 
+/// The limit counts positions, repeated IDs included, across both lists.
+const MAX_READ_MANY: usize = 512;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadManyInput {
+    #[serde(default)]
+    nodes: Vec<NodeId>,
+    #[serde(default)]
+    edges: Vec<EdgeId>,
+}
+
+#[derive(Serialize)]
+struct ReadManyOutput {
+    nodes: Vec<Option<NodeOutput>>,
+    edges: Vec<Option<grafeno::Edge>>,
+}
+
+async fn read_many(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Body(input): Body<ReadManyInput>,
+) -> ApiResult<Json<ReadManyOutput>> {
+    if input.nodes.len().saturating_add(input.edges.len()) > MAX_READ_MANY {
+        return Err(ApiError::bad_request(
+            "read-many accepts at most 512 node and edge IDs combined",
+        ));
+    }
+    let result = blocking(&state, move |db| {
+        let read = db.begin_read()?;
+        let nodes = read
+            .nodes_by_id(&ns, &input.nodes)?
+            .into_iter()
+            .map(|node| {
+                node.map(|node| NodeOutput::load(&read, &ns, node))
+                    .transpose()
+            })
+            .collect::<grafeno::Result<Vec<_>>>()?;
+        let edges = read.edges_by_id(&ns, &input.edges)?;
+        Ok(ReadManyOutput { nodes, edges })
+    })
+    .await?;
+    Ok(Json(result))
+}
+
 async fn get_node(
     State(state): State<AppState>,
     Path((ns, id)): Path<(String, String)>,
@@ -1357,6 +1404,40 @@ async fn subgraph(
     })
     .await?;
     Ok(Json(subgraph))
+}
+
+/// Separate depth-one neighborhoods, in the order of the roots.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NeighborhoodsInput {
+    seeds: Vec<NodeId>,
+    #[serde(default)]
+    direction: Direction,
+    #[serde(default)]
+    filter: FilterInput,
+}
+
+async fn neighborhoods(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Body(input): Body<NeighborhoodsInput>,
+) -> ApiResult<Json<Vec<grafeno::Subgraph>>> {
+    if input.seeds.len() > 8 {
+        return Err(ApiError::bad_request(
+            "neighborhoods accepts at most 8 roots",
+        ));
+    }
+    let filter = input.filter.resolve()?;
+    let result = blocking(&state, move |db| {
+        let read = db.begin_read()?;
+        input
+            .seeds
+            .iter()
+            .map(|&seed| read.subgraph(&ns, &[seed], 1, input.direction, &filter))
+            .collect::<grafeno::Result<Vec<_>>>()
+    })
+    .await?;
+    Ok(Json(result))
 }
 
 #[derive(Deserialize)]
