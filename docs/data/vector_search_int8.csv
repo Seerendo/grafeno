@@ -1,0 +1,5 @@
+build,container,page_cache_mib,runs,ms_per_search_best,ms_per_search_worst,steady_mib
+12.4 (exact vectors),512m,128,4,4.9,5.2,141
+12.5 (int8 copies),512m,128,4,3.5,4.2,140
+12.4 (exact vectors),2g,256,4,5.0,6.0,272
+12.5 (int8 copies),2g,256,4,3.2,3.7,278

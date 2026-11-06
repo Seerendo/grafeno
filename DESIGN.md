@@ -1669,11 +1669,17 @@ As built (layout version 13):
   0.996 both ways and the median search 1.35 against 1.40 ms; reading every
   node's edges is no faster (1.25 to 1.40 s before, 1.42 to 1.47 s after:
   decoding varints costs about what the smaller entries save in memory).
-- What this buys, honestly: with everything in memory, little. A search
-  now touches 7.8 MiB of vectors instead of 26.2 (plus `ef` exact ones),
-  which matters when vectors do not fit in the page cache (E2's 1 M vectors
-  in 512 MiB); that was not measured again in E2 for lack of time (the
-  inserts alone take hours there).
+- What this buys: with everything in memory, little. A search touches a
+  quarter of the vector bytes (plus `ef` exact ones), which pays when the
+  vectors do not fit in the page cache. Measured in E2 on 10.6's file of
+  1 M vectors of 128 dimensions (2.06 GB), copied twice and opened by each
+  build (`ram_bench search`, 1 000 searches per round, two rounds per run,
+  runs alternating): in 512 MiB with a 128 MiB page cache, 4.9 to 5.2 ms a
+  search before and 3.5 to 4.2 ms after; in 2 GiB with 256 MiB, 5.0 to 6.0
+  ms before and 3.2 to 3.7 ms after; resident memory the same (140 and 272
+  MiB). Upgrading that file to layout 13 took 4.5 s (the int8 copies of 1 M
+  vectors, about 126 MB, fitting in its free pages: the file kept its
+  size).
 - Not built: compressed postings and adjacency blocks (delta-encoded ids
   per node or per term, read whole). Both replace the one-entry-per-edge
   and one-entry-per-posting tables with blocks rewritten on every change,
@@ -1767,6 +1773,7 @@ spinning disk, on ARM, or for days at a time.
 | Aggregates over 200 000 rows, folded as they come (12.3) | 2.3 to 2.9 times faster grouped; 2 M rows counted within the standard limits (failed before) | E1-mem | `batch_aggregation.csv` |
 | Traversals from many starts, batched and parallel (12.4) | two hops from 10 000 people 5.6 → 2.7 s, from every company 9.5 → 2.9 s; reads down 30 to 72% | E1-mem | `traversal.csv` |
 | Compact adjacency and int8 vectors (12.5) | adjacency 19% smaller; searches walk a quarter of the vector bytes at the same recall (0.996) and speed in memory | E1-disk | `compact_storage.csv` |
+| Vector search, 1 M vectors in 512 MiB, int8 copies (12.5) | 3.5 to 4.2 ms (4.9 to 5.2 ms before), same resident memory | E2 | `vector_search_int8.csv` |
 
 ### Guarantees and the tests that hold them
 

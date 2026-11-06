@@ -170,7 +170,8 @@ measured speed, memory and limits, with charts, in
   hops from every company 9.5 → 2.9 s).
 - **Phase 12.5, compact storage:** layout 13 stores adjacency entries
   compactly (19% smaller) and every vector also as int8; searches walk the
-  int8 copies and rescore exactly, at the same recall.
+  int8 copies and rescore exactly, at the same recall (1 M vectors in 512
+  MiB: about 5 ms to 3.5 to 4.2 ms a search).
 
 ## Installing
 

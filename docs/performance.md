@@ -30,7 +30,7 @@ test environments").
 | Reads with 16 readers and a busy writer | 8 000 queries/s, p99 under 9 ms |
 | Grouping 200 000 rows | 233 ms (609 ms before 12.3); 2 million matches counted within the limits |
 | Two hops from 10 000 starts, 2 million matches | 2.7 s (5.6 s before 12.4), 72% fewer reads |
-| Vector search with int8 copies | same recall (0.996) and speed in memory, a quarter of the vector bytes walked |
+| Vector search with int8 copies | same recall (0.996); 1 M vectors in 512 MiB 3.5 to 4.2 ms a search (about 5 ms before) |
 
 ## Test environments
 
@@ -240,7 +240,9 @@ company go from 9.5 s to 2.9 s. The rows are the same, in the same order.
 Adjacency entries are stored compactly (19% smaller), and every vector also
 as int8: searches walk the graph with the quarter-size copies and rescore
 the best candidates with the exact vectors, at the same recall (0.996 at
-`ef` 64). With everything in memory the speed is the same.
+`ef` 64). With everything in memory the speed is the same; with 1 M vectors
+in a 512 MiB container a search goes from about 5 ms to 3.5 to 4.2 ms, in
+the same memory.
 
 ## Moving graphs in and out
 

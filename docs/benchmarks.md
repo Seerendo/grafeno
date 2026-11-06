@@ -631,8 +631,17 @@ release build, 2026-11-05, against 12.4 built in the same session.
 The adjacency is 19% smaller; reading it is not faster, as decoding the
 varints costs about what the smaller entries save while everything is in
 memory. Searches keep their recall and walk a quarter of the vector bytes;
-in memory that changes nothing, and the case where it should (vectors
-larger than the page cache, E2) was not measured again. An earlier run of
+in memory that changes nothing. Where the vectors do not fit in the page
+cache it does (E2, 10.6's file of 1 M vectors of 128 dimensions, copied
+once per build, `ram_bench search`, four runs each, alternating):
+
+| Container, page cache | 12.4 | 12.5 | Resident |
+| --- | --- | --- | --- |
+| 512 MiB, 128 MiB | 4.9 to 5.2 ms a search | 3.5 to 4.2 ms | 140 MiB both |
+| 2 GiB, 256 MiB | 5.0 to 6.0 ms | 3.2 to 3.7 ms | 272 to 278 MiB both |
+
+Upgrading the file to layout 13 took 4.5 s; its int8 copies (about 126
+MB) fit in free pages, so it kept its 2.06 GB. An earlier run of
 this benchmark used clusters so spread that recall was 0.31 to 0.33 in
 both versions: the data, not the index; the numbers above use clusters
 like `hnsw_recall`'s.
