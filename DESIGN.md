@@ -67,7 +67,7 @@ short-lived agents.
 | -------------- | ----------------------------- | -------------------------- |
 | `nodes`        | `(ns, node_id)`               | `Node` record              |
 | `edges`        | `(ns, edge_id)`               | `Edge` record              |
-| `adjacency_out` | `(ns, from, label, edge_id)` | `to` + the edge's times    |
+| `adjacency_out` | `(ns, from, label, edge_id)` | `to` + the edge's times, compact (layout 13) |
 | `adjacency_in` | `(ns, to, label, edge_id)`    | `from` + the edge's times  |
 | `node_labels`  | `(ns, label, node_id)`        | `()`                       |
 | `texts`        | `(ns, node_id)`               | indexed text               |
@@ -75,6 +75,7 @@ short-lived agents.
 | `text_postings` | `(ns, term, node_id)`        | term frequency, text length |
 | `text_stats`   | `ns`                          | `(documents, total terms)` |
 | `vectors`      | `(ns, node_id)`               | normalized `f32` vector    |
+| `vectors_q8`   | `(ns, node_id)`               | the same as int8 (layout 13), for searches |
 | `hnsw_links`   | `(ns, node_id, layer)`        | neighbor ids               |
 | `vector_meta`  | `ns`                          | dimension, count, entry    |
 | `meta`         | key, such as `schema_version` | `u64`                      |
@@ -383,7 +384,7 @@ without a current user. They remain possible for embedded use.
     extraction and reconciliation of entities, automatic invalidation of
     contradicting facts, hierarchical community summaries, continuous
     ingestion and events.
-12. **Compatibility and speed** (in progress, in five steps; 12.1 to 12.4 done): wider
+12. **Compatibility and speed** (done, in five steps): wider
     Cypher and tool compatibility, query optimization under concurrency,
     batched execution, batched and parallel traversal, compact storage and
     vector quantization.
@@ -1629,13 +1630,55 @@ people rather than of the nodes read. The plan, in two parts:
   12.3; results equal to the row-at-a-time matcher (kept for patterns the
   batched one does not cover, such as path variables at first).
 
-**12.5 Compact storage and vector quantization.**
+**12.5 Compact storage and vector quantization** (done, without the
+compressed postings and adjacency blocks; see below).
 
 - Vector quantization (int8, with exact rescoring of the best
   candidates), compressed postings and adjacency lists (delta-encoded ids
   in blocks per node, read whole by 12.4's traversal); memory and speed
   compared with 10.6's numbers. A new layout version, with its upgrade and
   fixture.
+
+As built (layout version 13):
+
+- `vectors_q8`: every vector also kept as int8, its largest absolute value
+  (f32) then one signed byte per dimension, that value scaled to 127
+  (`vector::quantize`): 4 + d bytes instead of 4·d. Searches walk the HNSW
+  graph with these (`dot_q8`, computed from the stored bytes), then rescore
+  the `ef` candidates found with the exact vectors and return the best
+  `limit`, so the scores returned are exact. Inserts build the graph with
+  the exact vectors, as before. The copies follow every write: insert,
+  remove, compaction, rebuild, namespace drop and backup.
+- `adjacency_out` and `adjacency_in` keep their keys; their values are a
+  compact encoding (`store::Adj`, a `redb::Value` whose in-memory type is
+  still the tuple, so no reader changed): a byte of flags for which of
+  `expired_at`, `valid_from` and `valid_to` are set, the other end (16
+  bytes), then `recorded_at` and the set bounds as zigzag varints. A plain
+  fact's value takes 25 bytes instead of 48.
+- Upgrade: a file of layouts 3 to 12 has each adjacency table renamed,
+  copied entry by entry into the new type under its name, and dropped
+  (one transaction, streaming, nothing held in memory); every vector gets
+  its int8 copy. `tests/fixtures/layout-v12.redb.gz` is new (layout 12 had
+  no fixture), so every past layout is upgraded by `upgrade.rs`.
+- Measured (`examples/storage_bench.rs`, a file with 100 000 nodes, 300 000
+  edges, a third with valid-time ranges, and 50 000 clustered vectors of
+  128 dimensions; against 12.4 in the same session): the adjacency tables
+  store 26.3 → 21.3 MiB each (19% less; 14% with B-tree metadata); the
+  int8 copies add 7.8 MiB next to the 26.2 MiB of exact vectors; the file
+  stays at 514 MiB (redb grows it in large steps); recall@10 at `ef` 64 is
+  0.996 both ways and the median search 1.35 against 1.40 ms; reading every
+  node's edges is no faster (1.25 to 1.40 s before, 1.42 to 1.47 s after:
+  decoding varints costs about what the smaller entries save in memory).
+- What this buys, honestly: with everything in memory, little. A search
+  now touches 7.8 MiB of vectors instead of 26.2 (plus `ef` exact ones),
+  which matters when vectors do not fit in the page cache (E2's 1 M vectors
+  in 512 MiB); that was not measured again in E2 for lack of time (the
+  inserts alone take hours there).
+- Not built: compressed postings and adjacency blocks (delta-encoded ids
+  per node or per term, read whole). Both replace the one-entry-per-edge
+  and one-entry-per-posting tables with blocks rewritten on every change,
+  which redesigns the text index, the writes, `check` and `rebuild`; with
+  the value encoding above the adjacency is 14% smaller without it.
 
 ## Measurements and test environments
 
@@ -1723,6 +1766,7 @@ spinning disk, on ARM, or for days at a time.
 | Read queries with 16 readers and a busy writer | 9 200 a second alone, 8 000 with 10 500 writes a second; p99 under 9 ms | E1-mem | `read_concurrency.csv` |
 | Aggregates over 200 000 rows, folded as they come (12.3) | 2.3 to 2.9 times faster grouped; 2 M rows counted within the standard limits (failed before) | E1-mem | `batch_aggregation.csv` |
 | Traversals from many starts, batched and parallel (12.4) | two hops from 10 000 people 5.6 → 2.7 s, from every company 9.5 → 2.9 s; reads down 30 to 72% | E1-mem | `traversal.csv` |
+| Compact adjacency and int8 vectors (12.5) | adjacency 19% smaller; searches walk a quarter of the vector bytes at the same recall (0.996) and speed in memory | E1-disk | `compact_storage.csv` |
 
 ### Guarantees and the tests that hold them
 
@@ -1734,7 +1778,7 @@ real binary. The ones that carry each guarantee:
 | --- | --- | --- |
 | The engine does what a plain model does | `grafeno/tests/model.rs` | proptest: random sequences of every write, aborted transactions, valid and record times; records, labels, counters, neighbors, text and vector search compared with an in-memory model, also after export → import and after a rebuild (3 000 cases) |
 | Commits survive crashes | `grafeno/tests/durability.rs`, `crash.rs` | a child process killed at random moments during writes, imports, rebuilds, namespace drops and upgrades; every reported commit is there, nothing is half-written, the check passes |
-| Old files open | `grafeno/tests/upgrade.rs` and `fixtures/layout-v1` to `v7` | a database written by the commit of every past layout version, upgraded on open, then written and reopened |
+| Old files open | `grafeno/tests/upgrade.rs` and `fixtures/layout-v1` to `v12` | a database written by the commit of every past layout version, upgraded on open, then written and reopened |
 | Damage is found, not trusted | `grafeno/tests/corruption.rs`, `src/check.rs` tests | files with flipped bytes, zeroed pages or cut short are refused or read back exactly as they were, never a crash or a different answer; damage to each derived index is reported and repaired by a rebuild |
 | Backups are consistent | `grafeno/tests/backup.rs` | a backup taken while writes go on is the snapshot it started from |
 | Readers see whole transactions | `grafeno/tests/concurrency.rs` | readers during commits never see part of one, and snapshots never go back |
@@ -1753,6 +1797,7 @@ real binary. The ones that carry each guarantee:
 | The planner estimates from the data, and parallel scans change nothing | `grafeno-query/tests/planner.rs` | statistics against known distributions and degrees; starts chosen by value distribution, parameters and pattern cost; join order; statistics rebuilt after drift and index changes; a cached statement after its index is dropped; parallel rows and order equal one thread's, and limits hold across threads |
 | Folded aggregates equal row-at-a-time ones and hold no rows | `grafeno-query/tests/batch.rs` | every aggregate with DISTINCT, nesting, ties, empty groups, overflow and duration sums; 90 000 rows counted under a `max_rows` of 2 000; parallel folds equal to one thread's |
 | Batched and parallel traversal give the same rows in the same order | `grafeno-query/tests/traversal.rs` | eight pattern shapes (both directions from a middle anchor, edge variables and properties, targets filtered by earlier nodes, edge uniqueness, variable length with paths, bound nodes, row filters) against one anchor at a time; a hub's 12 000 two-hop rows on one and four threads; shared nodes read once; `max_rows` across slices |
+| int8 searches keep their quality and compact entries read back exactly | `grafeno/tests/quantized.rs`, `src/store.rs` and `src/vector.rs` tests | recall@10 of 0.95 or more with exact scores; the copies through removal, replacement, compaction, backup and namespace drop; adjacency values round trip at every bound; quantized dot products within 0.02 |
 | Costly queries stop | `grafeno-query/tests/adversarial.rs` | 32 hostile queries within their limits; nesting just under the limit runs on a 2 MiB stack; `max_cost` refuses; procedure rows count against `max_memory` |
 | Nothing a client sends crashes the parser | `grafeno-query/tests/fuzz.rs` | proptest: random tokens, valid queries with random edits, arbitrary text, through the lexer, parser, planner, `EXPLAIN` and executor |
 | The API keeps its contract | `grafeno-server/tests/http.rs`, `mcp.rs`, `shell.rs`, `clients/typescript/test` | every endpoint and MCP tool, limits, conflicts (409 with details), metrics, the CLI shell, and the client against the real binary |
@@ -1776,6 +1821,7 @@ cargo run --release -p grafeno --example interchange_bench -- 100000
 cargo run --release -p grafeno-query --example planner_bench -- 200000
 cargo run --release -p grafeno-query --example batch_bench -- 200000
 cargo run --release -p grafeno-query --example traversal_bench -- 200000
+cargo run --release -p grafeno --example storage_bench -- 100000 50000
 cargo run --release -p grafeno --example changes_bench -- 100000
 cargo run --release -p grafeno-server --example events_bench -- 100000
 cargo test --release -p grafeno-query --test adversarial -- --nocapture

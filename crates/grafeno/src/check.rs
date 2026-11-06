@@ -17,7 +17,7 @@ use crate::stats::{bump_edge_label, bump_namespace, label_counts};
 use crate::store::{
     ADJ_IN, ADJ_OUT, EDGE_LABEL_COUNTS, EDGES, HNSW_LINKS, LABEL_COUNTS, MEMORY, NAMES,
     NODE_LABELS, NODES, NS_COUNTS, POSTINGS, RecordKey, TEXT_LENGTHS, TEXT_STATS, TEXTS,
-    VECTOR_META, VECTORS, adjacency_value, decode, storage,
+    VECTOR_META, VECTORS, VECTORS_Q8, adjacency_value, decode, storage,
 };
 use crate::{text, vector};
 
@@ -551,10 +551,12 @@ impl WriteTx {
             .map_err(storage)?
             .retain_in((ns, 0u128).., |key, _| other(key.0))
             .map_err(storage)?;
-        tx.open_table(VECTORS)
-            .map_err(storage)?
-            .retain_in((ns, 0u128).., |key, _| other(key.0))
-            .map_err(storage)?;
+        for definition in [VECTORS, VECTORS_Q8] {
+            tx.open_table(definition)
+                .map_err(storage)?
+                .retain_in((ns, 0u128).., |key, _| other(key.0))
+                .map_err(storage)?;
+        }
         tx.open_table(HNSW_LINKS)
             .map_err(storage)?
             .retain_in((ns, 0u128, 0u8).., |key, _| other(key.0))
@@ -784,6 +786,7 @@ impl ReadTx {
     pub fn vector_recall(&self, ns: &str, sample: usize, ef: usize) -> Result<Option<f64>> {
         vector::estimate_recall(
             &self.vectors,
+            &self.vectors_q8,
             &self.hnsw_links,
             &self.vector_meta,
             ns,
@@ -832,11 +835,13 @@ impl WriteTx {
             }
         }
         let other = |key_ns: &str| key_ns != ns;
-        self.tx
-            .open_table(VECTORS)
-            .map_err(storage)?
-            .retain_in((ns, 0u128).., |key, _| other(key.0))
-            .map_err(storage)?;
+        for definition in [VECTORS, VECTORS_Q8] {
+            self.tx
+                .open_table(definition)
+                .map_err(storage)?
+                .retain_in((ns, 0u128).., |key, _| other(key.0))
+                .map_err(storage)?;
+        }
         self.tx
             .open_table(HNSW_LINKS)
             .map_err(storage)?

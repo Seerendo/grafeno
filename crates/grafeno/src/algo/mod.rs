@@ -39,9 +39,7 @@ pub use similarity::{
     LinkMetric, SimilarityMetric, link_score, neighbor_similarity, predict_links, similar_neighbors,
 };
 
-use crate::store::{
-    AdjKey, AdjValue, Adjacent, LabelKey, RecordKey, decode, nodes_with_label, storage,
-};
+use crate::store::{Adj, AdjKey, Adjacent, LabelKey, RecordKey, decode, nodes_with_label, storage};
 use crate::traverse::{Direction, EdgeFilter};
 use crate::{ReadTx, WriteTx};
 
@@ -389,7 +387,7 @@ impl Projection {
 fn project(
     nodes: &impl ReadableTable<RecordKey, &'static [u8]>,
     labels: &impl ReadableTable<LabelKey, ()>,
-    out: &impl ReadableTable<AdjKey, AdjValue>,
+    out: &impl ReadableTable<AdjKey, Adj>,
     edges: &impl ReadableTable<RecordKey, &'static [u8]>,
     ns: &str,
     spec: &ProjectionSpec,

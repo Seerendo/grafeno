@@ -167,8 +167,10 @@ measured speed, memory and limits, with charts, in
 - **Phase 12.4, batched and parallel traversal:** patterns grow from batches
   of starts one step at a time, reading each node, edge list and record
   once for every branch, with large frontiers spread over the cores (two
-  hops from every company 9.5 → 2.9 s). Next: compact storage and int8
-  vectors (12.5).
+  hops from every company 9.5 → 2.9 s).
+- **Phase 12.5, compact storage:** layout 13 stores adjacency entries
+  compactly (19% smaller) and every vector also as int8; searches walk the
+  int8 copies and rescore exactly, at the same recall.
 
 ## Installing
 

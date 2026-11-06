@@ -7,7 +7,7 @@ use grafeno_core::{Edge, EdgeId, Error, Node, NodeId, Result, Timestamp};
 use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
 
-use crate::store::{ADJ_IN, ADJ_OUT, AdjKey, AdjValue, Adjacent, adjacency, storage};
+use crate::store::{ADJ_IN, ADJ_OUT, Adj, AdjKey, Adjacent, adjacency, storage};
 use crate::{ReadTx, WriteTx};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,8 +287,8 @@ impl WriteTx {
 
 /// The adjacency entries of `node` that pass `filter`, each edge once.
 fn adjacent(
-    out: &impl ReadableTable<AdjKey, AdjValue>,
-    inn: &impl ReadableTable<AdjKey, AdjValue>,
+    out: &impl ReadableTable<AdjKey, Adj>,
+    inn: &impl ReadableTable<AdjKey, Adj>,
     ns: &str,
     node: NodeId,
     direction: Direction,

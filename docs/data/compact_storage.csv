@@ -1,0 +1,12 @@
+measure,before,after,unit
+adjacency_out stored,26.3,21.3,MiB
+adjacency_in stored,26.3,21.3,MiB
+adjacency_out with metadata,28.0,24.0,MiB
+adjacency_in with metadata,28.2,24.2,MiB
+vectors (exact f32),26.2,26.2,MiB
+vectors_q8 (int8 copies),0,7.8,MiB
+whole file,514.0,514.0,MiB
+every node's edges both ways (best of 3),1253,1422,ms
+vector search recall@10 (ef 64),0.996,0.996,
+vector search p50 (ef 64),1.353,1.404,ms
+vector search p99 (ef 64),2.514,3.055,ms

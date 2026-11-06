@@ -23,10 +23,121 @@ pub(crate) const EDGES: TableDefinition<RecordKey, &[u8]> = TableDefinition::new
 /// `i64::MAX` for open bounds.
 pub(crate) type AdjValue = (u128, i64, i64, i64, i64);
 
+/// How an [`AdjValue`] is stored (layout 13): a byte of flags (which of
+/// `expired_at`, `valid_from` and `valid_to` are set), the other end (16
+/// bytes), then `recorded_at` and each bound that is set as zigzag varints.
+/// A plain fact takes 25 bytes instead of 48.
+#[derive(Debug)]
+pub(crate) struct Adj;
+
+const EXPIRED: u8 = 1;
+const VALID_FROM: u8 = 2;
+const VALID_TO: u8 = 4;
+
+fn put_varint(out: &mut Vec<u8>, value: i64) {
+    let mut zigzag = ((value << 1) ^ (value >> 63)) as u64;
+    loop {
+        let byte = (zigzag & 0x7F) as u8;
+        zigzag >>= 7;
+        if zigzag == 0 {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+fn take_varint(data: &[u8], at: &mut usize) -> i64 {
+    let mut zigzag = 0u64;
+    let mut shift = 0;
+    while let Some(&byte) = data.get(*at) {
+        *at += 1;
+        zigzag |= u64::from(byte & 0x7F) << shift;
+        if byte & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+    }
+    ((zigzag >> 1) as i64) ^ -((zigzag & 1) as i64)
+}
+
+pub(crate) fn encode_adj(value: &AdjValue) -> Vec<u8> {
+    let (other, recorded_at, expired_at, valid_from, valid_to) = *value;
+    let flags = if expired_at != i64::MAX { EXPIRED } else { 0 }
+        | if valid_from != i64::MIN {
+            VALID_FROM
+        } else {
+            0
+        }
+        | if valid_to != i64::MAX { VALID_TO } else { 0 };
+    let mut out = Vec::with_capacity(26);
+    out.push(flags);
+    out.extend_from_slice(&other.to_le_bytes());
+    put_varint(&mut out, recorded_at);
+    for (flag, value) in [
+        (EXPIRED, expired_at),
+        (VALID_FROM, valid_from),
+        (VALID_TO, valid_to),
+    ] {
+        if flags & flag != 0 {
+            put_varint(&mut out, value);
+        }
+    }
+    out
+}
+
+pub(crate) fn decode_adj(data: &[u8]) -> AdjValue {
+    let flags = data.first().copied().unwrap_or(0);
+    let other = data
+        .get(1..17)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map_or(0, u128::from_le_bytes);
+    let mut at = 17;
+    let recorded_at = take_varint(data, &mut at);
+    let mut bound = |flag: u8, open: i64| {
+        if flags & flag != 0 {
+            take_varint(data, &mut at)
+        } else {
+            open
+        }
+    };
+    let expired_at = bound(EXPIRED, i64::MAX);
+    let valid_from = bound(VALID_FROM, i64::MIN);
+    let valid_to = bound(VALID_TO, i64::MAX);
+    (other, recorded_at, expired_at, valid_from, valid_to)
+}
+
+impl redb::Value for Adj {
+    type SelfType<'a> = AdjValue;
+    type AsBytes<'a> = Vec<u8>;
+
+    fn fixed_width() -> Option<usize> {
+        None
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> AdjValue
+    where
+        Self: 'a,
+    {
+        decode_adj(data)
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a AdjValue) -> Vec<u8>
+    where
+        Self: 'b,
+    {
+        encode_adj(value)
+    }
+
+    fn type_name() -> redb::TypeName {
+        redb::TypeName::new("grafeno::Adjacency")
+    }
+}
+
 /// `(ns, from, label, edge_id) -> AdjValue` with `to` as the other end.
-pub(crate) const ADJ_OUT: TableDefinition<AdjKey, AdjValue> = TableDefinition::new("adjacency_out");
+pub(crate) const ADJ_OUT: TableDefinition<AdjKey, Adj> = TableDefinition::new("adjacency_out");
 /// `(ns, to, label, edge_id) -> AdjValue` with `from` as the other end.
-pub(crate) const ADJ_IN: TableDefinition<AdjKey, AdjValue> = TableDefinition::new("adjacency_in");
+pub(crate) const ADJ_IN: TableDefinition<AdjKey, Adj> = TableDefinition::new("adjacency_in");
 /// `(ns, label, node_id) -> ()`
 pub(crate) const NODE_LABELS: TableDefinition<LabelKey, ()> = TableDefinition::new("node_labels");
 
@@ -44,6 +155,11 @@ pub(crate) const TEXT_STATS: TableDefinition<&str, (u64, u64)> = TableDefinition
 
 /// `(ns, node_id) -> normalized f32 vector` (little endian).
 pub(crate) const VECTORS: TableDefinition<RecordKey, &[u8]> = TableDefinition::new("vectors");
+/// `(ns, node_id) -> the same vector quantized`: its largest absolute value
+/// (f32, little endian), then one signed byte per dimension, that value
+/// scaled to 127. Searches walk the graph with these and rescore the best
+/// candidates with the exact vectors.
+pub(crate) const VECTORS_Q8: TableDefinition<RecordKey, &[u8]> = TableDefinition::new("vectors_q8");
 /// `(ns, node_id, layer) -> neighbor ids` (u128, little endian) of the HNSW graph.
 pub(crate) const HNSW_LINKS: TableDefinition<LinkKey, &[u8]> = TableDefinition::new("hnsw_links");
 /// `ns -> VectorMeta` (JSON).
@@ -127,7 +243,7 @@ pub(crate) fn adjacency_value(edge: &Edge, other: NodeId) -> AdjValue {
 /// The edges of `node` in an adjacency table. With `label`, only edges with
 /// that label.
 pub(crate) fn adjacency(
-    table: &impl ReadableTable<AdjKey, AdjValue>,
+    table: &impl ReadableTable<AdjKey, Adj>,
     ns: &str,
     node: NodeId,
     label: Option<&str>,
@@ -262,3 +378,36 @@ pub(crate) const NAMES: TableDefinition<LabelKey, ()> = TableDefinition::new("na
 /// Nodes without a row have the default memory state.
 pub(crate) const MEMORY: TableDefinition<RecordKey, (f32, u32, i64)> =
     TableDefinition::new("memory");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adjacency_values_round_trip() {
+        let ends = [
+            i64::MIN,
+            i64::MIN + 1,
+            -1,
+            0,
+            1,
+            1_700_000_000_000_000,
+            i64::MAX - 1,
+            i64::MAX,
+        ];
+        for recorded in ends {
+            for expired in ends {
+                for from in ends {
+                    for to in [i64::MAX, 0, -5, 1_640_995_200_000_000] {
+                        let value = (u128::MAX - 7, recorded, expired, from, to);
+                        let bytes = encode_adj(&value);
+                        assert_eq!(decode_adj(&bytes), value);
+                    }
+                }
+            }
+        }
+        // A plain fact: flags, the other end and a recent time.
+        let plain = (42u128, 1_700_000_000_000_000, i64::MAX, i64::MIN, i64::MAX);
+        assert_eq!(encode_adj(&plain).len(), 25);
+    }
+}

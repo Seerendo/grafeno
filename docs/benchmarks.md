@@ -612,6 +612,31 @@ anchors were too few for 12.2's parallel scans). Friends of friends reads
 threads, and its time is building and comparing rows. Rows returned whole
 share nothing.
 
+## Compact storage and int8 vectors (`crates/grafeno/examples/storage_bench.rs`)
+
+A file with 100 000 nodes, 300 000 edges (a third with a valid-time range)
+and 50 000 clustered vectors of 128 dimensions, measured after closing it;
+release build, 2026-11-05, against 12.4 built in the same session.
+
+| | Before 12.5 | After |
+| --- | --- | --- |
+| `adjacency_out` / `adjacency_in`, stored | 26.3 MiB each | 21.3 MiB each |
+| the same with B-tree metadata | 28.0 / 28.2 MiB | 24.0 / 24.2 MiB |
+| exact vectors | 26.2 MiB | 26.2 MiB |
+| int8 copies (`vectors_q8`) | | 7.8 MiB |
+| whole file | 514 MiB | 514 MiB |
+| every node's edges, both ways | 1 253 to 1 404 ms | 1 422 to 1 465 ms |
+| vector search, `ef` 64: recall@10, p50, p99 | 0.996, 1.35 ms, 2.51 ms | 0.996, 1.40 ms, 3.06 ms |
+
+The adjacency is 19% smaller; reading it is not faster, as decoding the
+varints costs about what the smaller entries save while everything is in
+memory. Searches keep their recall and walk a quarter of the vector bytes;
+in memory that changes nothing, and the case where it should (vectors
+larger than the page cache, E2) was not measured again. An earlier run of
+this benchmark used clusters so spread that recall was 0.31 to 0.33 in
+both versions: the data, not the index; the numbers above use clusters
+like `hnsw_recall`'s.
+
 ## Remaining limits
 
 - **Vector search reads each visited vector from redb** (about 0.4 µs per

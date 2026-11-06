@@ -26,7 +26,7 @@ use serde_json::Value as Json;
 
 use crate::ReadTx;
 use crate::index::{IndexDef, IndexKey, IndexRange, byte_range, decode_value, encode_value};
-use crate::store::{AdjKey, AdjValue, storage};
+use crate::store::{Adj, AdjKey, storage};
 
 /// The most common values kept per index.
 pub const COMMON_VALUES: usize = 64;
@@ -408,7 +408,7 @@ fn index_stats(
 /// Per edge label: edges, and distinct nodes on this side. Entries are
 /// sorted by node, then label, so each (node, label) pair is one run.
 fn adjacency_stats(
-    table: &impl ReadableTable<AdjKey, AdjValue>,
+    table: &impl ReadableTable<AdjKey, Adj>,
     ns: &str,
 ) -> Result<Vec<(String, u64, u64)>> {
     let mut counts: HashMap<String, (u64, u64)> = HashMap::new();

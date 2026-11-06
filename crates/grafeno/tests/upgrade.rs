@@ -105,13 +105,19 @@ fn verify(db: &Grafeno, version: u64) {
     if version >= 11 {
         assert_eq!(read.constraints(NS).unwrap().len(), 1, "v{version}");
     }
-    // The change log starts empty and fills from the first commit after.
-    assert_eq!(read.changes(NS, 0, 10).unwrap().last, 0, "v{version}");
+    // Before layout 12 the change log starts empty and fills from the first
+    // commit after; a layout 12 file already has the fixture's writes.
+    let last = read.changes(NS, 0, 10).unwrap().last;
+    if version >= 12 {
+        assert!(last > 0, "v{version}");
+    } else {
+        assert_eq!(last, 0, "v{version}");
+    }
 }
 
 #[test]
 fn every_past_layout_upgrades() {
-    for version in 1..=11 {
+    for version in 1..=12 {
         let path = fixture(version);
         {
             let db = Grafeno::open(&path).unwrap_or_else(|e| panic!("v{version}: {e}"));
@@ -124,7 +130,9 @@ fn every_past_layout_upgrades() {
         let db = Grafeno::open(&path).unwrap();
         let read = db.begin_read().unwrap();
         assert_eq!(read.stats(NS).unwrap().nodes, 42, "v{version}");
-        assert_eq!(read.changes(NS, 0, 10).unwrap().last, 1, "v{version}");
+        // One more entry than the fixture wrote (none before layout 12).
+        let logged = if version >= 12 { 121 } else { 1 };
+        assert_eq!(read.changes(NS, 0, 10).unwrap().last, logged, "v{version}");
         assert!(read.check(NS).unwrap().is_ok());
         assert_eq!(read.search_text(NS, "upgrade", 5).unwrap().len(), 1);
         drop((read, db));

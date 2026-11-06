@@ -12,7 +12,7 @@ use crate::stats::NamespaceInfo;
 use crate::store::{
     ADJ_IN, ADJ_OUT, EDGE_LABEL_COUNTS, EDGES, HNSW_LINKS, LABEL_COUNTS, MEMORY, NAMES,
     NODE_LABELS, NODES, NS_COUNTS, POSTINGS, TEXT_LENGTHS, TEXT_STATS, TEXTS, VECTOR_META, VECTORS,
-    check_namespace, decode, encode, storage,
+    VECTORS_Q8, check_namespace, decode, encode, storage,
 };
 
 /// `ns -> NamespaceMeta` (JSON): every namespace, empty ones included.
@@ -233,6 +233,7 @@ impl WriteTx {
         clear!(TEXTS, (ns, 0u128), (end.as_str(), 0u128));
         clear!(TEXT_LENGTHS, (ns, 0u128), (end.as_str(), 0u128));
         clear!(VECTORS, (ns, 0u128), (end.as_str(), 0u128));
+        clear!(VECTORS_Q8, (ns, 0u128), (end.as_str(), 0u128));
         clear!(crate::merge::MERGES, (ns, 0u128), (end.as_str(), 0u128));
         clear!(MEMORY, (ns, 0u128), (end.as_str(), 0u128));
         clear!(

@@ -576,6 +576,14 @@ def main():
           ' ms', log=True, series=['before 12.4', 'after 12.4'],
           note='Rows returned whole share nothing between branches and gain nothing. Data: docs/data/traversal.csv')
 
+    # Compact storage.
+    rows = [r for r in read('compact_storage.csv') if r['unit'] == 'MiB' and r['measure'] != 'whole file']
+    hbars('compact-storage', 'Table sizes before and after compact storage',
+          'MiB; 100 000 nodes, 300 000 edges, 50 000 vectors of 128 dimensions, in a file. E1-disk.',
+          [(r['measure'], [num(r['before']), num(r['after'])], None) for r in rows],
+          ' MiB', series=['before 12.5', 'after 12.5'],
+          note='The int8 copies are new: searches walk them instead of the exact vectors. Data: docs/data/compact_storage.csv')
+
     print('charts written to', OUT)
 
 

@@ -21,7 +21,7 @@ use crate::state::STATE;
 use crate::store::{
     ADJ_IN, ADJ_OUT, EDGE_LABEL_COUNTS, EDGES, HNSW_LINKS, LABEL_COUNTS, MEMORY, META, NAMES,
     NODE_LABELS, NODES, NS_COUNTS, POSTINGS, TEXT_LENGTHS, TEXT_STATS, TEXTS, VECTOR_META, VECTORS,
-    storage,
+    VECTORS_Q8, storage,
 };
 
 /// What a backup copied.
@@ -77,6 +77,7 @@ impl ReadTx {
                 POSTINGS.name(),
                 TEXT_STATS.name(),
                 VECTORS.name(),
+                VECTORS_Q8.name(),
                 HNSW_LINKS.name(),
                 VECTOR_META.name(),
                 NS_COUNTS.name(),
@@ -114,6 +115,7 @@ impl ReadTx {
             entries += copy(from, &tx, POSTINGS)?;
             entries += copy(from, &tx, TEXT_STATS)?;
             entries += copy(from, &tx, VECTORS)?;
+            entries += copy(from, &tx, VECTORS_Q8)?;
             entries += copy(from, &tx, HNSW_LINKS)?;
             entries += copy(from, &tx, VECTOR_META)?;
             entries += copy(from, &tx, NS_COUNTS)?;

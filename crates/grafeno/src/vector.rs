@@ -7,7 +7,11 @@
 //! A node's level is derived from its id (the random bits of a UUID v7), so it
 //! never has to be stored and the entry point can always be recomputed.
 //!
-//! Searches compute distances straight from the stored bytes. Inserts and
+//! Each vector is also kept quantized to one signed byte per dimension
+//! (`VECTORS_Q8`, a quarter of the bytes). Searches walk the graph with the
+//! quantized vectors, computing distances straight from the stored bytes,
+//! then rescore the `ef` best candidates with the exact vectors and keep the
+//! best `limit`; inserts build the graph with the exact ones. Inserts and
 //! removes in one write transaction share a [`Cache`] of decoded vectors and
 //! link lists, updated by every write, so batch inserts do not read the same
 //! entries from redb over and over.
@@ -21,7 +25,9 @@ use redb::{ReadableTable, WriteTransaction};
 use serde::{Deserialize, Serialize};
 
 use crate::Hit;
-use crate::store::{HNSW_LINKS, LinkKey, RecordKey, VECTOR_META, VECTORS, decode, encode, storage};
+use crate::store::{
+    HNSW_LINKS, LinkKey, RecordKey, VECTOR_META, VECTORS, VECTORS_Q8, decode, encode, storage,
+};
 
 /// Links per node on layers above 0.
 const M: usize = 16;
@@ -113,6 +119,45 @@ fn dot_bytes(query: &[f32], bytes: &[u8]) -> f32 {
         .map(|(x, value)| x * f32::from_le_bytes(*value))
         .sum();
     sums.iter().sum::<f32>() + rest
+}
+
+/// A normalized vector quantized: its largest absolute value, then each
+/// value scaled so that one becomes 127, rounded to a signed byte.
+pub(crate) fn quantize(vector: &[f32]) -> Vec<u8> {
+    let scale = vector
+        .iter()
+        .fold(0.0f32, |most, value| most.max(value.abs()));
+    let mut out = Vec::with_capacity(4 + vector.len());
+    out.extend_from_slice(&scale.to_le_bytes());
+    let factor = if scale > 0.0 { 127.0 / scale } else { 0.0 };
+    out.extend(
+        vector
+            .iter()
+            .map(|value| (value * factor).round().clamp(-127.0, 127.0) as i8 as u8),
+    );
+    out
+}
+
+/// [`dot`] of `query` with a quantized vector, from its bytes.
+fn dot_q8(query: &[f32], bytes: &[u8]) -> f32 {
+    let Some((scale, values)) = bytes.split_first_chunk::<4>() else {
+        return 0.0;
+    };
+    let scale = f32::from_le_bytes(*scale) / 127.0;
+    let (query_chunks, query_rest) = query.as_chunks::<8>();
+    let (value_chunks, value_rest) = values.as_chunks::<8>();
+    let mut sums = [0.0f32; 8];
+    for (x, q) in query_chunks.iter().zip(value_chunks) {
+        for lane in 0..8 {
+            sums[lane] += x[lane] * f32::from(q[lane] as i8);
+        }
+    }
+    let rest: f32 = query_rest
+        .iter()
+        .zip(value_rest)
+        .map(|(x, q)| x * f32::from(*q as i8))
+        .sum();
+    (sums.iter().sum::<f32>() + rest) * scale
 }
 
 fn vector_bytes(vector: &[f32]) -> Vec<u8> {
@@ -268,6 +313,8 @@ struct Space<'a, V, L> {
     /// `None` for searches: they visit each vector once, so decoding and
     /// keeping vectors would only cost.
     cache: Option<&'a mut NamespaceCache>,
+    /// `vectors` holds quantized vectors (searches).
+    quantized: bool,
 }
 
 impl<V, L> Space<'_, V, L>
@@ -299,7 +346,13 @@ where
             .vectors
             .get((self.ns, id))
             .map_err(storage)?
-            .map(|guard| 1.0 - dot_bytes(query, guard.value())))
+            .map(|guard| {
+                1.0 - if self.quantized {
+                    dot_q8(query, guard.value())
+                } else {
+                    dot_bytes(query, guard.value())
+                }
+            }))
     }
 
     fn links(&mut self, id: u128, layer: u8) -> Result<Arc<[u128]>> {
@@ -450,6 +503,10 @@ pub(crate) fn insert(
     vectors
         .insert((ns, id), vector_bytes(&query).as_slice())
         .map_err(storage)?;
+    tx.open_table(VECTORS_Q8)
+        .map_err(storage)?
+        .insert((ns, id), quantize(&query).as_slice())
+        .map_err(storage)?;
     let mut links = tx.open_table(HNSW_LINKS).map_err(storage)?;
     let cache = cache.namespace(ns);
     cache.trim(query.len());
@@ -463,6 +520,7 @@ pub(crate) fn insert(
             vectors: &vectors,
             links: &links,
             cache: Some(&mut *cache),
+            quantized: false,
         }
         .descend(&query, entry, level.min(entry_level))?;
 
@@ -473,6 +531,7 @@ pub(crate) fn insert(
                 vectors: &vectors,
                 links: &links,
                 cache: Some(&mut *cache),
+                quantized: false,
             };
             let mut found = space.search_layer(&query, &entries, EF_CONSTRUCTION, layer)?;
             // Links left pointing at this id (from before it lost its vector)
@@ -521,6 +580,10 @@ pub(crate) fn remove(
 ) -> Result<bool> {
     let id = node.as_u128();
     let mut vectors = tx.open_table(VECTORS).map_err(storage)?;
+    tx.open_table(VECTORS_Q8)
+        .map_err(storage)?
+        .remove((ns, id))
+        .map_err(storage)?;
     if vectors.remove((ns, id)).map_err(storage)?.is_none() {
         return Ok(false);
     }
@@ -539,6 +602,7 @@ pub(crate) fn remove(
             vectors: &vectors,
             links: &links,
             cache: Some(&mut *cache),
+            quantized: false,
         };
         // Who to repair: the removed node's neighbors, and the nodes two hops
         // away that link to it (links are not symmetric, and a link left
@@ -687,8 +751,10 @@ fn highest_node(
 
 /// The `limit` nodes most similar to `query`, best first. `ef` is the size of
 /// the candidate list on layer 0: higher is slower and more accurate.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn search(
     vectors: &impl ReadableTable<RecordKey, &'static [u8]>,
+    quantized: &impl ReadableTable<RecordKey, &'static [u8]>,
     links: &impl ReadableTable<LinkKey, &'static [u8]>,
     meta: &impl ReadableTable<&'static str, &'static [u8]>,
     ns: &str,
@@ -710,15 +776,25 @@ pub(crate) fn search(
         )));
     }
     let query = normalize(query)?;
+    // Walk the graph with the quantized vectors…
     let mut space = Space {
         ns,
-        vectors,
+        vectors: quantized,
         links,
         cache: None,
+        quantized: true,
     };
     let entries = space.descend(&query, entry, 0)?;
     let found = space.search_layer(&query, &entries, ef.max(limit), 0)?;
-    Ok(found
+    // …then rescore the candidates with the exact ones.
+    let mut exact = Vec::with_capacity(found.len());
+    for Scored(_, id) in found {
+        if let Some(guard) = vectors.get((ns, id)).map_err(storage)? {
+            exact.push(Scored(1.0 - dot_bytes(&query, guard.value()), id));
+        }
+    }
+    exact.sort();
+    Ok(exact
         .into_iter()
         .take(limit)
         .map(|Scored(distance, id)| Hit {
@@ -846,6 +922,7 @@ pub(crate) fn check(
 /// one pass over every vector. `None` when there are no vectors.
 pub(crate) fn estimate_recall(
     vectors: &impl ReadableTable<RecordKey, &'static [u8]>,
+    quantized: &impl ReadableTable<RecordKey, &'static [u8]>,
     links: &impl ReadableTable<LinkKey, &'static [u8]>,
     meta: &impl ReadableTable<&'static str, &'static [u8]>,
     ns: &str,
@@ -893,7 +970,7 @@ pub(crate) fn estimate_recall(
     let mut total = 0usize;
     for ((query_id, query), heap) in queries.iter().zip(best) {
         let truth: HashSet<u128> = heap.into_iter().map(|Reverse(Scored(_, id))| id).collect();
-        let hits = search(vectors, links, meta, ns, query, 11, ef)?;
+        let hits = search(vectors, quantized, links, meta, ns, query, 11, ef)?;
         found += hits
             .iter()
             .filter(|hit| hit.node.as_u128() != *query_id && truth.contains(&hit.node.as_u128()))
@@ -902,4 +979,33 @@ pub(crate) fn estimate_recall(
         total += truth.len();
     }
     Ok((total > 0).then(|| found as f64 / total as f64))
+}
+
+#[cfg(test)]
+mod quantization_tests {
+    use super::*;
+
+    #[test]
+    fn quantized_dot_products_are_close() {
+        let mut state = 7u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % 2_000) as f32 / 1_000.0 - 1.0
+        };
+        for dimension in [3, 8, 13, 128, 384] {
+            let a = normalize(&(0..dimension).map(|_| next()).collect::<Vec<_>>()).unwrap();
+            let b = normalize(&(0..dimension).map(|_| next()).collect::<Vec<_>>()).unwrap();
+            let q = quantize(&b);
+            assert_eq!(q.len(), 4 + dimension);
+            let error = (dot(&a, &b) - dot_q8(&a, &q)).abs();
+            // A step of 1/127 of the largest value per dimension, averaging out.
+            assert!(error < 0.02, "dimension {dimension}: error {error}");
+        }
+        // The largest value is exact.
+        let q = quantize(&[0.6, -0.8]);
+        assert_eq!(q[4] as i8, 95);
+        assert_eq!(q[5] as i8, -127);
+    }
 }

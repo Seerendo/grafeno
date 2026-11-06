@@ -24,11 +24,11 @@ use crate::stats::{
     namespaces,
 };
 use crate::store::{
-    ADJ_IN, ADJ_OUT, AdjKey, AdjValue, CountKey, EDGE_LABEL_COUNTS, EDGES, HNSW_LINKS,
+    ADJ_IN, ADJ_OUT, Adj, AdjKey, AdjValue, CountKey, EDGE_LABEL_COUNTS, EDGES, HNSW_LINKS,
     LABEL_COUNTS, LabelKey, LinkKey, MEMORY, META, NAMES, NODE_LABELS, NODES, NS_COUNTS, POSTINGS,
-    PostingKey, RecordKey, TEXT_LENGTHS, TEXT_STATS, TEXTS, VECTOR_META, VECTORS, adjacency,
-    adjacency_value, check_label, check_namespace, decode, encode, label_page, nodes_with_label,
-    read_record, scan_page, scan_records, storage,
+    PostingKey, RecordKey, TEXT_LENGTHS, TEXT_STATS, TEXTS, VECTOR_META, VECTORS, VECTORS_Q8,
+    adjacency, adjacency_value, check_label, check_namespace, decode, encode, label_page,
+    nodes_with_label, read_record, scan_page, scan_records, storage,
 };
 use crate::{Hit, text, vector};
 
@@ -52,7 +52,7 @@ use crate::{Hit, text, vector};
 /// 11. Adds `constraints` (on facts and properties), empty.
 /// 12. Adds `changes` (the change log), empty: it starts with the first
 ///     commit after the upgrade.
-pub const SCHEMA_VERSION: u64 = 12;
+pub const SCHEMA_VERSION: u64 = 13;
 
 /// The tables replaced in version 3, by name (their types no longer matter).
 const OLD_ADJ_OUT: TableDefinition<AdjKey, u128> = TableDefinition::new("adj_out");
@@ -199,6 +199,17 @@ impl Grafeno {
 
     fn init(db: Database) -> Result<Self> {
         let tx = db.begin_write().map_err(storage)?;
+        // Layouts 3 to 12 stored adjacency values as fixed tuples: convert
+        // them before the tables are opened with the compact type.
+        let stored = tx
+            .open_table(META)
+            .map_err(storage)?
+            .get(SCHEMA_KEY)
+            .map_err(storage)?
+            .map(|guard| guard.value());
+        if stored.is_some_and(|version| (3..13).contains(&version)) {
+            compact_adjacency(&tx)?;
+        }
         // Tables must exist before a read transaction can open them.
         tx.open_table(NODES).map_err(storage)?;
         tx.open_table(EDGES).map_err(storage)?;
@@ -210,6 +221,7 @@ impl Grafeno {
         tx.open_table(POSTINGS).map_err(storage)?;
         tx.open_table(TEXT_STATS).map_err(storage)?;
         tx.open_table(VECTORS).map_err(storage)?;
+        tx.open_table(VECTORS_Q8).map_err(storage)?;
         tx.open_table(HNSW_LINKS).map_err(storage)?;
         tx.open_table(VECTOR_META).map_err(storage)?;
         tx.open_table(NS_COUNTS).map_err(storage)?;
@@ -266,6 +278,9 @@ impl Grafeno {
         if version < 6 {
             migrate_to_6(&tx)?;
         }
+        if version < 13 {
+            quantize_vectors(&tx)?;
+        }
         tx.open_table(META)
             .map_err(storage)?
             .insert(SCHEMA_KEY, SCHEMA_VERSION)
@@ -320,6 +335,7 @@ impl Grafeno {
             postings: tx.open_table(POSTINGS).map_err(storage)?,
             text_stats: tx.open_table(TEXT_STATS).map_err(storage)?,
             vectors: tx.open_table(VECTORS).map_err(storage)?,
+            vectors_q8: tx.open_table(VECTORS_Q8).map_err(storage)?,
             hnsw_links: tx.open_table(HNSW_LINKS).map_err(storage)?,
             vector_meta: tx.open_table(VECTOR_META).map_err(storage)?,
             ns_counts: tx.open_table(NS_COUNTS).map_err(storage)?,
@@ -383,6 +399,53 @@ impl Grafeno {
 
 /// Version 6: registers every namespace that has data (nodes, edges or
 /// indexes), as created now.
+/// Layout 13: adjacency values in the compact encoding of [`Adj`]. Each
+/// table is renamed, copied entry by entry into a new one under its name,
+/// and dropped.
+fn compact_adjacency(tx: &WriteTransaction) -> Result<()> {
+    type Old = TableDefinition<'static, AdjKey, AdjValue>;
+    for (name, aside) in [
+        ("adjacency_out", "adjacency_out_v12"),
+        ("adjacency_in", "adjacency_in_v12"),
+    ] {
+        let old: Old = TableDefinition::new(name);
+        let renamed: Old = TableDefinition::new(aside);
+        // Already compact (a file marked with an older version by hand).
+        match tx.open_table(old) {
+            Err(redb::TableError::TableTypeMismatch { .. }) => continue,
+            other => drop(other.map_err(storage)?),
+        }
+        tx.rename_table(old, renamed).map_err(storage)?;
+        {
+            let from = tx.open_table(renamed).map_err(storage)?;
+            let mut to = tx
+                .open_table(TableDefinition::<AdjKey, Adj>::new(name))
+                .map_err(storage)?;
+            for item in from.iter().map_err(storage)? {
+                let (key, value) = item.map_err(storage)?;
+                to.insert(key.value(), value.value()).map_err(storage)?;
+            }
+        }
+        tx.delete_table(renamed).map_err(storage)?;
+    }
+    Ok(())
+}
+
+/// Layout 13: a quantized copy of every vector, for searches.
+fn quantize_vectors(tx: &WriteTransaction) -> Result<()> {
+    let vectors = tx.open_table(VECTORS).map_err(storage)?;
+    let mut quantized = tx.open_table(VECTORS_Q8).map_err(storage)?;
+    for item in vectors.iter().map_err(storage)? {
+        let (key, value) = item.map_err(storage)?;
+        let (chunks, _) = value.value().as_chunks::<4>();
+        let vector: Vec<f32> = chunks.iter().map(|c| f32::from_le_bytes(*c)).collect();
+        quantized
+            .insert(key.value(), vector::quantize(&vector).as_slice())
+            .map_err(storage)?;
+    }
+    Ok(())
+}
+
 fn migrate_to_6(tx: &WriteTransaction) -> Result<()> {
     let mut names = std::collections::BTreeSet::new();
     for item in tx
@@ -549,14 +612,15 @@ impl Drop for Grafeno {
 pub struct ReadTx {
     pub(crate) nodes: ReadOnlyTable<RecordKey, &'static [u8]>,
     pub(crate) edges: ReadOnlyTable<RecordKey, &'static [u8]>,
-    pub(crate) out: ReadOnlyTable<AdjKey, AdjValue>,
-    pub(crate) inn: ReadOnlyTable<AdjKey, AdjValue>,
+    pub(crate) out: ReadOnlyTable<AdjKey, Adj>,
+    pub(crate) inn: ReadOnlyTable<AdjKey, Adj>,
     pub(crate) labels: ReadOnlyTable<LabelKey, ()>,
     pub(crate) texts: ReadOnlyTable<RecordKey, &'static str>,
     pub(crate) text_lengths: ReadOnlyTable<RecordKey, u32>,
     pub(crate) postings: ReadOnlyTable<PostingKey, (u32, u32)>,
     pub(crate) text_stats: ReadOnlyTable<&'static str, (u64, u64)>,
     pub(crate) vectors: ReadOnlyTable<RecordKey, &'static [u8]>,
+    pub(crate) vectors_q8: ReadOnlyTable<RecordKey, &'static [u8]>,
     pub(crate) hnsw_links: ReadOnlyTable<LinkKey, &'static [u8]>,
     pub(crate) vector_meta: ReadOnlyTable<&'static str, &'static [u8]>,
     pub(crate) ns_counts: ReadOnlyTable<&'static str, (u64, u64)>,
@@ -705,6 +769,7 @@ impl ReadTx {
     ) -> Result<Vec<Hit>> {
         vector::search(
             &self.vectors,
+            &self.vectors_q8,
             &self.hnsw_links,
             &self.vector_meta,
             ns,

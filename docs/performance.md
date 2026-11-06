@@ -30,6 +30,7 @@ test environments").
 | Reads with 16 readers and a busy writer | 8 000 queries/s, p99 under 9 ms |
 | Grouping 200 000 rows | 233 ms (609 ms before 12.3); 2 million matches counted within the limits |
 | Two hops from 10 000 starts, 2 million matches | 2.7 s (5.6 s before 12.4), 72% fewer reads |
+| Vector search with int8 copies | same recall (0.996) and speed in memory, a quarter of the vector bytes walked |
 
 ## Test environments
 
@@ -228,6 +229,18 @@ A pattern grows from many starts at once, one step at a time, and every
 node, edge list and record it reads is read once for all the branches that
 reach it; large frontiers spread over the cores. Two hops from every
 company go from 9.5 s to 2.9 s. The rows are the same, in the same order.
+
+## Compact storage
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/charts/compact-storage-dark.svg">
+  <img alt="Adjacency tables 26.3 MiB to 21.3 MiB each; int8 vector copies of 7.8 MiB next to 26.2 MiB of exact vectors" src="assets/charts/compact-storage-light.svg">
+</picture>
+
+Adjacency entries are stored compactly (19% smaller), and every vector also
+as int8: searches walk the graph with the quarter-size copies and rescore
+the best candidates with the exact vectors, at the same recall (0.996 at
+`ef` 64). With everything in memory the speed is the same.
 
 ## Moving graphs in and out
 
