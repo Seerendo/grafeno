@@ -496,11 +496,29 @@ proptest! {
     #[test]
     fn engine_matches_the_model(ops in prop::collection::vec(op(), 1..80)) {
         let db = Grafeno::in_memory().unwrap();
+        db.enable_replication_log().unwrap();
         let mut model = Model::default();
         for op in &ops {
             apply(&db, &mut model, op);
         }
         verify(&db, &model);
+
+        // Its replication log applied to an empty database: same state
+        // (phase 13.1), aborted transactions included (they log nothing).
+        let entries = db.begin_read().unwrap().log_entries(0, usize::MAX).unwrap();
+        let replica = Grafeno::in_memory().unwrap();
+        replica.apply_entries(&entries).unwrap();
+        verify(&replica, &model);
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        db.begin_read().unwrap().export(&[], &mut a).unwrap();
+        replica.begin_read().unwrap().export(&[], &mut b).unwrap();
+        let body = |dump: &[u8]| String::from_utf8_lossy(dump).lines().skip(1).collect::<Vec<_>>().join("
+");
+        prop_assert_eq!(body(&a), body(&b));
+        prop_assert_eq!(
+            db.begin_read().unwrap().changes(NS, 0, usize::MAX).unwrap(),
+            replica.begin_read().unwrap().changes(NS, 0, usize::MAX).unwrap()
+        );
 
         // Export and import into a new database: same state.
         let mut dump = Vec::new();

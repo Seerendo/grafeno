@@ -83,6 +83,11 @@ impl WriteTx {
     }
 
     pub fn put_state(&mut self, ns: &str, kind: &str, key: &str, value: &[u8]) -> Result<()> {
+        self.note(crate::replication::Touch::State(
+            ns.to_owned(),
+            kind.to_owned(),
+            key.to_owned(),
+        ));
         crate::namespace::ensure(&self.tx, ns)?;
         self.tx
             .open_table(STATE)
@@ -94,6 +99,11 @@ impl WriteTx {
 
     /// Removes an entry; whether it was there.
     pub fn delete_state(&mut self, ns: &str, kind: &str, key: &str) -> Result<bool> {
+        self.note(crate::replication::Touch::State(
+            ns.to_owned(),
+            kind.to_owned(),
+            key.to_owned(),
+        ));
         Ok(self
             .tx
             .open_table(STATE)

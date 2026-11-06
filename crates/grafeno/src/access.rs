@@ -132,6 +132,7 @@ impl WriteTx {
     /// Adds a principal. Fails with [`Error::Conflict`] if the name is taken.
     pub fn create_principal(&mut self, principal: &Principal) -> Result<()> {
         check_principal_name(&principal.name)?;
+        self.note(crate::replication::Touch::Principal(principal.name.clone()));
         let mut table = self.tx.open_table(PRINCIPALS).map_err(storage)?;
         if table
             .get(principal.name.as_str())
@@ -152,6 +153,7 @@ impl WriteTx {
     /// Removes a principal; its secret stops working. Returns whether it
     /// existed. What it recorded keeps its name.
     pub fn delete_principal(&mut self, name: &str) -> Result<bool> {
+        self.note(crate::replication::Touch::Principal(name.to_owned()));
         let mut table = self.tx.open_table(PRINCIPALS).map_err(storage)?;
         Ok(table.remove(name).map_err(storage)?.is_some())
     }

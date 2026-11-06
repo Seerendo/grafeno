@@ -81,6 +81,7 @@ short-lived agents.
 | `vectors_q8`   | `(ns, node_id)`               | the same as int8 (layout 13), for searches |
 | `hnsw_links`   | `(ns, node_id, layer)`        | neighbor ids               |
 | `vector_meta`  | `ns`                          | dimension, count, entry    |
+| `replication_log` | `index`                    | a committed write transaction as its effects (layout 14) |
 | `meta`         | key, such as `schema_version` | `u64`                      |
 | `namespace_counts` | `ns`                      | `(nodes, edges)`           |
 | `label_counts` | `(ns, label)`                 | nodes with the label       |
@@ -391,7 +392,7 @@ without a current user. They remain possible for embedded use.
     Cypher and tool compatibility, query optimization under concurrency,
     batched execution, batched and parallel traversal, compact storage and
     vector quantization.
-13. **Distributed operation** (planned, in six steps; see below): several
+13. **Distributed operation** (in progress, 13.1 done; six steps; see below): several
     servers holding the same data, kept in sync by a replicated log with
     Raft; a leader elected among them coordinates writes, the others take
     over when it fails, and reads and large queries spread over all of
@@ -1748,7 +1749,7 @@ log in the same order to its own redb file. The alternatives were weighed:
   links, int8 copies, counters) from them, so a member's file is the same
   data, verifiable with `check` and by comparing exports.
 
-**13.1 A replicated log of deterministic write groups.**
+**13.1 A replicated log of deterministic write groups** (done).
 
 - Every write group (what the writer thread commits today) is turned, on the
   leader, into a log entry of resolved effects: final ids and timestamps,
@@ -1768,6 +1769,61 @@ log in the same order to its own redb file. The alternatives were weighed:
   kind of write, including writes that fail halfway (nothing in the log)
   and group commits that mix failing and succeeding writes; property tests
   against the 4.x model.
+
+As built (`crates/grafeno/src/replication.rs`, layout version 14):
+
+- Capture: a write transaction notes the key of every primary record it
+  writes (`WriteTx::note`, called where records are written: `put_node`,
+  `remove_node_record`, `put_edge`, `delete_edge`, texts, embeddings,
+  memory states, index and constraint definitions, principals, namespaces,
+  match rules, state entries, merge records); dropping a namespace,
+  rebuilding its indexes and compacting its vectors are noted as that work
+  (`WriteTx::bulk`) and not record by record. At commit, before the change
+  log is written, each noted key's final value is read and the
+  `replication::Entry` (format, layout, the commit clock, the operations in
+  the order first touched, plus the namespaces registered on the way and
+  the change log entries of the commit) is appended to `replication_log`
+  at the next index, in the same redb transaction. Aborted transactions and
+  writes of a failed group commit leave nothing: the group is retried in a
+  new transaction.
+- Apply (`WriteTx::apply_entry`, `Grafeno::apply_entries`): an entry at
+  index `applied + 1` is performed record by record with the derivations of
+  the normal write path (`put_node` and `put_edge` keep labels, names,
+  property indexes, adjacency and counters; text and embedding writes keep
+  postings, the HNSW graph and the int8 copies; index definitions are
+  created and filled), while rules that decide (constraints, property
+  history) do not run (`applying`), and the change log receives the
+  leader's entries with the leader's clock, so sequence numbers and times
+  are the same on every member. The entry is kept in the member's own log
+  and `replication_applied` advances in the same transaction: an entry
+  already applied is skipped, one with a gap before it is refused, and a
+  crash cannot leave one half applied.
+- The log is off until `Grafeno::enable_replication_log` (kept in `meta`):
+  a single server writes nothing more. `ReadTx::log_position` and
+  `log_entries`, `WriteTx::truncate_log` (after a snapshot); a snapshot is a
+  backup, which now copies the log and the position, and a member restored
+  from one goes on from the entry after it.
+- Data equality, not byte equality: the HNSW graph of a member is built in
+  the order its entries apply, which can differ from the leader's when a
+  transaction set a vector twice; exports, counters, the change log,
+  constraint events and query results are the same.
+- Tests: `grafeno/tests/replication.rs` (every kind of write over several
+  transactions, replayed: exports, statistics, constraints, match rules,
+  merges, indexes, state, change log and principals equal, `check` clean,
+  traversals and searches answer the same; idempotence and gaps; a member
+  from a backup after the log was truncated; group commits with failing
+  writes; the log off), `grafeno-query/tests/replication.rs` (GQ writes:
+  `MERGE`, `SET`, `DETACH DELETE`, `RETRACT`, `FOREACH`, indexes and an edge
+  constraint invalidating facts), the 4.x model property test now replays
+  each random sequence's log and compares, and `upgrade.rs` with the new
+  `layout-v13` fixture.
+- Measured (`examples/replication_bench.rs`, 100 000 nodes with text and
+  99 999 edges in transactions of 1 000, best of three alternating runs, in
+  memory): writes at 18 384 records a second with the log on against 22 925
+  off (80%); the log takes 568 bytes per record (JSON, with each text and
+  each change log entry); a replica applies it at 22 298 records a second.
+  A binary encoding of entries is left for 13.2, where they cross the
+  network.
 
 **13.2 Raft: leader election and log replication.**
 
@@ -2263,6 +2319,7 @@ spinning disk, on ARM, or for days at a time.
 | Traversals from many starts, batched and parallel (12.4) | two hops from 10 000 people 5.6 → 2.7 s, from every company 9.5 → 2.9 s; reads down 30 to 72% | E1-mem | `traversal.csv` |
 | Compact adjacency and int8 vectors (12.5) | adjacency 19% smaller; searches walk a quarter of the vector bytes at the same recall (0.996) and speed in memory | E1-disk | `compact_storage.csv` |
 | Vector search, 1 M vectors in 512 MiB, int8 copies (12.5) | 3.5 to 4.2 ms (4.9 to 5.2 ms before), same resident memory | E2 | `vector_search_int8.csv` |
+| Replication log (13.1) | writes at 80% of the speed with the log on; 568 bytes per record; a replica applies 22 300 records/s | E1-mem | `replication_log.csv` |
 
 ### Guarantees and the tests that hold them
 
@@ -2274,7 +2331,7 @@ real binary. The ones that carry each guarantee:
 | --- | --- | --- |
 | The engine does what a plain model does | `grafeno/tests/model.rs` | proptest: random sequences of every write, aborted transactions, valid and record times; records, labels, counters, neighbors, text and vector search compared with an in-memory model, also after export → import and after a rebuild (3 000 cases) |
 | Commits survive crashes | `grafeno/tests/durability.rs`, `crash.rs` | a child process killed at random moments during writes, imports, rebuilds, namespace drops and upgrades; every reported commit is there, nothing is half-written, the check passes |
-| Old files open | `grafeno/tests/upgrade.rs` and `fixtures/layout-v1` to `v12` | a database written by the commit of every past layout version, upgraded on open, then written and reopened |
+| Old files open | `grafeno/tests/upgrade.rs` and `fixtures/layout-v1` to `v13` | a database written by the commit of every past layout version, upgraded on open, then written and reopened |
 | Damage is found, not trusted | `grafeno/tests/corruption.rs`, `src/check.rs` tests | files with flipped bytes, zeroed pages or cut short are refused or read back exactly as they were, never a crash or a different answer; damage to each derived index is reported and repaired by a rebuild |
 | Backups are consistent | `grafeno/tests/backup.rs` | a backup taken while writes go on is the snapshot it started from |
 | Readers see whole transactions | `grafeno/tests/concurrency.rs` | readers during commits never see part of one, and snapshots never go back |
@@ -2294,6 +2351,7 @@ real binary. The ones that carry each guarantee:
 | Folded aggregates equal row-at-a-time ones and hold no rows | `grafeno-query/tests/batch.rs` | every aggregate with DISTINCT, nesting, ties, empty groups, overflow and duration sums; 90 000 rows counted under a `max_rows` of 2 000; parallel folds equal to one thread's |
 | Batched and parallel traversal give the same rows in the same order | `grafeno-query/tests/traversal.rs` | eight pattern shapes (both directions from a middle anchor, edge variables and properties, targets filtered by earlier nodes, edge uniqueness, variable length with paths, bound nodes, row filters) against one anchor at a time; a hub's 12 000 two-hop rows on one and four threads; shared nodes read once; `max_rows` across slices |
 | int8 searches keep their quality and compact entries read back exactly | `grafeno/tests/quantized.rs`, `src/store.rs` and `src/vector.rs` tests | recall@10 of 0.95 or more with exact scores; the copies through removal, replacement, compaction, backup and namespace drop; adjacency values round trip at every bound; quantized dot products within 0.02 |
+| A replica that applies the log holds the same data | `grafeno/tests/replication.rs`, `model.rs`, `grafeno-query/tests/replication.rs` | every kind of write replayed onto an empty database and compared (exports, counters, change log, constraints and their events, merges, state, principals); idempotence, gaps, catching up from a backup after truncation, group commits with failures; the model's random sequences replayed |
 | Costly queries stop | `grafeno-query/tests/adversarial.rs` | 32 hostile queries within their limits; nesting just under the limit runs on a 2 MiB stack; `max_cost` refuses; procedure rows count against `max_memory` |
 | Nothing a client sends crashes the parser | `grafeno-query/tests/fuzz.rs` | proptest: random tokens, valid queries with random edits, arbitrary text, through the lexer, parser, planner, `EXPLAIN` and executor |
 | The API keeps its contract | `grafeno-server/tests/http.rs`, `mcp.rs`, `shell.rs`, `clients/typescript/test` | every endpoint and MCP tool, limits, conflicts (409 with details), metrics, the CLI shell, and the client against the real binary |
@@ -2318,6 +2376,7 @@ cargo run --release -p grafeno-query --example planner_bench -- 200000
 cargo run --release -p grafeno-query --example batch_bench -- 200000
 cargo run --release -p grafeno-query --example traversal_bench -- 200000
 cargo run --release -p grafeno --example storage_bench -- 100000 50000
+cargo run --release -p grafeno --example replication_bench -- 100000
 cargo run --release -p grafeno --example changes_bench -- 100000
 cargo run --release -p grafeno-server --example events_bench -- 100000
 cargo test --release -p grafeno-query --test adversarial -- --nocapture

@@ -1,0 +1,6 @@
+measure,value,unit
+writes with the log off (best of 3),22925,records/s
+writes with the log on (best of 3),18384,records/s
+log size,568,bytes per record
+log entries for 100 000 nodes and 99 999 edges,100,entries
+applied by a replica,22298,records/s

@@ -17,6 +17,7 @@ use crate::index::{INDEX_ENTRIES, INDEXES, IndexKey};
 use crate::memory::names_of;
 use crate::merge::MERGES;
 use crate::namespace::{NAMESPACES, NamespaceMeta};
+use crate::replication::Touch;
 use crate::resolve::MATCH_RULES;
 use crate::state::STATE;
 use crate::stats::{
@@ -52,7 +53,7 @@ use crate::{Hit, text, vector};
 /// 11. Adds `constraints` (on facts and properties), empty.
 /// 12. Adds `changes` (the change log), empty: it starts with the first
 ///     commit after the upgrade.
-pub const SCHEMA_VERSION: u64 = 13;
+pub const SCHEMA_VERSION: u64 = 14;
 
 /// The tables replaced in version 3, by name (their types no longer matter).
 const OLD_ADJ_OUT: TableDefinition<AdjKey, u128> = TableDefinition::new("adj_out");
@@ -238,6 +239,8 @@ impl Grafeno {
         tx.open_table(STATE).map_err(storage)?;
         tx.open_table(CONSTRAINTS).map_err(storage)?;
         tx.open_table(CHANGES).map_err(storage)?;
+        tx.open_table(crate::replication::REPLICATION_LOG)
+            .map_err(storage)?;
 
         let stored = tx
             .open_table(META)
@@ -285,12 +288,20 @@ impl Grafeno {
             .map_err(storage)?
             .insert(SCHEMA_KEY, SCHEMA_VERSION)
             .map_err(storage)?;
+        let replication = tx
+            .open_table(META)
+            .map_err(storage)?
+            .get(crate::replication::ENABLED)
+            .map_err(storage)?
+            .is_some_and(|guard| guard.value() == 1);
         tx.commit().map_err(storage)?;
+        let shared: Arc<Shared> = Arc::default();
+        shared.replication.store(replication, Ordering::Relaxed);
         Ok(Self {
             db,
             eventual: AtomicBool::new(false),
             unflushed: AtomicBool::new(false),
-            shared: Arc::default(),
+            shared,
             vector_cache: crate::vector::DEFAULT_VECTOR_CACHE,
         })
     }
@@ -377,7 +388,43 @@ impl Grafeno {
             constraint_log: Vec::new(),
             log_changes: self.shared.changes.retention().enabled,
             pending_changes: crate::changes::Pending::default(),
+            capture: self
+                .shared
+                .replication
+                .load(Ordering::Relaxed)
+                .then(crate::replication::Capture::default),
+            applying: false,
+            commit_at: None,
         })
+    }
+
+    /// Turns the replication log on, for good: from the next commit, every
+    /// write transaction is appended to it (see [`ReadTx::log_entries`]).
+    /// Members that will apply it start from a backup taken after this.
+    pub fn enable_replication_log(&self) -> Result<()> {
+        let tx = self.db.begin_write().map_err(storage)?;
+        tx.open_table(META)
+            .map_err(storage)?
+            .insert(crate::replication::ENABLED, 1)
+            .map_err(storage)?;
+        self.shared.committing(|| tx.commit().map_err(storage))?;
+        self.shared.replication.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Applies log entries of another database in order, each in its own
+    /// transaction; returns how many were applied (those already applied
+    /// are skipped).
+    pub fn apply_entries(&self, entries: &[(u64, crate::replication::Entry)]) -> Result<usize> {
+        let mut applied = 0;
+        for (index, entry) in entries {
+            let applied_now = self.write(|tx| tx.apply_entry(*index, entry))?;
+            if applied_now {
+                applied += 1;
+            }
+        }
+        self.shared.replication.store(true, Ordering::Relaxed);
+        Ok(applied)
     }
 
     /// Runs `f` in a write transaction: commits if it returns `Ok`, discards
@@ -818,6 +865,13 @@ pub struct WriteTx {
     pub(crate) log_changes: bool,
     /// What this transaction changed, for the log.
     pub(crate) pending_changes: crate::changes::Pending,
+    /// The primary records it touched, for the replication log (when on).
+    pub(crate) capture: Option<crate::replication::Capture>,
+    /// Applying a replication log entry: write what it says, derive the
+    /// rest, decide nothing again.
+    pub(crate) applying: bool,
+    /// The commit's clock, when it is not now (an applied entry's).
+    pub(crate) commit_at: Option<Timestamp>,
 }
 
 impl WriteTx {
@@ -874,6 +928,9 @@ impl WriteTx {
     }
 
     pub fn commit(mut self) -> Result<()> {
+        if let Some(at) = self.log_entry()? {
+            self.commit_at = Some(at);
+        }
         let touched = self.write_changes()?;
         let Self { tx, shared, .. } = self;
         shared.committing(|| tx.commit().map_err(storage))?;
@@ -992,6 +1049,8 @@ impl WriteTx {
         text: Option<&str>,
         embedding: Option<&[f32]>,
     ) -> Result<()> {
+        self.note(Touch::Text(ns.to_owned(), id.as_u128()));
+        self.note(Touch::Vector(ns.to_owned(), id.as_u128()));
         let changed_text = match text {
             Some(text) => {
                 text::index(&self.tx, ns, id, text)?;
@@ -1059,6 +1118,7 @@ impl WriteTx {
     /// Indexes `text` for full-text search, replacing the previous text.
     pub fn set_text(&mut self, ns: &str, id: NodeId, text: &str) -> Result<()> {
         self.node_to_change(ns, id)?;
+        self.note(Touch::Text(ns.to_owned(), id.as_u128()));
         text::index(&self.tx, ns, id, text)?;
         self.log_node_part(ns, id, Part::Text)
     }
@@ -1068,6 +1128,7 @@ impl WriteTx {
     pub fn set_texts(&mut self, ns: &str, texts: &[(NodeId, String)]) -> Result<()> {
         for (node, _) in texts {
             self.node_to_change(ns, *node)?;
+            self.note(Touch::Text(ns.to_owned(), node.as_u128()));
         }
         text::index_many(&self.tx, ns, texts)?;
         for (node, _) in texts {
@@ -1081,6 +1142,7 @@ impl WriteTx {
         if let Some(node) = self.node(ns, id)? {
             self.guard_node(&node)?;
         }
+        self.note(Touch::Text(ns.to_owned(), id.as_u128()));
         let removed = text::remove(&self.tx, ns, id)?;
         if removed {
             self.log_node_part(ns, id, Part::Text)?;
@@ -1092,6 +1154,7 @@ impl WriteTx {
     /// embeddings of a namespace must have the same dimension.
     pub fn set_embedding(&mut self, ns: &str, id: NodeId, embedding: &[f32]) -> Result<()> {
         self.node_to_change(ns, id)?;
+        self.note(Touch::Vector(ns.to_owned(), id.as_u128()));
         vector::insert(&self.tx, &mut self.vectors, ns, id, embedding)?;
         self.log_node_part(ns, id, Part::Embedding)
     }
@@ -1101,6 +1164,7 @@ impl WriteTx {
         if let Some(node) = self.node(ns, id)? {
             self.guard_node(&node)?;
         }
+        self.note(Touch::Vector(ns.to_owned(), id.as_u128()));
         let removed = vector::remove(&self.tx, &mut self.vectors, ns, id)?;
         if removed {
             self.log_node_part(ns, id, Part::Embedding)?;
@@ -1127,21 +1191,33 @@ impl WriteTx {
         for edge in edges {
             self.delete_edge(ns, edge)?;
         }
+        for touch in [Touch::Text, Touch::Vector, Touch::Memory] {
+            self.note(touch(ns.to_owned(), id.as_u128()));
+        }
         text::remove(&self.tx, ns, id)?;
         vector::remove(&self.tx, &mut self.vectors, ns, id)?;
-        self.index_node(ns, None, Some(&node))?;
-        let mut names = self.tx.open_table(NAMES).map_err(storage)?;
-        for name in names_of(&node) {
-            names
-                .remove((ns, name.as_str(), id.as_u128()))
-                .map_err(storage)?;
-        }
-        drop(names);
         self.tx
             .open_table(MEMORY)
             .map_err(storage)?
             .remove((ns, id.as_u128()))
             .map_err(storage)?;
+        self.remove_node_record(ns, &node)
+    }
+
+    /// Removes a node record and what derives from it (property index,
+    /// names, labels, counters), leaving its edges, text, embedding and
+    /// memory to the caller.
+    pub(crate) fn remove_node_record(&mut self, ns: &str, node: &Node) -> Result<()> {
+        let id = node.id;
+        self.note(Touch::Node(ns.to_owned(), id.as_u128()));
+        self.index_node(ns, None, Some(node))?;
+        let mut names = self.tx.open_table(NAMES).map_err(storage)?;
+        for name in names_of(node) {
+            names
+                .remove((ns, name.as_str(), id.as_u128()))
+                .map_err(storage)?;
+        }
+        drop(names);
         let mut labels = self.tx.open_table(NODE_LABELS).map_err(storage)?;
         for label in &node.labels {
             labels
@@ -1155,7 +1231,7 @@ impl WriteTx {
         let mut nodes = self.tx.open_table(NODES).map_err(storage)?;
         nodes.remove((ns, id.as_u128())).map_err(storage)?;
         drop(nodes);
-        self.log_node(ns, &node, ChangeOp::Deleted, None);
+        self.log_node(ns, node, ChangeOp::Deleted, None);
         bump_namespace(&self.tx, ns, -1, 0)
     }
 
@@ -1249,6 +1325,7 @@ impl WriteTx {
     /// Deletes the edge without keeping history.
     pub fn delete_edge(&mut self, ns: &str, id: EdgeId) -> Result<()> {
         let edge = self.edge_to_change(ns, id)?;
+        self.note(Touch::Edge(ns.to_owned(), id.as_u128()));
         let (from, to, edge_id) = (edge.from.as_u128(), edge.to.as_u128(), id.as_u128());
         let label = edge.label.as_str();
         self.tx
@@ -1281,6 +1358,7 @@ impl WriteTx {
     ) -> Result<()> {
         let bytes = encode(node)?;
         let id = node.id.as_u128();
+        self.note(Touch::Node(ns.to_owned(), id));
         self.tx
             .open_table(NODES)
             .map_err(storage)?
@@ -1288,7 +1366,9 @@ impl WriteTx {
             .map_err(storage)?;
 
         self.index_node(ns, Some(node), previous)?;
-        self.record_history(ns, node, previous)?;
+        if !self.applying {
+            self.record_history(ns, node, previous)?;
+        }
         let op = if previous.is_some() {
             ChangeOp::Updated
         } else {
@@ -1335,6 +1415,7 @@ impl WriteTx {
 
     /// Writes the edge record and its adjacency entries (no counters).
     pub(crate) fn put_edge(&mut self, ns: &str, edge: &Edge) -> Result<()> {
+        self.note(Touch::Edge(ns.to_owned(), edge.id.as_u128()));
         let bytes = encode(edge)?;
         let (from, to, id) = (edge.from.as_u128(), edge.to.as_u128(), edge.id.as_u128());
         let label = edge.label.as_str();

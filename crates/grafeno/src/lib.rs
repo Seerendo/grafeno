@@ -35,6 +35,7 @@ mod memory;
 mod merge;
 mod namespace;
 mod planstats;
+mod replication;
 mod resolve;
 mod state;
 mod stats;
@@ -65,6 +66,7 @@ pub use merge::{
 };
 pub use namespace::{DropStats, MAX_NAMESPACE_LENGTH, check_new_namespace};
 pub use planstats::{BUCKETS, COMMON_VALUES, EdgeLabelStats, IndexStats, PlannerStats};
+pub use replication::{Bulk, ENTRY_FORMAT, Entry, LogPosition, Op};
 pub use resolve::{Decision, FieldRule, FieldScore, Match, MatchRule, Probe, SCAN_LIMIT, score};
 pub use stats::{NamespaceInfo, NamespaceStats};
 pub use text::tokenize;

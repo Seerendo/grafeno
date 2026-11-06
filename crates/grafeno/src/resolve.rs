@@ -466,6 +466,10 @@ impl WriteTx {
     /// Declares (or replaces) the match rule of a label.
     pub fn set_match_rule(&mut self, ns: &str, rule: &MatchRule) -> Result<()> {
         rule.check()?;
+        self.note(crate::replication::Touch::MatchRule(
+            ns.to_owned(),
+            rule.label.clone(),
+        ));
         crate::namespace::ensure(&self.tx, ns)?;
         self.tx
             .open_table(MATCH_RULES)
@@ -477,6 +481,10 @@ impl WriteTx {
 
     /// Removes the match rule of a label; whether there was one.
     pub fn delete_match_rule(&mut self, ns: &str, label: &str) -> Result<bool> {
+        self.note(crate::replication::Touch::MatchRule(
+            ns.to_owned(),
+            label.to_owned(),
+        ));
         Ok(self
             .tx
             .open_table(MATCH_RULES)

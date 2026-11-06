@@ -646,6 +646,23 @@ this benchmark used clusters so spread that recall was 0.31 to 0.33 in
 both versions: the data, not the index; the numbers above use clusters
 like `hnsw_recall`'s.
 
+## The replication log (`crates/grafeno/examples/replication_bench.rs`)
+
+100 000 nodes with a 10-word text and 99 999 edges, in transactions of
+1 000 nodes, in memory, release build, 2026-11-06; three runs of each,
+alternating, with the log off and on.
+
+| | |
+| --- | --- |
+| writes, log off (best) | 22 925 records/s |
+| writes, log on (best) | 18 384 records/s (80%) |
+| log size | 100 entries, 108 MiB, 568 bytes per record |
+| applied by an empty replica | 22 298 records/s |
+
+Each entry holds the final value of every record its transaction wrote,
+texts included, and the change log entries of the commit, as JSON; a
+binary encoding comes with 13.2, when entries go over the network.
+
 ## Remaining limits
 
 - **Vector search reads each visited vector from redb** (about 0.4 µs per

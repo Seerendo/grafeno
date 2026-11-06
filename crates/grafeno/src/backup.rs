@@ -94,6 +94,7 @@ impl ReadTx {
                 STATE.name(),
                 CONSTRAINTS.name(),
                 CHANGES.name(),
+                crate::replication::REPLICATION_LOG.name(),
             ];
             for table in from.list_tables().map_err(storage)? {
                 if !known.contains(&table.name()) {
@@ -132,6 +133,7 @@ impl ReadTx {
             entries += copy(from, &tx, STATE)?;
             entries += copy(from, &tx, CONSTRAINTS)?;
             entries += copy(from, &tx, CHANGES)?;
+            entries += copy(from, &tx, crate::replication::REPLICATION_LOG)?;
             tx.commit().map_err(storage)?;
             drop(db);
             Ok(entries)

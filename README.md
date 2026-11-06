@@ -172,8 +172,12 @@ measured speed, memory and limits, with charts, in
   compactly (19% smaller) and every vector also as int8; searches walk the
   int8 copies and rescore exactly, at the same recall (1 M vectors in 512
   MiB: about 5 ms to 3.5 to 4.2 ms a search).
+- **Phase 13.1, replication log:** with the log on, every committed write
+  transaction is kept as the effects it had (records' final values, the
+  change log entries); another database applies the entries in order and
+  holds the same data, catching up from a backup and the entries after it.
 
-Next, phase 13: distributed operation (servers kept in sync by a
+Next, the rest of phase 13: distributed operation (servers kept in sync by a
 replicated log with Raft, failover, reads and large queries spread over
 the servers); phase 14: users, roles and permissions (sign-in, roles you
 define, `GRANT` and `REVOKE`, rights down to labels, properties and

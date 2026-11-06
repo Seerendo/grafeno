@@ -506,6 +506,10 @@ impl WriteTx {
     /// it is; another index with the same name or on the same label and
     /// property is an error, as are duplicate values in a unique index.
     pub fn create_index(&mut self, ns: &str, def: IndexDef) -> Result<u64> {
+        self.note(crate::replication::Touch::Index(
+            ns.to_owned(),
+            def.name.clone(),
+        ));
         check_label(&def.label)?;
         crate::namespace::ensure(&self.tx, ns)?;
         if def.key.is_empty() || def.name.is_empty() {
@@ -593,6 +597,10 @@ impl WriteTx {
 
     /// Removes an index and its entries. Returns whether it existed.
     pub fn drop_index(&mut self, ns: &str, name: &str) -> Result<bool> {
+        self.note(crate::replication::Touch::Index(
+            ns.to_owned(),
+            name.to_owned(),
+        ));
         let existed = self
             .tx
             .open_table(INDEXES)

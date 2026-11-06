@@ -137,6 +137,7 @@ impl WriteTx {
     /// exists.
     pub fn create_namespace(&mut self, ns: &str, description: Option<&str>) -> Result<()> {
         check_new_namespace(ns)?;
+        self.note(crate::replication::Touch::Namespace(ns.to_owned()));
         let mut table = self.tx.open_table(NAMESPACES).map_err(storage)?;
         if table.get(ns).map_err(storage)?.is_some() {
             return Err(Error::Conflict(format!("namespace {ns:?} already exists")));
@@ -163,6 +164,7 @@ impl WriteTx {
         description: Option<String>,
     ) -> Result<()> {
         check_namespace(ns)?;
+        self.note(crate::replication::Touch::Namespace(ns.to_owned()));
         let mut table = self.tx.open_table(NAMESPACES).map_err(storage)?;
         let created_at = read_meta(&table, ns)?.map_or(created_at, |meta| meta.created_at);
         let meta = NamespaceMeta {
@@ -177,6 +179,7 @@ impl WriteTx {
 
     /// Sets (or, with `None`, removes) the description of a namespace.
     pub fn describe_namespace(&mut self, ns: &str, description: Option<&str>) -> Result<()> {
+        self.note(crate::replication::Touch::Namespace(ns.to_owned()));
         let mut table = self.tx.open_table(NAMESPACES).map_err(storage)?;
         let mut meta =
             read_meta(&table, ns)?.ok_or_else(|| Error::NamespaceNotFound(ns.to_owned()))?;
@@ -215,6 +218,13 @@ impl WriteTx {
     /// vectors, indexes and counters. It cannot be undone (an export first
     /// keeps a copy).
     pub fn drop_namespace(&mut self, ns: &str) -> Result<DropStats> {
+        self.bulk(
+            crate::replication::Bulk::DropNamespace { ns: ns.to_owned() },
+            |tx| tx.drop_namespace_inner(ns),
+        )
+    }
+
+    fn drop_namespace_inner(&mut self, ns: &str) -> Result<DropStats> {
         let info = self
             .namespace(ns)?
             .ok_or_else(|| Error::NamespaceNotFound(ns.to_owned()))?;

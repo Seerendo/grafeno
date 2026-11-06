@@ -493,6 +493,8 @@ pub(crate) struct Shared {
     pub(crate) changes: crate::changes::Hub,
     /// The planner's statistics per namespace.
     pub(crate) planner: crate::planstats::Cache,
+    /// Whether commits append to the replication log.
+    pub(crate) replication: std::sync::atomic::AtomicBool,
 }
 
 impl Default for Shared {
@@ -503,6 +505,7 @@ impl Default for Shared {
             projection_budget: std::sync::atomic::AtomicUsize::new(DEFAULT_PROJECTION_CACHE),
             changes: crate::changes::Hub::default(),
             planner: crate::planstats::Cache::default(),
+            replication: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }

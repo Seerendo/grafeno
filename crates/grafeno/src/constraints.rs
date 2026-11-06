@@ -239,6 +239,10 @@ impl WriteTx {
                 constraint.name()
             )));
         }
+        self.note(crate::replication::Touch::Constraint(
+            ns.to_owned(),
+            constraint.name().to_owned(),
+        ));
         self.tx
             .open_table(CONSTRAINTS)
             .map_err(storage)?
@@ -274,6 +278,10 @@ impl WriteTx {
     /// Removes a constraint; whether it existed.
     pub fn drop_constraint(&mut self, ns: &str, name: &str) -> Result<bool> {
         self.constraint_cache = None;
+        self.note(crate::replication::Touch::Constraint(
+            ns.to_owned(),
+            name.to_owned(),
+        ));
         Ok(self
             .tx
             .open_table(CONSTRAINTS)

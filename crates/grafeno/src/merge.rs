@@ -570,6 +570,10 @@ impl WriteTx {
     }
 
     fn put_merge(&mut self, ns: &str, record: &MergeRecord) -> Result<()> {
+        self.note(crate::replication::Touch::Merge(
+            ns.to_owned(),
+            record.id.as_u128(),
+        ));
         let bytes = encode(record)?;
         self.tx
             .open_table(MERGES)

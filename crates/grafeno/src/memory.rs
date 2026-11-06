@@ -156,6 +156,10 @@ impl WriteTx {
     }
 
     pub(crate) fn put_memory(&mut self, ns: &str, id: NodeId, state: MemoryState) -> Result<()> {
+        self.note(crate::replication::Touch::Memory(
+            ns.to_owned(),
+            id.as_u128(),
+        ));
         self.tx
             .open_table(MEMORY)
             .map_err(storage)?

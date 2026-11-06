@@ -466,6 +466,13 @@ impl WriteTx {
     /// dropped. The vector graph is built anew, which also removes dangling
     /// links.
     pub fn rebuild_indexes(&mut self, ns: &str) -> Result<RebuildReport> {
+        self.bulk(
+            crate::replication::Bulk::RebuildIndexes { ns: ns.to_owned() },
+            |tx| tx.rebuild_indexes_inner(ns),
+        )
+    }
+
+    fn rebuild_indexes_inner(&mut self, ns: &str) -> Result<RebuildReport> {
         let tx = &self.tx;
         // Node and edge records stay where they are and are read back a page
         // at a time below; only the node ids are kept meanwhile.
@@ -802,6 +809,13 @@ impl WriteTx {
     /// reachable. Searches see the old graph until the commit. Takes about
     /// as long as inserting every vector.
     pub fn compact_vectors(&mut self, ns: &str) -> Result<CompactReport> {
+        self.bulk(
+            crate::replication::Bulk::CompactVectors { ns: ns.to_owned() },
+            |tx| tx.compact_vectors_inner(ns),
+        )
+    }
+
+    fn compact_vectors_inner(&mut self, ns: &str) -> Result<CompactReport> {
         let (dangling_before, unreachable_before) = {
             let vectors = self.tx.open_table(VECTORS).map_err(storage)?;
             let links = self.tx.open_table(HNSW_LINKS).map_err(storage)?;

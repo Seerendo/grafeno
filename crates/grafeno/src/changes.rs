@@ -156,6 +156,20 @@ pub(crate) struct Pending {
 }
 
 impl Pending {
+    /// The entries so far, in order (for the replication log).
+    pub(crate) fn entries(&self) -> &[(String, Change)] {
+        &self.entries
+    }
+
+    /// Pending entries copied from another database's commit (an applied
+    /// replication log entry), in place of those derived here.
+    pub(crate) fn from_entries(entries: Vec<(String, Change)>) -> Self {
+        Self {
+            entries,
+            index: HashMap::new(),
+        }
+    }
+
     /// The entry of this record in this namespace, if any.
     fn find(&self, ns: &str, id: u128, is_edge: bool) -> Option<usize> {
         self.index
@@ -283,7 +297,7 @@ impl WriteTx {
             return Ok(Vec::new());
         }
         let retention = self.shared.changes.retention();
-        let now = Timestamp::now();
+        let now = self.commit_at.unwrap_or_else(Timestamp::now);
         let mut table = self.tx.open_table(CHANGES).map_err(storage)?;
         let mut last: HashMap<String, u64> = HashMap::new();
         for (ns, mut change) in pending.entries {
