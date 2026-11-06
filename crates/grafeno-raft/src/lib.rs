@@ -300,6 +300,8 @@ pub struct Raft {
     persist_from: Option<Index>,
     hard_dirty: bool,
     installed: Option<SnapshotMeta>,
+    /// Elections this member started (pre-votes aside).
+    elections: u64,
     /// ReadIndex: the last read round sent, the reads waiting for a round a
     /// majority answered `(context, round, index)`, the highest round each
     /// member answered in this term, and the settled reads.
@@ -357,6 +359,7 @@ impl Raft {
             persist_from: None,
             hard_dirty: false,
             installed: None,
+            elections: 0,
             read_round: 0,
             pending_reads: Vec::new(),
             read_acks: BTreeMap::new(),
@@ -404,6 +407,24 @@ impl Raft {
 
     pub fn snapshot_meta(&self) -> &SnapshotMeta {
         &self.snapshot
+    }
+
+    /// Elections this member started since it began (pre-votes aside).
+    pub fn elections(&self) -> u64 {
+        self.elections
+    }
+
+    /// On the leader, the last index each other member is known to hold;
+    /// empty elsewhere.
+    pub fn progress(&self) -> Vec<(NodeId, Index)> {
+        if self.role != Role::Leader {
+            return Vec::new();
+        }
+        self.progress
+            .iter()
+            .filter(|(id, _)| **id != self.id)
+            .map(|(id, progress)| (*id, progress.matched))
+            .collect()
     }
 
     fn last_term(&self) -> Term {
@@ -579,6 +600,7 @@ impl Raft {
     }
 
     fn start_election(&mut self) {
+        self.elections += 1;
         let term = self.term + 1;
         self.set_hard(term, Some(self.id));
         self.role = Role::Candidate;

@@ -216,6 +216,105 @@ impl ServerMetrics {
     }
 }
 
+/// A cluster series: its name, help, and value in a status.
+type Series = (
+    &'static str,
+    &'static str,
+    fn(&grafeno_cluster::Status) -> u64,
+);
+
+/// The cluster's part of `/metrics`: one series per Raft group this
+/// member holds (label `group`), and per other member on a leader.
+pub fn render_cluster(statuses: &[(u64, grafeno_cluster::Status)]) -> String {
+    let mut out = String::new();
+    if statuses.is_empty() {
+        return out;
+    }
+    let gauges: [Series; 7] = [
+        (
+            "grafeno_cluster_leader",
+            "1 on the group's leader, 0 elsewhere",
+            |s| u64::from(s.role == "leader"),
+        ),
+        ("grafeno_cluster_term", "The current Raft term", |s| s.term),
+        (
+            "grafeno_cluster_commit_index",
+            "The last entry a majority holds",
+            |s| s.commit,
+        ),
+        (
+            "grafeno_cluster_applied_index",
+            "The last entry applied to the database",
+            |s| s.applied,
+        ),
+        (
+            "grafeno_cluster_last_index",
+            "The last entry in this member's log",
+            |s| s.last_index,
+        ),
+        (
+            "grafeno_cluster_snapshot_index",
+            "The entry this member's snapshot covers",
+            |s| s.snapshot_index,
+        ),
+        (
+            "grafeno_cluster_entry_format",
+            "The replication entry format the group writes",
+            |s| u64::from(s.format),
+        ),
+    ];
+    for (name, help, value) in gauges {
+        family(&mut out, name, "gauge", help);
+        for (group, status) in statuses {
+            let _ = writeln!(out, "{name}{{group=\"{group}\"}} {}", value(status));
+        }
+    }
+    let counters: [Series; 4] = [
+        (
+            "grafeno_cluster_elections_total",
+            "Elections this member started",
+            |s| s.elections,
+        ),
+        (
+            "grafeno_cluster_leader_changes_total",
+            "Changes of leader this member saw",
+            |s| s.leader_changes,
+        ),
+        (
+            "grafeno_cluster_snapshots_sent_total",
+            "Snapshots sent to other members",
+            |s| s.snapshots_sent,
+        ),
+        (
+            "grafeno_cluster_snapshots_installed_total",
+            "Snapshots installed from a leader",
+            |s| s.snapshots_installed,
+        ),
+    ];
+    for (name, help, value) in counters {
+        family(&mut out, name, "counter", help);
+        for (group, status) in statuses {
+            let _ = writeln!(out, "{name}{{group=\"{group}\"}} {}", value(status));
+        }
+    }
+    family(
+        &mut out,
+        "grafeno_cluster_peer_lag",
+        "gauge",
+        "On a leader: entries another member lacks",
+    );
+    for (group, status) in statuses {
+        for peer in &status.peers {
+            let _ = writeln!(
+                out,
+                "grafeno_cluster_peer_lag{{group=\"{group}\",member=\"{}\"}} {}",
+                peer.id, peer.lag
+            );
+        }
+    }
+    out
+}
+
 fn family(out: &mut String, name: &str, kind: &str, help: &str) {
     let _ = writeln!(out, "# HELP {name} {help}");
     let _ = writeln!(out, "# TYPE {name} {kind}");

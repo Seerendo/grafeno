@@ -20,6 +20,7 @@ import { Icon, type IconName, Logo } from "./icons.tsx";
 import { Modal, useNodeSearch } from "./ui.tsx";
 import { type DesktopSession, LOCAL_URL, desktop, isDesktop, saveText } from "./desktop.ts";
 import { AdminView } from "./views/AdminView.tsx";
+import { ClusterView } from "./views/ClusterView.tsx";
 import { ExplorerView } from "./views/ExplorerView.tsx";
 import { GraphView } from "./views/GraphView.tsx";
 import { MemoryView } from "./views/MemoryView.tsx";
@@ -38,6 +39,7 @@ const VIEWS: { id: string; title: string; icon: IconName; hint: string }[] = [
   { id: "search", title: "Search", icon: "search", hint: "Full text, recall and context" },
   { id: "memory", title: "Memory", icon: "memory", hint: "Duplicates, decay, consolidation" },
   { id: "admin", title: "Administration", icon: "admin", hint: "Check, rebuild, export, import" },
+  { id: "cluster", title: "Cluster", icon: "cluster", hint: "Members, Raft groups, lag, where namespaces live" },
 ];
 
 function parseHash(): { view: string; param?: string } {
@@ -674,6 +676,7 @@ export function App() {
           {view === "search" && <SearchView />}
           {view === "memory" && <MemoryView />}
           {view === "admin" && <AdminView />}
+          {view === "cluster" && <ClusterView />}
         </main>
       </div>
 

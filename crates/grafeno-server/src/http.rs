@@ -797,9 +797,26 @@ async fn observe(State(state): State<AppState>, request: Request, next: Next) ->
 
 /// The server's and the writer's counters, in the Prometheus text format.
 async fn metrics(State(state): State<AppState>) -> Response {
-    let text = state
+    let mut text = state
         .metrics
         .render(&state.writer.metrics(), state.db.projection_cache_bytes());
+    // Each Raft group this member holds (13.6).
+    let mut statuses: Vec<(u64, grafeno_cluster::Status)> = Vec::new();
+    match state.groups.get() {
+        Some(registry) => {
+            for (group, group_state) in &registry.states {
+                if let Some(node) = group_state.writer.cluster() {
+                    statuses.push((*group, node.status()));
+                }
+            }
+        }
+        None => {
+            if let Some(node) = state.writer.cluster() {
+                statuses.push((0, node.status()));
+            }
+        }
+    }
+    text.push_str(&crate::metrics::render_cluster(&statuses));
     (
         [(
             header::CONTENT_TYPE,

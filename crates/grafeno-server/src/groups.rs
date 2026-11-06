@@ -123,12 +123,23 @@ pub fn placements(db0: &Grafeno) -> grafeno::Result<Vec<(String, Placement)>> {
         .collect())
 }
 
-/// The group a request under `/v1` is for: `cluster/groups/{g}/…` names it,
-/// a namespace's routes go to the namespace's group, the rest to group 0.
-fn target(registry: &Registry, path: &str) -> u64 {
-    let Some(rest) = path.strip_prefix("/v1/") else {
+/// The group a request under `/v1` is for: `cluster/groups/{g}/…` and
+/// `backup?group={g}` name it, a namespace's routes go to the namespace's
+/// group, the rest to group 0.
+fn target(registry: &Registry, uri: &axum::http::Uri) -> u64 {
+    let Some(rest) = uri.path().strip_prefix("/v1/") else {
         return 0;
     };
+    // A backup of another group's file: `/v1/backup?group=N`.
+    if rest == "backup"
+        && let Some(group) = uri
+            .query()
+            .unwrap_or("")
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("group="))
+    {
+        return group.parse().unwrap_or(0);
+    }
     let parts: Vec<&str> = rest.split('/').collect();
     let decoded = |segment: &str| crate::auth::decode_segment(segment);
     match parts.as_slice() {
@@ -147,7 +158,7 @@ pub async fn dispatch(State(state): State<AppState>, request: Request, next: Nex
     let Some(registry) = state.groups.get().cloned() else {
         return next.run(request).await;
     };
-    let group = target(&registry, request.uri().path());
+    let group = target(&registry, request.uri());
     if group == state.group {
         return next.run(request).await;
     }

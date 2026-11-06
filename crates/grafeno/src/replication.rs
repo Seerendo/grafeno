@@ -41,8 +41,12 @@ pub(crate) const REPLICATION_LOG: TableDefinition<u64, &[u8]> =
 /// group: once written, the namespace refuses every other write here.
 pub const FENCE: (&str, &str) = ("cluster", "moved");
 
-/// The version of [`Entry`]'s format.
-pub const ENTRY_FORMAT: u32 = 1;
+/// The newest version of [`Entry`]'s format this build reads and writes.
+/// 1: records and bulk work (13.1). 2: also change log entries copied as
+/// they are ([`Op::Change`], 13.5). An entry carries the oldest format that
+/// can hold it, so a member of the version before reads every entry that
+/// does not need the new one.
+pub const ENTRY_FORMAT: u32 = 2;
 
 pub(crate) const ENABLED: &str = "replication_enabled";
 const FIRST: &str = "replication_first";
@@ -519,8 +523,13 @@ impl WriteTx {
                 ops.push(self.after_image(&Touch::Namespace(ns))?);
             }
         }
+        let format = if ops.iter().any(|op| matches!(op, Op::Change { .. })) {
+            2
+        } else {
+            1
+        };
         Ok(Some(Entry {
-            format: ENTRY_FORMAT,
+            format,
             layout: SCHEMA_VERSION,
             // An import keeps the clock of the commit it copies.
             at: self.commit_at.unwrap_or_else(Timestamp::now),
@@ -557,11 +566,13 @@ impl WriteTx {
     /// and records the position. An entry already applied is skipped
     /// (`false`); one past the next is an error (entries are missing).
     pub fn apply_entry(&mut self, index: u64, entry: &Entry) -> Result<bool> {
-        if entry.format > ENTRY_FORMAT || entry.layout > SCHEMA_VERSION {
+        // The format decides, not the layout of the database that wrote it:
+        // entries are records, whatever layout stores them (a layout that
+        // stores records differently comes with a new format).
+        if entry.format > ENTRY_FORMAT {
             return Err(Error::Invalid(format!(
-                "log entry {index} has format {} and layout {}, newer than this Grafeno \
-                 ({ENTRY_FORMAT} and {SCHEMA_VERSION})",
-                entry.format, entry.layout
+                "log entry {index} has format {}, newer than this Grafeno reads ({ENTRY_FORMAT})",
+                entry.format
             )));
         }
         let applied = meta_get(&self.tx.open_table(META).map_err(storage)?, APPLIED)?;

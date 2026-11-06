@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use grafeno::{Grafeno, ReadTx, Timestamp, WriteTx};
 use grafeno_raft::{Envelope, Index, Message, NodeId, Payload, Raft, Role, SnapshotMeta, Term};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub use grafeno_raft::{Config, Options as RaftOptions};
 pub use storage::Storage;
@@ -140,6 +140,51 @@ pub struct Status {
     pub voters: Vec<NodeId>,
     /// The previous voters, during a membership change.
     pub outgoing: Vec<NodeId>,
+    /// Elections this member started, and leader changes it saw, since it
+    /// started.
+    pub elections: u64,
+    pub leader_changes: u64,
+    /// Snapshots this member sent to others, and installed from a leader.
+    pub snapshots_sent: u64,
+    pub snapshots_installed: u64,
+    /// On the leader: how far each other member has come, and how many
+    /// entries it lacks.
+    pub peers: Vec<PeerProgress>,
+    /// The entry format the cluster writes: the newest every voter reads.
+    pub format: u32,
+    /// What each member said it runs (from its messages).
+    pub members: BTreeMap<NodeId, MemberInfo>,
+}
+
+/// How far another member has come, as the leader knows it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct PeerProgress {
+    pub id: NodeId,
+    pub matched: Index,
+    pub lag: Index,
+}
+
+/// What a member runs, as it says with its messages: members of two
+/// versions coexist in a rolling upgrade, and the leader writes no entry
+/// format a voter cannot read.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberInfo {
+    pub version: String,
+    /// The newest replication entry format it reads.
+    pub format: u32,
+    /// Its database layout.
+    pub layout: u64,
+}
+
+impl MemberInfo {
+    /// This process.
+    pub fn here() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            format: grafeno::ENTRY_FORMAT,
+            layout: grafeno::SCHEMA_VERSION,
+        }
+    }
 }
 
 type Reply<T> = SyncSender<Result<T, Error>>;
@@ -167,6 +212,18 @@ struct Inner {
     /// kept for [`SNAPSHOTS_KEPT`] at most, so a query split across members
     /// reads every part at one position.
     snapshots: Mutex<BTreeMap<Index, (Instant, Arc<ReadTx>)>>,
+    /// What the other members said they run.
+    members: Mutex<BTreeMap<NodeId, MemberInfo>>,
+    counters: Mutex<Counters>,
+}
+
+/// What the status counts, with what it last saw.
+#[derive(Default)]
+struct Counters {
+    leader: Option<NodeId>,
+    leader_changes: u64,
+    snapshots_sent: u64,
+    snapshots_installed: u64,
 }
 
 /// How long snapshots of past positions are kept at most.
@@ -224,7 +281,33 @@ impl Node {
         let loaded = storage.load()?;
         let applied = db.begin_read()?.log_position()?.applied;
         let id = options.id;
-        let raft = if loaded.is_new() {
+        let mut snapshot_file = loaded.snapshot_file.clone();
+        let raft = if loaded.is_new() && applied > 0 {
+            // A database restored from a backup (a new cluster, or a member
+            // joining from one): Raft starts after what it holds, from a
+            // snapshot of it (of unknown term: entries up to it are
+            // committed wherever it came from).
+            let meta = SnapshotMeta {
+                index: applied,
+                term: 0,
+                config: Config::new(voters.iter().copied()),
+            };
+            let path = options
+                .snapshot_dir
+                .join(format!("snapshot-{applied}.redb"));
+            let _ = std::fs::remove_file(&path);
+            db.begin_read()?.backup(&path)?;
+            storage.persist(None, None, &[], Some((&meta, &path)))?;
+            snapshot_file = Some(path);
+            Raft::restore(
+                id,
+                options.raft,
+                grafeno_raft::HardState::default(),
+                meta,
+                Vec::new(),
+                applied,
+            )
+        } else if loaded.is_new() {
             Raft::new(id, voters.iter().copied(), options.raft)
         } else {
             let snapshot = loaded.snapshot.clone().unwrap_or_else(|| SnapshotMeta {
@@ -244,13 +327,15 @@ impl Node {
             writes: Mutex::new(()),
             options,
             snapshots: Mutex::new(BTreeMap::new()),
+            members: Mutex::new(BTreeMap::new()),
+            counters: Mutex::new(Counters::default()),
         });
         let mut driver = Driver {
             inner: inner.clone(),
             raft,
             storage,
             transport,
-            snapshot_file: loaded.snapshot_file,
+            snapshot_file,
             incoming: HashMap::new(),
             waiters: HashMap::new(),
             reads: HashMap::new(),
@@ -330,6 +415,13 @@ impl Node {
         let Some(entry) = entry else {
             return Ok(value);
         };
+        let format = self.cluster_format();
+        if entry.format > format {
+            return Err(Error::Engine(grafeno::Error::Invalid(format!(
+                "this write needs replication entry format {}, and a member reads only up to {format}: upgrade every member first",
+                entry.format
+            ))));
+        }
         let bytes = serde_json::to_vec(&entry).map_err(|e| Error::Storage(e.to_string()))?;
         let (reply, answer) = mpsc::sync_channel(1);
         self.send(Event::Propose(bytes, reply))?;
@@ -367,6 +459,27 @@ impl Node {
         self.wait_for(self.inner.options.write_timeout, |s| s.applied >= index)
             .map(|_| index)
             .ok_or(Error::Timeout)
+    }
+
+    /// Notes what another member runs (from its messages).
+    pub fn note_member(&self, id: NodeId, info: MemberInfo) {
+        if id != self.inner.id {
+            lock(&self.inner.members).insert(id, info);
+        }
+    }
+
+    /// The newest entry format every voter reads: a member not heard from
+    /// yet, or that does not say, is taken to read only the first.
+    pub fn cluster_format(&self) -> u32 {
+        let status = self.status();
+        let members = lock(&self.inner.members);
+        status
+            .voters
+            .iter()
+            .chain(&status.outgoing)
+            .filter(|id| **id != self.inner.id)
+            .map(|id| members.get(id).map_or(1, |info| info.format))
+            .fold(grafeno::ENTRY_FORMAT, u32::min)
     }
 
     /// The latest snapshot this member holds, and its position.
@@ -549,6 +662,7 @@ impl Driver {
             let path = self.snapshot_path(meta.index);
             std::fs::write(&path, bytes.as_slice()).map_err(|e| Error::Storage(e.to_string()))?;
             self.inner.db.restore_backup(&path)?;
+            lock(&self.inner.counters).snapshots_installed += 1;
             installed = Some((meta.clone(), path));
             // Writes proposed here before cannot be told apart any more.
             for (_, (_, reply)) in self.waiters.drain() {
@@ -573,11 +687,13 @@ impl Driver {
         }
         for envelope in ready.messages {
             let snapshot = match envelope.message {
-                Message::Snapshot { .. } => self
-                    .snapshot_file
-                    .as_ref()
-                    .and_then(|path| std::fs::read(path).ok())
-                    .map(Arc::new),
+                Message::Snapshot { .. } => {
+                    lock(&self.inner.counters).snapshots_sent += 1;
+                    self.snapshot_file
+                        .as_ref()
+                        .and_then(|path| std::fs::read(path).ok())
+                        .map(Arc::new)
+                }
                 _ => None,
             };
             self.transport.send(envelope, snapshot);
@@ -674,7 +790,44 @@ impl Driver {
             snapshot_index: self.raft.snapshot_meta().index,
             voters: config.voters.iter().copied().collect(),
             outgoing: config.outgoing.iter().copied().collect(),
+            elections: self.raft.elections(),
+            ..Status::default()
         };
+        let mut status = status;
+        {
+            let mut counters = lock(&self.inner.counters);
+            let leader = self.raft.leader();
+            if leader.is_some() && leader != counters.leader {
+                counters.leader_changes += 1;
+                counters.leader = leader;
+            }
+            status.leader_changes = counters.leader_changes;
+            status.snapshots_sent = counters.snapshots_sent;
+            status.snapshots_installed = counters.snapshots_installed;
+        }
+        let last = status.last_index;
+        status.peers = self
+            .raft
+            .progress()
+            .into_iter()
+            .map(|(id, matched)| PeerProgress {
+                id,
+                matched,
+                lag: last.saturating_sub(matched),
+            })
+            .collect();
+        {
+            let members = lock(&self.inner.members);
+            status.members = members.clone();
+            status.members.insert(self.inner.id, MemberInfo::here());
+            status.format = status
+                .voters
+                .iter()
+                .chain(&status.outgoing)
+                .filter(|id| **id != self.inner.id)
+                .map(|id| members.get(id).map_or(1, |info| info.format))
+                .fold(grafeno::ENTRY_FORMAT, u32::min);
+        }
         let mut current = lock(&self.inner.status);
         if *current != status {
             *current = status;

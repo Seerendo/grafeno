@@ -30,6 +30,9 @@ use grafeno_raft::{Envelope, NodeId};
 use serde::{Deserialize, Serialize};
 
 const SECRET_HEADER: &str = "x-grafeno-cluster";
+/// What the sending member runs (`{id, version, format, layout}`), with
+/// every message (13.6).
+const MEMBER_HEADER: &str = "x-grafeno-member";
 
 /// A member of the cluster and where it listens for other members.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +109,10 @@ impl HttpTransport {
                 format!("http://{}/raft/{group}", peer.addr)
             };
             let secret = config.secret.clone();
+            let mut me =
+                serde_json::to_value(grafeno_cluster::MemberInfo::here()).unwrap_or_default();
+            me["id"] = serde_json::json!(config.id);
+            let me = me.to_string();
             std::thread::Builder::new()
                 .name(format!("grafeno-raft-send-{}", peer.id))
                 .spawn(move || {
@@ -128,6 +135,7 @@ impl HttpTransport {
                         let _ = agent
                             .post(&url)
                             .header(SECRET_HEADER, &secret)
+                            .header(MEMBER_HEADER, &me)
                             .send(&body[..]);
                     }
                 })
@@ -195,6 +203,18 @@ async fn receive(State(state): State<Listener>, headers: HeaderMap, body: Bytes)
     let Ok(envelope) = serde_json::from_slice::<Envelope>(json) else {
         return StatusCode::BAD_REQUEST;
     };
+    // A member that says what it runs (members before 13.6 do not).
+    if let Some(info) = headers
+        .get(MEMBER_HEADER)
+        .and_then(|v| serde_json::from_slice::<serde_json::Value>(v.as_bytes()).ok())
+        && let Some(id) = info["id"].as_u64()
+        && let Ok(member) = serde_json::from_value::<grafeno_cluster::MemberInfo>(info)
+    {
+        state.node.note_member(id, member.clone());
+        for node in state.nodes.values() {
+            node.note_member(id, member.clone());
+        }
+    }
     let rest = &body[4 + length..];
     let snapshot = (!rest.is_empty()).then(|| Arc::new(rest.to_vec()));
     state.node.deliver(envelope, snapshot);
