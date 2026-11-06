@@ -48,6 +48,7 @@ build unless the file says otherwise; on E1, runs vary by about ±20%.
 | `replication_log.csv` | Writes with the replication log off and on, its size and a replica's apply speed (13.1) | `crates/grafeno/examples/replication_bench.rs` | E1-mem | 2026-11-06 | bars, or a table |
 | `cluster.csv` | Sequential writes on one server and through a three-member Raft cluster, and failover times (13.2) | `crates/grafeno-cluster/examples/cluster_bench.rs` | E1-disk | 2026-11-06 | a table |
 | `auth.csv` | The cost of Argon2id passwords: a hash, a check, sign-ins a second on one core and on all (14.1) | `crates/grafeno-server/examples/auth_bench.rs` | E1-mem | 2026-11-06 | a table |
+| `rights.csv` | The cost of roles: 5 000 roles written, an account's rights computed, a namespace check and a label or property check (14.2) | `crates/grafeno/examples/rights_bench.rs` | E1-mem | 2026-11-06 | a table |
 | `drill.csv` | Cluster runbooks on the compose under load: operations, availability, longest outage, linearizability (13.6) | `packaging/compose/drill.sh`, `crates/grafeno-server/examples/drill.rs` | E1-disk | 2026-11-06 | a table |
 | `groups.csv` | Write throughput of three members with 1, 2 and 3 Raft groups, 24 clients (13.5) | `crates/grafeno-server/examples/groups_bench.rs` | E1-disk | 2026-11-06 | a table |
 | `namespace_move.csv` | Namespaces moved between groups under writes: copy, catch-up rounds, the pause, writes found (13.5) | `groups_bench.rs`, `crates/grafeno-server/tests/groups.rs` | E1-disk | 2026-11-06 | a table |

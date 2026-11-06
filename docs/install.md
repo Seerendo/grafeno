@@ -275,6 +275,13 @@ in `grafeno.toml`, when set, still does everything: keep it for
 emergencies. `[auth]` (below) sets how long sessions last and when
 failed sign-ins lock an account.
 
+Roles (14.2) bundle privileges: define one with `PUT /v1/roles/{name}`
+(say, reading every `team-*` namespace but `team-secret`, or seeing
+metrics only, for a monitoring agent) and give it to accounts with
+`PATCH /v1/accounts/{name}` and `{"roles": [...]}`. A role named
+`public` is everyone's. The server's README lists the privileges;
+`GRANT` and `REVOKE` in GQ come with 14.3.
+
 ## Backups
 
 A backup is a consistent copy of the whole database file (every

@@ -397,7 +397,7 @@ without a current user. They remain possible for embedded use.
     Raft; a leader elected among them coordinates writes, the others take
     over when it fails, and reads and large queries spread over all of
     them.
-14. **Users, roles and permissions** (in progress, 14.1 done; six steps; see below):
+14. **Users, roles and permissions** (in progress, 14.1 and 14.2 done; six steps; see below):
     a complete role-based access control, as most databases have: users who
     sign in, roles and privileges granted with `GRANT` and `REVOKE`, rights
     down to labels, properties and records, and an audit log.
@@ -2442,7 +2442,7 @@ As built (`grafeno/src/access.rs`, `grafeno-server/src/auth.rs`,
   prompt in the Studio of an open server to protect it (its first-account
   screen shows when it is not connected).
 
-**14.2 Roles and privileges.**
+**14.2 Roles and privileges** (done).
 
 - A catalog of privileges, each on a kind of object:
   - the server: create namespaces, manage accounts, manage roles and
@@ -2468,6 +2468,77 @@ As built (`grafeno/src/access.rs`, `grafeno-server/src/auth.rs`,
 - Done when: a property test draws random role graphs, grants and denials
   and checks the computed rights against a direct model; the cost of a
   check is measured with thousands of roles.
+
+As built (`grafeno/src/rights.rs`, `grafeno-server/src/auth.rs`,
+`roles.rs`):
+
+- Privileges (`Privilege`): an action (`Act`), an object and a `deny`
+  flag. On the server: `create_namespace`, `manage_accounts`,
+  `manage_roles`, `backup`, `metrics`, `audit`, `cluster`. On a namespace
+  pattern (a name, a prefix with `*`, or `*`): `read`, `create`,
+  `update`, `delete`, `merge`, `retract`, `import`, `export`, `schema`
+  (indexes, constraints, match rules, rebuilds, webhooks), `algorithms`,
+  `drop`, `create_namespace`. On a label (of nodes, or of edges) or a
+  property of a label, in a namespace pattern: `read` and `write`. A
+  privilege that does not fit its object is refused. `GET /v1/privileges`
+  lists them.
+- Roles (`RoleDef`, table `roles`, layout 16): privileges, built-in levels
+  on namespace patterns (`reader` is read, export and algorithms;
+  `editor` adds create, update, delete, merge and retract; `admin` adds
+  import, schema, drop and creating the namespace) and other roles. An
+  account holds grants (the levels of 14.1), `roles` and `superuser`; a
+  role named `public`, once defined, is every account's. Writing a role
+  that would reach itself, or names a role that does not exist, is
+  refused (the check walks only what the role reaches); deleting a role
+  takes it from every account and role. The built-in names are taken.
+  Roles travel in the replication log as entry format 4, and backups
+  carry them.
+- Rights (`Rights`): the union of the account's grants and of every role
+  it reaches, as bit sets per pattern (exact names in a hash map,
+  prefixes in a list); a denial at any level wins. A label check allows
+  the action on the namespace or `read`/`write` on the label, and a
+  property check also the property's; a denial on any of them refuses.
+- The cache: each account's rights are computed once and kept with the
+  database's access generation, a counter that every change of an
+  account or a role bumps (on every member, as the log applies it), so
+  a request checks a number and a bit; a change applies to the next
+  request.
+- Routes map to actions: reads to `read`; creating nodes and facts,
+  ingesting and extracting to `create`; `PATCH`, `PUT`, touching and
+  archiving to `update`; `DELETE` to `delete`; merges and undoing them to
+  `merge`; retracting and invalidating to `retract`; imports and exports
+  to `import` and `export`; algorithms to `algorithms`; indexes,
+  constraints, match rules, rebuilds and webhooks to `schema`; dropping a
+  namespace to `drop`; `/v1/metrics`, `/v1/backup`, `/v1/cluster`,
+  `/v1/accounts` and `/v1/roles` to the server privileges. A writing GQ
+  statement needs `create`, `update` and `delete` until 14.4 tells them
+  apart. A key's scope still narrows: its namespaces only, reading only
+  (`read`, `export`, `algorithms`) when read-only, and no server
+  privilege. Managing accounts does not reach superusers (making,
+  changing or deleting one), or it would be a way to become one; keys
+  and sessions of other accounts stay with superusers.
+- The API: `GET /v1/roles`, `GET`, `PUT` and `DELETE /v1/roles/{name}`,
+  `roles` in `/v1/accounts`, and `effective_roles` in `/v1/whoami`.
+- Measured with 5 000 roles, each with four privileges and two roles
+  below it, and an account holding 1 000 of them (2 811 reached):
+  computing the rights takes 17 ms (once per change of access), a
+  namespace check 93 ns and a label or property check 271 ns; writing the
+  5 000 roles takes 0.6 s (33 s before the cycle check walked only what
+  a role reaches).
+- Tests: `grafeno/tests/rights.rs` (2 000 random role graphs, grants and
+  denials against a direct model of the rules, for the server,
+  namespaces, labels and properties; roles in the database: cycles,
+  unknown roles, deletion), `grafeno-server/tests/roles.rs` (patterns
+  with a denial, a role reached through another, a custom editor without
+  `delete`, cycles and misplaced privileges refused, server privileges,
+  managing accounts but not superusers, `public`, scoped keys), the
+  route table in `auth.rs`, `replication.rs` (roles replayed) and
+  `upgrade.rs` (layout 16 from every layout, fixture `layout-v15`).
+- Not built in this step: label and property rights are computed and
+  checked by `Rights` but requests do not consult them yet (14.4 filters
+  what queries and routes return by them); `GRANT`, `REVOKE` and roles in
+  GQ, the CLI, the TypeScript client and the Studio (14.3); `audit` waits
+  for the audit log (14.5).
 
 **14.3 Managing access in GQ, the API and the tools.**
 
@@ -2788,6 +2859,7 @@ spinning disk, on ARM, or for days at a time.
 | Replication log (13.1) | writes at 80% of the speed with the log on; 568 bytes per record; a replica applies 22 300 records/s | E1-mem | `replication_log.csv` |
 | Raft cluster of three (13.2) | 137 sequential writes/s (618 on one server), p50 7.2 ms; a leader replaced in 0.5 to 0.8 s | E1-disk | `cluster.csv` |
 | Passwords (14.1) | Argon2id at 19 ms a check: 53 sign-ins/s on one core, 141 on 16 threads | E1-mem | `auth.csv` |
+| Roles (14.2), 5 000 roles, 2 811 reached by one account | rights computed in 17 ms once per change; a namespace check 93 ns, a label or property check 271 ns | E1-mem | `rights.csv` |
 | Runbooks on a compose cluster (13.6) | rolling upgrade 13.5 → 13.6, a member lost, a majority lost, a disk replaced: 15 971 operations, all linearizable | E1-disk | `drill.csv` |
 | Several Raft groups (13.5) | 109, 153 and 181 writes/s with 1, 2 and 3 groups; 20 000 nodes moved under writes in 11 s with a 39 ms pause, no write lost or doubled | E1-disk | `groups.csv`, `namespace_move.csv` |
 | Reads split across members (13.4) | 200 000 people, 3 threads a member: scans 2.1, aggregates 2.9, top-20 3.0, two hops 1.4 times faster with 5 members | E1-disk | `split.csv` |
@@ -2829,6 +2901,7 @@ real binary. The ones that carry each guarantee:
 | A read split across members returns one server's rows | `grafeno-query/tests/common/mod.rs` (used by `conformance.rs`, `planner.rs`, `cypher.rs`, `queries.rs`, `traversal.rs`, `batch.rs`), `grafeno-server/tests/split.rs`, `aggregate.rs` tests | every read of those suites that can be split, whole against 2, 3 and 5 parts through JSON, row order included; exact sums independent of order; three processes, with a member down |
 | A namespace moves between groups without losing or doubling a write | `grafeno/tests/replication.rs` (copy, catch-up, fence), `grafeno-server/tests/groups.rs` | a namespace copied and caught up equals the source, change log numbers included; a fenced namespace refuses writes; three processes with two more groups, writes routed through any member, a move under three writers retrying busy answers, every acknowledged write found once on every member |
 | A cluster restarts, rejoins and upgrades without anomalies | `grafeno-cluster/tests/operations.rs`, `packaging/compose/drill.sh` | a new cluster from a follower's backup, a member joining from an older backup without a snapshot, a restart; the leader refusing an entry format a voter cannot read; on the compose, every runbook under load checked for linearizability |
+| Rights are the union of roles, and a denial wins | `grafeno/tests/rights.rs`, `grafeno-server/tests/roles.rs` | 2 000 random role graphs against a direct model; over HTTP, patterns with denials, nested roles, a custom editor, server privileges, `public`, scoped keys, cycles refused |
 | Accounts sign in, and keys and sessions do only what they may | `grafeno-server/tests/accounts.rs`, `access.rs`, `shell.rs`, `cluster.rs`, `clients/typescript/test/accounts.test.ts` | sign-in, refresh, expiry, revocation, lockouts, the password policy, disabled accounts, scoped, expired and rotated keys over HTTP, the shell and the client; in a cluster, keys and sessions on every member |
 | Costly queries stop | `grafeno-query/tests/adversarial.rs` | 32 hostile queries within their limits; nesting just under the limit runs on a 2 MiB stack; `max_cost` refuses; procedure rows count against `max_memory` |
 | Nothing a client sends crashes the parser | `grafeno-query/tests/fuzz.rs` | proptest: random tokens, valid queries with random edits, arbitrary text, through the lexer, parser, planner, `EXPLAIN` and executor |
@@ -2862,6 +2935,7 @@ cargo run --release -p grafeno-server --example split_bench -- 200000 3 5   # bu
 cargo run --release -p grafeno-server --example groups_bench -- 10 8 20000
 OLD_IMAGE=grafeno:13.5 NEW_IMAGE=grafeno:13.6 packaging/compose/drill.sh   # images built from each commit
 cargo run --release -p grafeno-server --example auth_bench -- 60
+cargo run --release -p grafeno --example rights_bench -- 5000 1000
 FAULT_SECONDS=40 cargo test --release -p grafeno-server --test faults -- --nocapture
 cargo run --release -p grafeno --example changes_bench -- 100000
 cargo run --release -p grafeno-server --example events_bench -- 100000

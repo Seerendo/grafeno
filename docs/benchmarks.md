@@ -696,6 +696,24 @@ Argon2id with the server's parameters (19 MiB, 2 passes, 1 lane),
 Checks are bound by memory more than by cores, which is what makes them
 slow to guess offline; sessions and keys (SHA-256) cost a lookup.
 
+## Roles (`crates/grafeno/examples/rights_bench.rs`)
+
+5 000 roles, each with four privileges (read and create on its own
+namespace, a denial of delete on a pattern, a denial of reading a label)
+and two roles below it; one account holds 1 000 of them and reaches
+2 811. In memory, 2026-11-06:
+
+| | |
+| --- | --- |
+| writing the 5 000 roles (each checked for cycles) | 0.6 s |
+| reading them and computing the account's rights | 17.3 ms |
+| a namespace check | 93 ns |
+| a label or property check | 271 ns |
+
+The rights are computed once per change of an account or a role, then a
+request costs a check. Before the cycle check walked only the roles a
+role reaches, writing the 5 000 took 33 s.
+
 ## Cluster runbooks under load (`packaging/compose/drill.sh`)
 
 Three members in Docker on this laptop, two Raft groups, three clients of

@@ -213,6 +213,13 @@ measured speed, memory and limits, with charts, in
   shell and the TypeScript client sign in. Existing keys became service
   accounts on their own.
 
+- **Phase 14.2, roles and privileges:** a catalog of privileges on the
+  server, namespaces, labels and properties; roles that hold privileges,
+  the built-in levels and other roles, granted to accounts; a denial
+  wins over any grant, so "everything in `team-*` but `team-secret`" is
+  one grant and one denial. Rights are computed once per change and a
+  check costs about 100 ns with thousands of roles.
+
 Next, the rest of phase 14: users, roles and permissions (sign-in, roles you
 define, `GRANT` and `REVOKE`, rights down to labels, properties and
 records, an audit log); phase 15: the engine and the interface apart (the

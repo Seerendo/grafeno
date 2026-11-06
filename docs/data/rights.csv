@@ -1,0 +1,8 @@
+measure,value,unit
+roles,5000,
+roles held directly,1000,
+roles reached,2811,
+writing the roles,0.6,s
+reading and computing the rights,17.3,ms
+namespace check,93,ns
+label or property check,271,ns
