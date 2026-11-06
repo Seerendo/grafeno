@@ -24,6 +24,7 @@
 
 mod storage;
 
+pub mod check;
 pub mod memory;
 
 use std::collections::HashMap;

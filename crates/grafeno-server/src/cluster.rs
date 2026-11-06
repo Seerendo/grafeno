@@ -93,6 +93,7 @@ impl HttpTransport {
                 .spawn(move || {
                     let agent: ureq::Agent = ureq::Agent::config_builder()
                         .timeout_global(Some(Duration::from_secs(5)))
+                        .timeout_connect(Some(CONNECT_TIMEOUT))
                         .http_status_as_error(false)
                         .build()
                         .into();
@@ -276,6 +277,12 @@ pub const POSITION: &str = "x-grafeno-position";
 /// On a refusal because this member is not the leader.
 pub const NOT_LEADER: &str = "x-grafeno-not-leader";
 /// The start of the message of that refusal (see [`engine_error`]).
+/// How long to wait for a connection to another member. A member that is
+/// down should fail fast (Windows takes 2 s to refuse one on its own).
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// How long a follower waits for an election before refusing a write.
+const ELECTION_WAIT: Duration = Duration::from_secs(3);
 pub const NOT_LEADER_MESSAGE: &str = "this member is not the cluster's leader";
 /// A `bounded` read is forwarded when this member is more entries behind.
 const MAX_LAG: u64 = 1_000;
@@ -331,6 +338,7 @@ fn forward(
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(60)))
+        .timeout_connect(Some(CONNECT_TIMEOUT))
         .build()
         .into();
     let mut answer = match agent.run(request) {
@@ -472,13 +480,25 @@ pub async fn route(
     }
     let request = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes.clone()));
     let mut response = next.run(request).await;
-    // A write refused on a follower goes to the leader.
+    // A write refused on a follower goes to the leader; during an
+    // election, once there is one again.
     if response.status() == StatusCode::MISDIRECTED_REQUEST
         && response.headers().contains_key(NOT_LEADER)
         && !forwarded
-        && let Some(api) = leader_api(&node)
     {
-        return forward_now(api, bytes).await;
+        let waiting = node.clone();
+        let elected = tokio::task::spawn_blocking(move || {
+            waiting.wait_for(ELECTION_WAIT, |s| s.leader.is_some())
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(api) = elected
+            .and_then(|s| s.leader)
+            .and_then(|id| state.writer.api_of(id))
+        {
+            return forward_now(api, bytes).await;
+        }
     }
     if let Ok(value) = axum::http::HeaderValue::from_str(&node.status().applied.to_string()) {
         response.headers_mut().insert(POSITION, value);
