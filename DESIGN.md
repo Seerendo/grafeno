@@ -397,7 +397,7 @@ without a current user. They remain possible for embedded use.
     Raft; a leader elected among them coordinates writes, the others take
     over when it fails, and reads and large queries spread over all of
     them.
-14. **Users, roles and permissions** (in progress, 14.1 and 14.2 done; six steps; see below):
+14. **Users, roles and permissions** (in progress, 14.1 to 14.3 done; six steps; see below):
     a complete role-based access control, as most databases have: users who
     sign in, roles and privileges granted with `GRANT` and `REVOKE`, rights
     down to labels, properties and records, and an audit log.
@@ -2540,7 +2540,7 @@ As built (`grafeno/src/rights.rs`, `grafeno-server/src/auth.rs`,
   GQ, the CLI, the TypeScript client and the Studio (14.3); `audit` waits
   for the audit log (14.5).
 
-**14.3 Managing access in GQ, the API and the tools.**
+**14.3 Managing access in GQ, the API and the tools** (done).
 
 - GQ statements, run by accounts that may manage access: `CREATE USER`,
   `ALTER USER` (password, status, expiry), `DROP USER`, `CREATE ROLE`,
@@ -2553,6 +2553,79 @@ As built (`grafeno/src/rights.rs`, `grafeno-server/src/auth.rs`,
   client, and as views in the Studio and the desktop app.
 - Done when: every statement and endpoint is in the conformance and HTTP
   suites, including those refused for lack of the privilege to manage.
+
+As built (`grafeno-query/src/access.rs`, `grafeno/src/rights.rs`,
+`grafeno-server/src/admin.rs`, `access_cli.rs`, the TypeScript client,
+the Studio's Access view):
+
+- Statements: `CREATE USER name [IF NOT EXISTS] SET PASSWORD …`,
+  `CREATE SERVICE ACCOUNT name`, `ALTER USER name SET PASSWORD | STATUS
+  ACTIVE | SUSPENDED | EXPIRES <time or null> | SUPERUSER true | false |
+  DESCRIPTION …` (several `SET`s at once), `DROP USER name [IF EXISTS]`,
+  `CREATE ROLE name [IF NOT EXISTS] [SET DESCRIPTION …]`, `DROP ROLE`,
+  `GRANT` / `DENY` privileges `ON SERVER | NAMESPACE p | NODES Label IN p |
+  EDGES label IN p | PROPERTY Label.key IN p TO` roles, `REVOKE [GRANT |
+  DENY] … FROM` roles, `GRANT ROLE r TO` accounts or roles, `REVOKE ROLE
+  … FROM`, `SHOW USERS`, `SHOW ROLES` (the built-in ones first), `SHOW
+  PRIVILEGES` (the catalog), `SHOW PRIVILEGES FOR name` (each with the
+  role it comes from), `SHOW CURRENT USER`. Privileges are the actions of
+  14.2 or the levels `reader`, `editor`, `admin` on a namespace (denying a
+  level denies each of its actions). Names with `-` and patterns are
+  quoted (`'team-*'`).
+- Who may: the server passes the caller in the query's limits
+  (`AccessContext`): managing accounts needs `manage_accounts`, roles and
+  grants `manage_roles`, a role given to an account `manage_accounts` and
+  to a role `manage_roles`; only superusers make, change, suspend or drop
+  superusers; anyone lists their own privileges and the catalog. The
+  statement checks this as it runs, so it needs no privilege on the
+  namespace it is sent to (`POST /v1/{ns}/query` leaves the check to the
+  handler, which still asks `read` for everything else, `EXPLAIN`
+  included). Passwords go through the policy and Argon2id (a hasher the
+  server and the local shell give; the library alone cannot set them).
+  Suspending an account or a new password ends its sessions.
+- `EXPLAIN` of a statement the caller may not run describes it and adds a
+  `DENIED` step naming the privilege missing (`` "ana" has no
+  `manage_accounts` privilege on the server ``, or `` no `create`
+  privilege on the namespace "team-a" ``), and runs nothing.
+- Accounts can expire (`expires_at`, a new field read as absent from
+  older records, so no layout change): an expired account neither signs
+  in nor uses its keys or sessions (401 `account_expired`).
+- Without a token, accounts close the server: a change that would leave
+  accounts but no active superuser, or no accounts at all after there
+  were some, is refused, in GQ and over HTTP. This closes a gap of 14.1,
+  where `POST /v1/accounts` on an open server could make a first account
+  that was not a superuser, and nobody could manage the server after.
+- The API: `/v1/admin/users` and `/v1/admin/roles` (the accounts and
+  roles of 14.1 and 14.2 under the design's names; `PATCH` takes
+  `expires_at`), `GET /v1/admin/grants?holder=`, `POST /v1/admin/grants`
+  (`{privileges, on, to, deny}`), `/v1/admin/grants/revoke` (`{…, from,
+  which}`), `/v1/admin/grants/roles` and `/v1/admin/grants/roles/revoke`;
+  they run the same code as the statements. `roles`, `privileges` and
+  `admin` became reserved namespace names.
+- The tools: `grafeno roles list | create | delete | show` and `grafeno
+  grants catalog | grant | deny | revoke | add-role | remove-role` (on a
+  file or through the server; each is an access statement); `grafeno
+  shell` runs them too and sets passwords through the policy; the
+  TypeScript client has `roles`, `putRole`, `deleteRole`, `grant`,
+  `revoke`, `grantRoles`, `revokeRoles`, `privilegesOf` and
+  `privilegeCatalog`; the Studio (and so the desktop app) has an Access
+  view: who the caller is, the accounts with their roles (give, take,
+  suspend), and each role's privileges (grant, deny, revoke, create and
+  delete roles).
+- Tests: the conformance suite (every statement, 26 scenarios, with `*`
+  for values such as creation times), `grafeno-query/tests/access.rs`
+  (managing accounts and roles apart, superusers only a superuser's,
+  passwords through the hasher, suspension ending sessions, what
+  `EXPLAIN` lacks), `grafeno-server/tests/admin.rs` (statements over
+  HTTP: a user made in GQ signs in, grants without reading the
+  namespace, refusals for lack of `manage_accounts`, `EXPLAIN` with
+  `DENIED`, expiry, a dropped account's key; the admin endpoints; an open
+  server keeping a superuser), `shell.rs` (`grafeno roles`, `grafeno
+  grants`, a local shell setting a password), the client's
+  `accounts.test.ts`, and the Studio's view checked in a browser.
+- Not built in this step: label and property rights are still not
+  enforced by queries (14.4); the audit log (14.5); the Studio sets no
+  passwords or expiry dates (the API and GQ do).
 
 **14.4 Enforcement down to labels, properties and records.**
 
@@ -2901,6 +2974,7 @@ real binary. The ones that carry each guarantee:
 | A read split across members returns one server's rows | `grafeno-query/tests/common/mod.rs` (used by `conformance.rs`, `planner.rs`, `cypher.rs`, `queries.rs`, `traversal.rs`, `batch.rs`), `grafeno-server/tests/split.rs`, `aggregate.rs` tests | every read of those suites that can be split, whole against 2, 3 and 5 parts through JSON, row order included; exact sums independent of order; three processes, with a member down |
 | A namespace moves between groups without losing or doubling a write | `grafeno/tests/replication.rs` (copy, catch-up, fence), `grafeno-server/tests/groups.rs` | a namespace copied and caught up equals the source, change log numbers included; a fenced namespace refuses writes; three processes with two more groups, writes routed through any member, a move under three writers retrying busy answers, every acknowledged write found once on every member |
 | A cluster restarts, rejoins and upgrades without anomalies | `grafeno-cluster/tests/operations.rs`, `packaging/compose/drill.sh` | a new cluster from a follower's backup, a member joining from an older backup without a snapshot, a restart; the leader refusing an entry format a voter cannot read; on the compose, every runbook under load checked for linearizability |
+| Access is managed in GQ, the API and the tools, by those who may | `grafeno-query/tests/conformance/scenarios.txt`, `grafeno-query/tests/access.rs`, `grafeno-server/tests/admin.rs`, `shell.rs`, `clients/typescript/test/accounts.test.ts` | every access statement and admin endpoint; refusals without `manage_accounts` or `manage_roles`; superusers only a superuser's; `EXPLAIN` naming what is missing; expiry; an open server keeping a superuser |
 | Rights are the union of roles, and a denial wins | `grafeno/tests/rights.rs`, `grafeno-server/tests/roles.rs` | 2 000 random role graphs against a direct model; over HTTP, patterns with denials, nested roles, a custom editor, server privileges, `public`, scoped keys, cycles refused |
 | Accounts sign in, and keys and sessions do only what they may | `grafeno-server/tests/accounts.rs`, `access.rs`, `shell.rs`, `cluster.rs`, `clients/typescript/test/accounts.test.ts` | sign-in, refresh, expiry, revocation, lockouts, the password policy, disabled accounts, scoped, expired and rotated keys over HTTP, the shell and the client; in a cluster, keys and sessions on every member |
 | Costly queries stop | `grafeno-query/tests/adversarial.rs` | 32 hostile queries within their limits; nesting just under the limit runs on a 2 MiB stack; `max_cost` refuses; procedure rows count against `max_memory` |

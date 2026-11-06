@@ -279,8 +279,20 @@ Roles (14.2) bundle privileges: define one with `PUT /v1/roles/{name}`
 (say, reading every `team-*` namespace but `team-secret`, or seeing
 metrics only, for a monitoring agent) and give it to accounts with
 `PATCH /v1/accounts/{name}` and `{"roles": [...]}`. A role named
-`public` is everyone's. The server's README lists the privileges;
-`GRANT` and `REVOKE` in GQ come with 14.3.
+`public` is everyone's. The server's README lists the privileges.
+
+The same in GQ (14.3), from the shell or the Studio's Scripts view, by an
+account that may manage roles:
+
+```cypher
+CREATE ROLE team_reader;
+GRANT read, export ON NAMESPACE 'team-*' TO team_reader;
+DENY read ON NAMESPACE 'team-secret' TO team_reader;
+GRANT ROLE team_reader TO ana;
+```
+
+or from the command line (`grafeno grants grant read --on namespace:team-* --to team_reader`,
+`grafeno roles show team_reader`), and in the Studio's Access view.
 
 ## Backups
 

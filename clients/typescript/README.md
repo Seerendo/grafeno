@@ -89,6 +89,22 @@ The server accepts at most 512 IDs across both lists and requires read access to
 that namespace. This is a read operation, separate from the writing `batch` API.
 See the [method and measurements](../../docs/read-many.md) or [Español](../../docs/lecturas-por-lotes.md).
 
+## Roles and grants (14.3)
+
+```ts
+const admin = new Grafeno({ url, token });
+await admin.putRole("team-reader", { description: "reads the teams" });
+await admin.grant(["read", "export"], { on: "namespace", namespace: "team-*" }, ["team-reader"]);
+await admin.grant(["read"], { on: "namespace", namespace: "team-secret" }, ["team-reader"], { deny: true });
+await admin.grantRoles(["team-reader"], ["ana"]);
+const held = await admin.privilegesOf("team-reader"); // {columns, rows}
+await admin.changeAccount("ana", { expires_at: "2027-01-01" });
+```
+
+`revoke`, `revokeRoles`, `roles`, `role`, `deleteRole` and
+`privilegeCatalog` complete them; GQ access statements (`GRANT …`, `SHOW
+USERS`) also run through `namespace(…).query`.
+
 ## Expand neighborhoods together
 
 ```ts

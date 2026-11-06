@@ -714,6 +714,48 @@ deep. Past either, the query fails with an error instead of exhausting the
 stack. The library and the local shell run without the other limits
 (`grafeno_query::execute_with` takes them).
 
+## Users, roles and privileges
+
+Accounts and roles (see the server's README) are managed in GQ by those who
+may: `manage_accounts` for users and for giving roles to them,
+`manage_roles` for roles and grants; only superusers make or change
+superusers. These statements need no privilege on the namespace they are
+sent to. Names with `-`, and namespace patterns, are quoted.
+
+```cypher
+CREATE USER ana SET PASSWORD $password;          // a user signs in
+CREATE SERVICE ACCOUNT indexer;                 // a service account uses API keys
+ALTER USER ana SET STATUS SUSPENDED;            // or ACTIVE; ends its sessions
+ALTER USER ana SET EXPIRES '2027-01-01';        // null: never
+ALTER USER ana SET PASSWORD $new SET DESCRIPTION 'research';
+DROP USER indexer IF EXISTS;                    // with its keys and sessions
+
+CREATE ROLE analyst SET DESCRIPTION 'reads the teams';
+GRANT read, algorithms ON NAMESPACE 'team-*' TO analyst;
+DENY read ON NAMESPACE 'team-secret' TO analyst;   // a denial wins
+GRANT editor ON NAMESPACE notes TO analyst;        // a level: reader, editor, admin
+GRANT read ON NODES Person IN crm TO analyst;      // EDGES works_at IN crm for edges
+DENY read ON PROPERTY Person.email IN crm TO analyst;
+GRANT metrics, backup ON SERVER TO analyst;
+REVOKE DENY read ON NAMESPACE 'team-secret' FROM analyst;   // REVOKE GRANT …, or both
+GRANT ROLE analyst TO ana;                      // to an account or another role
+REVOKE ROLE analyst FROM ana;
+DROP ROLE analyst;                              // every holder loses it
+
+SHOW USERS;                  // name, kind, roles, grants, superuser, status, expires_at, created_at
+SHOW ROLES;                  // name, built_in, roles, privileges, description
+SHOW PRIVILEGES;             // the catalog: privilege, on
+SHOW PRIVILEGES FOR ana;     // source, access, privilege, on (a role's, or an account's through its roles)
+SHOW CURRENT USER;           // name, kind, superuser, roles, effective_roles
+```
+
+Writing statements answer one row, `result`, saying what changed
+(`granted 2 privileges on namespace team-* to analyst`). `EXPLAIN` of a
+statement the caller may not run says which privilege it lacks, in a
+`DENIED` step, and runs nothing; this holds for any statement
+(`EXPLAIN MATCH (n) DETACH DELETE n` names `create`, `update` or `delete`
+when one is missing).
+
 ## Differences from Cypher
 
 These are pinned in `crates/grafeno-query/tests/conformance/scenarios.txt`,

@@ -213,9 +213,15 @@ presentan el proyecto y los primeros pasos.
   one grant and one denial. Rights are computed once per change and a
   check costs about 100 ns with thousands of roles.
 
-Next, the rest of phase 14: users, roles and permissions (sign-in, roles you
-define, `GRANT` and `REVOKE`, rights down to labels, properties and
-records, an audit log); phase 15: the engine and the interface apart (the
+- **Phase 14.3, managing access:** `CREATE USER`, `ALTER USER` (password,
+  status, expiry), `CREATE ROLE`, `GRANT`, `DENY`, `REVOKE`, `GRANT ROLE`
+  and the `SHOW` statements in GQ, run by accounts that may manage
+  accounts or roles; `EXPLAIN` names the privilege a statement lacks; the
+  same through `/v1/admin`, `grafeno roles`, `grafeno grants`, the
+  TypeScript client and an Access view in the Studio.
+
+Next, the rest of phase 14: rights down to labels, properties and
+records, and an audit log; phase 15: the engine and the interface apart (the
 engine installs natively like a database server, from a `curl` one-liner,
 signed APT and DNF repositories or a guided Windows setup, with no Docker
 needed; Grafeno Desktop becomes a separate product that talks to engines
