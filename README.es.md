@@ -7,7 +7,7 @@
 <p align="center">
   <a href="README.md">English</a> · <strong>Español</strong><br>
   <a href="#empezar-por-el-escritorio">Empezar</a> ·
-  <a href="docs/install.md">Instalación</a> ·
+  <a href="docs/instalacion.md">Instalación</a> ·
   <a href="docs/query-language.md">Consultas GQ</a> ·
   <a href="CONTRIBUTING.es.md">Contribuir</a>
 </p>
@@ -40,7 +40,7 @@ recientes y conectarse a un servidor. El modo local ejecuta el motor dentro del
 proceso: no necesita un servicio ni abre un puerto.
 
 Para conocer los paquetes de Windows y Linux, consulta la
-[guía de instalación](docs/install.md) y la
+[guía de instalación](docs/instalacion.md) y la
 [documentación de escritorio](apps/desktop/README.es.md).
 
 Para ejecutarlo desde el código, prepara primero los
@@ -108,7 +108,7 @@ grafeno serve --memory
 Escucha por defecto en `127.0.0.1:7810`. Studio está en
 <http://127.0.0.1:7810/studio/> cuando su compilación se incluye en el binario.
 Los datos de `--memory` se pierden al cerrar el proceso. Para una configuración
-persistente y autenticada, sigue la [guía del servidor](docs/install.md#settings).
+persistente y autenticada, sigue la [guía del servidor](docs/instalacion.md#configuración).
 
 ## Cómo está organizado
 

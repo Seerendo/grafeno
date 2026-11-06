@@ -1,5 +1,7 @@
 # Installing Grafeno
 
+[Español](instalacion.md) | **English**
+
 There are two families of installers:
 
 - **Grafeno Desktop**, the desktop application: Grafeno Studio in its own
