@@ -180,5 +180,6 @@ jobs:
           $found = Invoke-RestMethod http://127.0.0.1:7821/v1/notes/search/text -Method Post -Headers @{ Authorization = "Bearer $token" } -ContentType 'application/json' -Body '{"query":"virtual"}'
           if (-not ($found | ConvertTo-Json -Depth 5 | Select-String $env:NOTE_ID -Quiet)) { throw "the kept data is not served" }
           Start-Process "C:\Program Files\Grafeno\unins000.exe" -Wait -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/PURGE=1'
-          if (Test-Path "C:\GrafenoTest\data") { throw "/PURGE=1 kept the data" }
+          foreach ($i in 1..20) { if (-not (Test-Path "C:\GrafenoTest\data")) { break }; Start-Sleep -Milliseconds 500 }
+          if (Test-Path "C:\GrafenoTest\data") { Get-ChildItem -Recurse C:\GrafenoTest; throw "/PURGE=1 kept the data" }
           if (Test-Path "C:\ProgramData\Grafeno") { throw "/PURGE=1 kept the settings" }

@@ -288,6 +288,7 @@ var
   Lines: TArrayOfString;
   I, Slash: Integer;
   Line: String;
+  Quoted: Boolean;
 begin
   if IsUninstaller() then
     Result := DefaultDataDir()
@@ -298,13 +299,20 @@ begin
   for I := 0 to GetArrayLength(Lines) - 1 do
   begin
     Line := Trim(Lines[I]);
-    // db = "C:/ProgramData/Grafeno/data/grafeno.redb": its folder.
-    if (Pos('db ', Line) = 1) and (Pos('"', Line) > 0) then
+    // db = 'C:\ProgramData\Grafeno\data\grafeno.redb' (TOML writes
+    // Windows paths as literal strings) or db = "C:\\...\\grafeno.redb":
+    // its folder.
+    if (Pos('db ', Line) = 1) and ((Pos('''', Line) > 0) or (Pos('"', Line) > 0)) then
     begin
-      Line := Copy(Line, Pos('"', Line) + 1, Length(Line));
+      Quoted := Pos('''', Line) > 0;
+      if Quoted then
+        Line := Copy(Line, Pos('''', Line) + 1, Length(Line))
+      else
+        Line := Copy(Line, Pos('"', Line) + 1, Length(Line));
       Delete(Line, Length(Line), 1);
       StringChangeEx(Line, '/', '\', True);
-      StringChangeEx(Line, '\\', '\', True);
+      if not Quoted then
+        StringChangeEx(Line, '\\', '\', True);
       Slash := Length(Line);
       while (Slash > 0) and (Line[Slash] <> '\') do
         Slash := Slash - 1;
@@ -406,6 +414,8 @@ begin
     exit;
   if Purge then
   begin
+    // The stopped service's process may hold the database a moment longer.
+    Sleep(2000);
     DelTree(PurgeData, True, True, True);
     DelTree(ExpandConstant('{#SettingsDir}'), True, True, True);
   end;
