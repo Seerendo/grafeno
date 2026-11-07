@@ -53,5 +53,22 @@ jobs:
         run: cargo build --locked -p grafeno-server
       - name: Test the client against the real server
         run: npm test --prefix clients/typescript
+      - name: The client's contract with this engine and the previous release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bins="$PWD/target/debug/grafeno"
+          # The latest published release, if there is one, as the previous engine.
+          if tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName 2>/dev/null)"; then
+            mkdir -p "$RUNNER_TEMP/previous"
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+              --pattern 'grafeno-x86_64-unknown-linux-musl.tar.gz' --dir "$RUNNER_TEMP/previous"
+            tar -xzf "$RUNNER_TEMP/previous/grafeno-x86_64-unknown-linux-musl.tar.gz" -C "$RUNNER_TEMP/previous"
+            bins="$bins:$RUNNER_TEMP/previous/grafeno"
+            echo "Previous engine: $tag"
+          else
+            echo "::notice::No release published yet: the contract runs against this engine only."
+          fi
+          GRAFENO_CONTRACT_BINS="$bins" node --test clients/typescript/test/contract.test.ts
       - name: Run the benchmark script once, without performance thresholds
         run: GRAFENO_BENCH_ROUNDS=1 node clients/typescript/bench/read-many.mjs

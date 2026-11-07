@@ -102,6 +102,71 @@ impl ServerSettings {
         }
     }
 
+    /// What `GET /v1/settings` reports: everything but the token and the
+    /// cluster secret (whether there is a token is reported). Sizes in
+    /// bytes, durations in seconds or milliseconds as their names say.
+    pub fn public_view(&self) -> serde_json::Value {
+        use serde_json::json;
+        let secs = |d: Option<std::time::Duration>| d.map(|d| d.as_secs_f64());
+        let cluster = self.cluster.as_ref().map(|c| {
+            let mut value = serde_json::to_value(c).unwrap_or_default();
+            if let Some(object) = value.as_object_mut() {
+                object.remove("secret");
+            }
+            value
+        });
+        json!({
+            "db": self.db,
+            "memory_only": self.db.is_none(),
+            "addr": self.addr.to_string(),
+            "token": self.token.is_some(),
+            "cors_origins": self.options.cors_origins,
+            "durability": match self.durability {
+                grafeno::Durability::Immediate => "immediate",
+                grafeno::Durability::Eventual => "eventual",
+            },
+            "max_requests": self.max_requests,
+            "copy_before_upgrade": self.memory.copy_before_upgrade,
+            "query": {
+                "timeout_secs": secs(self.limits.timeout),
+                "max_reads": self.limits.max_reads,
+                "max_rows": self.limits.max_rows,
+                "max_memory_bytes": self.limits.max_memory,
+                "max_cost": self.limits.max_cost,
+                "scan_threads": self.scan_threads,
+            },
+            "memory": {
+                "cache_bytes": self.memory.cache_bytes,
+                "projection_cache_bytes": self.memory.projection_cache_bytes,
+                "vector_cache_bytes": self.memory.vector_cache_bytes,
+            },
+            "writer": {
+                "max_batch": self.writer.max_batch,
+                "queue": self.writer.queue,
+                "flush_ms": self.writer.flush_every.as_millis() as u64,
+                "import_chunk": self.import_chunk,
+            },
+            "changes": {
+                "enabled": self.changes.enabled,
+                "max_entries": self.changes.max_entries,
+                "max_age_secs": self.changes.max_age_secs,
+            },
+            "audit": {
+                "max_entries": self.audit.max_entries,
+                "max_age_secs": self.audit.max_age_secs,
+            },
+            "auth": {
+                "session_secs": self.auth.session.as_secs(),
+                "refresh_secs": self.auth.refresh.as_secs(),
+                "lockout_attempts": self.auth.lockout.account_attempts,
+                "address_attempts": self.auth.lockout.address_attempts,
+                "lockout_secs": self.auth.lockout.window.as_secs(),
+            },
+            "background": self.background,
+            "cluster": cluster,
+        })
+    }
+
     fn open(&self) -> grafeno::Result<Grafeno> {
         match &self.db {
             Some(path) => Grafeno::open_with(path, &self.memory),
@@ -125,7 +190,8 @@ pub fn run(
         .with_import_chunk(settings.import_chunk)
         .with_limits(settings.limits.clone())
         .with_max_requests(settings.max_requests)
-        .with_auth(settings.auth);
+        .with_auth(settings.auth)
+        .with_settings(settings.public_view());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

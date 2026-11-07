@@ -12,6 +12,44 @@
  * ```
  */
 
+/** This client's version (it has its own, apart from the engine's). */
+export const CLIENT_VERSION = "0.2.0";
+
+/** The versions of the HTTP API this client speaks. */
+export const API_VERSIONS: readonly number[] = [1];
+
+/**
+ * What engines from before `GET /v1/about` (0.1.0, phases 1 to 15.2) can
+ * do: everything but `settings`.
+ */
+export const LEGACY_CAPABILITIES: readonly string[] = [
+  "namespaces", "nodes", "edges", "facts", "search.text", "search.vector",
+  "recall", "context", "memory", "query", "query.explain", "batches", "traversal",
+  "algorithms", "resolution", "match-rules", "extraction", "constraints",
+  "communities", "summaries", "indexes", "changes", "changes.stream", "webhooks",
+  "ingest", "export", "import", "import.csv", "import.graphml", "backup", "metrics",
+  "accounts", "sessions", "keys", "roles", "grants", "policies", "audit",
+  "cluster", "cluster.groups", "query.split",
+];
+
+/** What an engine is and can do (`GET /v1/about`). */
+export interface About {
+  product: string;
+  /** The engine's version. */
+  version: string;
+  /** The API version it speaks, and every one it answers to. */
+  api: { version: number; supported: number[] };
+  /** The layout version of its database files. */
+  layout: number;
+  /** What it can do, by name (`query.split`, `audit`, …). */
+  capabilities: string[];
+  auth: { token: boolean; accounts: boolean; open: boolean; password_sign_in: boolean };
+  /** This member's id and group, on a cluster. */
+  cluster: { id: number; group: number } | null;
+  /** True when the engine predates `/v1/about` and this was told from `/health`. */
+  legacy?: boolean;
+}
+
 export type Id = string;
 /** Microseconds since the Unix epoch, or an ISO 8601 date or date-time. */
 export type TimeInput = number | string;
@@ -744,6 +782,7 @@ export class Grafeno {
   readonly #readYourWrites: boolean;
   readonly #spread: boolean;
   readonly #fetch: typeof fetch;
+  #about: About | undefined;
 
   constructor(options: GrafenoOptions) {
     const urls = Array.isArray(options.url) ? options.url : [options.url];
@@ -780,8 +819,70 @@ export class Grafeno {
     return new Namespace(this, name);
   }
 
-  health(): Promise<{ status: string; version: string; layout: number }> {
+  health(): Promise<{ status: string; version: string; layout?: number }> {
     return this.request("GET", "/health");
+  }
+
+  /**
+   * What the engine is and can do (`GET /v1/about`, public). An engine from
+   * before it answers 404: the client then tells what it can from `/health`
+   * (`legacy: true`, the capabilities of that time).
+   */
+  async about(): Promise<About> {
+    try {
+      this.#about = await this.request<About>("GET", "/v1/about");
+    } catch (error) {
+      if (!(error instanceof GrafenoError) || error.status !== 404) throw error;
+      const health = await this.health();
+      this.#about = {
+        product: "grafeno",
+        version: health.version,
+        api: { version: 1, supported: [1] },
+        layout: health.layout ?? 0,
+        capabilities: [...LEGACY_CAPABILITIES],
+        auth: { token: true, accounts: true, open: false, password_sign_in: true },
+        cluster: null,
+        legacy: true,
+      };
+    }
+    return this.#about;
+  }
+
+  /**
+   * Checks the engine before using it: reads `about()` and fails with
+   * `incompatible` (status 0) if it speaks no API version this client
+   * does. Afterwards `supports()` answers from what it said.
+   */
+  async connect(): Promise<About> {
+    const about = await this.about();
+    const shared = about.api.supported.filter((version) => API_VERSIONS.includes(version));
+    if (shared.length === 0) {
+      throw new GrafenoError(
+        0,
+        "incompatible",
+        `the engine ${about.version} speaks API ${about.api.supported.join(", ")}; this client speaks ${API_VERSIONS.join(", ")}`,
+        { engine: about.version, engineApi: about.api.supported, clientApi: [...API_VERSIONS] },
+      );
+    }
+    return about;
+  }
+
+  /** What the engine said about itself, once `about()` or `connect()` ran. */
+  get engine(): About | undefined {
+    return this.#about;
+  }
+
+  /**
+   * Whether the engine can do `capability` (`"audit"`, `"query.split"`, …),
+   * from `about()` or `connect()`; false before either ran.
+   */
+  supports(capability: string): boolean {
+    return this.#about?.capabilities.includes(capability) ?? false;
+  }
+
+  /** The settings the server runs with, without secrets (superusers; capability `settings`). */
+  settings(): Promise<Record<string, unknown>> {
+    return this.request("GET", "/v1/settings");
   }
 
   /** Every namespace that has nodes, in name order. */

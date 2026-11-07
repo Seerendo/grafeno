@@ -60,6 +60,9 @@ pub struct AppState {
     pub group: u64,
     /// Every group of this member, once they are all up (13.5).
     pub groups: crate::groups::Slot,
+    /// The settings the server runs with, without secrets
+    /// (`GET /v1/settings`).
+    pub settings: Arc<Value>,
 }
 
 /// Where writes go: the group-commit writer of a single server, or the
@@ -195,6 +198,7 @@ impl AppState {
             runners: Arc::default(),
             group: 0,
             groups: Arc::default(),
+            settings: Arc::new(json!({})),
         }
     }
 
@@ -273,6 +277,12 @@ impl AppState {
 
     pub fn with_auth(mut self, auth: crate::accounts::AuthConfig) -> Self {
         self.auth = auth;
+        self
+    }
+
+    /// What `GET /v1/settings` reports.
+    pub fn with_settings(mut self, settings: Value) -> Self {
+        self.settings = Arc::new(settings);
         self
     }
 }
@@ -422,6 +432,9 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
             axum::routing::delete(crate::accounts::revoke_key),
         )
         .route("/keys/{name}/rotate", post(crate::accounts::rotate_key))
+        // What this engine is and runs with (15.3).
+        .route("/about", get(crate::about::about))
+        .route("/settings", get(crate::about::settings))
         // Accounts and sign-in (14.1).
         .route("/auth/status", get(crate::accounts::status))
         .route("/auth/setup", post(crate::accounts::setup))
@@ -516,7 +529,8 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         ))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
         .route_layer(middleware::from_fn_with_state(state.clone(), admit))
-        .route_layer(middleware::from_fn_with_state(state.clone(), observe));
+        .route_layer(middleware::from_fn_with_state(state.clone(), observe))
+        .layer(middleware::from_fn(crate::about::api_header));
     // No interface here (15.1): `/` and the Studio's old place say where
     // it went.
     let app = Router::new()

@@ -633,6 +633,10 @@ pub fn need(method: &str, path: &str) -> Need {
         ["auth", "signin"] | ["auth", "refresh"] | ["auth", "setup"] | ["auth", "status"] => {
             Need::Public
         }
+        // What the engine is: its version, API version and capabilities.
+        ["about"] => Need::Public,
+        // The settings it runs with (no secrets, but its limits and paths).
+        ["settings"] => Need::Owner,
         // Their own sessions, password and keys; the handlers check more.
         ["auth", ..] | ["keys", ..] => Need::Caller,
         ["accounts", ..] => Need::Server(Act::ManageAccounts),

@@ -2,6 +2,7 @@
 //! stdio ([`mcp`]), and an interactive console ([`shell`]). The `grafeno`
 //! binary runs them.
 
+pub mod about;
 pub mod access_cli;
 pub mod accounts;
 pub mod admin;

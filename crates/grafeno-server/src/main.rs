@@ -162,6 +162,15 @@ enum Command {
         #[command(flatten)]
         target: KeysTarget,
     },
+    /// Recover a backup into a new database file: its pages checked, its
+    /// layout upgraded and its namespaces verified on a private copy; the
+    /// backup is only read and an existing file is never replaced.
+    Restore {
+        /// The backup (`grafeno backup` or `GET /v1/backup`).
+        backup: PathBuf,
+        /// The new database file (it must not exist).
+        output: PathBuf,
+    },
     /// List the namespaces with their node and edge counts.
     Namespaces {
         #[command(flatten)]
@@ -956,6 +965,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             }
+        }
+        Command::Restore { backup, output } => {
+            let bytes = Grafeno::recover_backup(&backup, &output)?;
+            println!(
+                "Restored {} into {} ({bytes} bytes).",
+                backup.display(),
+                output.display()
+            );
         }
         Command::Cluster(command) => match command {
             ClusterCommand::Status { target } => cluster_call(&target, "GET", "", None)?,
