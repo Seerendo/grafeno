@@ -264,6 +264,12 @@ presentan el proyecto y los primeros pasos.
   servers, the local service, clusters and several windows; measured
   against Electron and kept on Tauri.
 
-Next, the rest of phase 15: two products with two releases; then
+- **Phase 15.5, two products, two releases:** the engine (`engine-v…`
+  tags, its CHANGELOG.md) and Grafeno Studio with Grafeno Desktop
+  (`desktop-v…` tags, its own change log with the engines it works with)
+  release apart, and install side by side without touching each other's
+  files or data, as tests on Debian and Fedora show.
+
+Next, phase 16:
 integrations (Grafito, Python bindings). The plan is in
 [DESIGN.md](../DESIGN.md).

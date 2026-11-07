@@ -404,7 +404,7 @@ without a current user. They remain possible for embedded use.
     a complete role-based access control, as most databases have: users who
     sign in, roles and privileges granted with `GRANT` and `REVOKE`, rights
     down to labels, properties and records, and an audit log.
-15. **Engine and interface apart** (in progress, 15.1 to 15.4 done; in five steps; see below):
+15. **Engine and interface apart** (done, in five steps; see below):
     the engine's installers install only the engine (Windows `.exe`, Linux
     `.deb`, `.rpm` and a `curl` one-liner), as a professional installation
     in the way PostgreSQL's is, with no Docker needed; and the interface
@@ -3226,7 +3226,7 @@ As built (the app in gfStudio, `desktop/`; the engine's part here):
   smaller, and a web runtime that Windows updates. Rendering on WebKitGTK
   (Linux) was not measured: no Linux desktop was at hand. Tauri is kept.
 
-**15.5 Two products, two releases.**
+**15.5 Two products, two releases** (done).
 
 - Separate versions and change logs; separate release workflows, started by
   their own tags (`engine-v…`, `desktop-v…`), each building its installers
@@ -3241,6 +3241,51 @@ As built (the app in gfStudio, `desktop/`; the engine's part here):
   app's own guide, with the engine versions it supports.
 - Done when: a tagged release of each product builds and passes its install
   tests on its own.
+
+As built (the products already live in two repositories since 15.1):
+
+- The engine (this repository): version 0.1.0, `CHANGELOG.md` with a
+  section per version (its release's notes), releases started by
+  `engine-v<version>` tags; the workflow refuses a tag that does not name
+  the version in `Cargo.toml` or has no section in the change log. The
+  one-liner asks for `engine-v<version>` (`--version 0.1.0`), and the
+  winget manifests point at those tags.
+- Grafeno Studio and Grafeno Desktop (gfStudio): one product, version
+  0.2.0 (`desktop/Cargo.toml`, `desktop/tauri.conf.json` and
+  `studio/package.json` must agree), its own `CHANGELOG.md` saying which
+  engines each version works with (API version 1, engine 0.1.0 or later),
+  releases started by `desktop-v<version>` tags: the Windows installers
+  (`.exe`, `.msi`, for the current user), the Linux packages (`.deb`,
+  `.rpm`, `.AppImage`, built on the oldest supported runner) and the
+  Studio's web build as a `.zip`, with checksums, minisign signatures and
+  Windows code signing when their secrets exist.
+- Install tests per product: the engine's `installers` workflow (15.2)
+  shows its packages bring nothing graphical; gfStudio's `installers`
+  workflow builds the desktop packages and the engine's from their
+  repositories and installs them side by side. `desktop/packaging/
+  test-install.sh` passes in Debian 12 and Fedora 42 containers: the
+  desktop package alone brings no service, no engine binary, no
+  `grafeno` user and no dependency on the engine; with the engine beside
+  it and an instance made, removing the desktop leaves the engine and its
+  files byte for byte, reinstalling and upgrading the desktop too, and
+  removing the engine leaves the desktop and the data. On Windows the
+  workflow installs the engine (its service, data in its own folder) and
+  the desktop (`/S`, for the user), checks that the desktop brings no
+  service and no `grafeno.exe`, that removing it leaves the service
+  running with its data, and that removing the engine leaves the desktop
+  and the data; it runs once gfStudio has its GitHub repository (it has
+  none yet), and was not run on this laptop, where installing the engine's
+  setup would replace a real service.
+- The Linux packages of the desktop app, built in a container on Debian
+  12 (`desktop/packaging/Dockerfile`): 6.1 MB as a `.deb` or an `.rpm`.
+- Documentation: `docs/install.md` is the engine's (every way of
+  installing it, instances, upgrades, the paths, and how the two products'
+  releases relate); the desktop app's guide is its own `README.md`, with
+  the engines it works with.
+- Not done, and why: no release of either product has been tagged yet
+  (the first `engine-v0.1.0` and `desktop-v0.2.0` are the owner's to
+  push), so "a tagged release builds" is shown by the same jobs running on
+  pushes, not by a published release.
 
 ## Measurements and test environments
 
