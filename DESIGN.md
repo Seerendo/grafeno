@@ -401,7 +401,7 @@ without a current user. They remain possible for embedded use.
     a complete role-based access control, as most databases have: users who
     sign in, roles and privileges granted with `GRANT` and `REVOKE`, rights
     down to labels, properties and records, and an audit log.
-15. **Engine and interface apart** (in progress, 15.1 done, 15.2 begun; in five steps; see below):
+15. **Engine and interface apart** (in progress, 15.1 and 15.2 done; in five steps; see below):
     the engine's installers install only the engine (Windows `.exe`, Linux
     `.deb`, `.rpm` and a `curl` one-liner), as a professional installation
     in the way PostgreSQL's is, with no Docker needed; and the interface
@@ -2899,7 +2899,7 @@ As built:
 - Tests: `http.rs` (the note at `/` and `/studio/…`, CORS), `config.rs`
   (older settings with `studio` load), the whole workspace with no Node.
 
-**15.2 A professional installation of the engine** (begun: the installers).
+**15.2 A professional installation of the engine** (done).
 
 Today: `install.sh` (`curl -fsSL …/install.sh | sh`) downloads a release
 archive, checks its SHA-256 and installs the binary, and with `--service`
@@ -2956,39 +2956,121 @@ upgrades that protect the data, a guided Windows setup, and signatures.
   initialize, upgrade (with the backup taken) and remove the engine,
   interactively and unattended, and `grafeno doctor` passes after each.
 
-Built so far (the installers, the first part):
+As built (in two parts: the installers, then the rest):
 
 - The one-liner (`install.sh`): as root it reads `/etc/os-release` and
-  installs the release's package with the system's manager: the `.rpm` with
-  `dnf` or `yum` on RHEL, AlmaLinux, Rocky, Oracle Linux, CentOS Stream,
-  Fedora and Amazon Linux, the `.deb` with `apt` on Debian, Ubuntu and their
-  derivatives; elsewhere, without root or with `--binary`, the static
-  binary (with `--service`, the unit), labelled for SELinux. Every download
-  is checked against its published SHA-256, which is now required. Options
-  as flags or environment variables (`--version`, `--binary`, `--prefix`,
-  `--service`, `--no-start`). Releases carry the packages also under names
-  without the version, which the latest-release URL needs.
-- The packages declare what their scripts need (`shadow-utils`, `passwd`),
-  and the setup step can leave the service enabled but stopped
-  (`GRAFENO_NO_START`).
-- The Windows setup is guided as PostgreSQL's is: the program folder, the
-  data folder, the port, only this computer or the network (with a
-  firewall rule, removed on uninstall), the service and the PATH; the same
-  as parameters for an unattended install (`/DATADIR=`, `/PORT=`,
-  `/NETWORK=`, `/DIR=`, `/TASKS=`). An upgrade asks nothing about settings
-  and keeps them; uninstalling keeps the settings and the data.
-- Tested on clean machines: `packaging/linux/test-install.sh` runs the
-  one-liner as root and as a user in AlmaLinux 9 and 8, Rocky 9, Fedora 42,
-  Debian 12 and Ubuntu 24.04 containers (all pass: the version, the user,
-  the settings, the server answering with them, nothing graphical
-  installed or required), and boots systemd in AlmaLinux 9 (the service
-  runs and is enabled; removing the package keeps the data). The
-  `installers` workflow repeats it, and installs, upgrades and uninstalls
-  the Windows setup unattended on a clean Windows runner.
-- Not built yet (the rest of 15.2): signed APT and DNF repositories and
-  signed packages, aarch64 packages, `grafeno setup` and several instances,
-  backups taken by package upgrades, `grafeno doctor`, a `winget` package,
-  and SELinux and AppArmor policies.
+  `uname -m` (x86_64 or aarch64), adds Grafeno's signed repository (DNF on
+  RHEL, AlmaLinux, Rocky, Oracle Linux, CentOS Stream, Fedora and Amazon
+  Linux; APT on Debian, Ubuntu and their derivatives) and installs the
+  package from it, so updates come with the system's; when the repository
+  cannot be reached, or with `--no-repo`, it installs the release's
+  package file. Elsewhere, without root or with `--binary`, the static
+  binary; `--service` adds the system service as root and a systemd user
+  service otherwise (settings and data in the home folder). Every download
+  is checked against its published SHA-256, and against its minisign
+  signature when a key is known (a wrong key stops it). Options as flags
+  or environment variables (`--version`, `--binary`, `--no-repo`,
+  `--prefix`, `--service`, `--no-start`, mirrors).
+- Packages for x86_64 and aarch64 (`.deb` amd64 and arm64, `.rpm` x86_64
+  and aarch64, `.tar.gz`), built by one Dockerfile: aarch64 is
+  cross-compiled with Zig (`cargo zigbuild`); releases also carry them
+  under names without the version, which the latest-release URL needs.
+  Sizes of 0.1.0: the `.deb` 6.1 MB (amd64) and 5.2 MB (arm64), the `.rpm`
+  6.7 MB (x86_64, with the SELinux module) and 6.1 MB (aarch64), the
+  `.tar.gz` 9.2 and 8.4 MB; the Windows setup 7.8 MB.
+- Signed APT and DNF repositories (`packaging/repo/build-repo.sh`): signed
+  `.rpm` files and `repomd.xml`, an APT `Release` signed as `InRelease`
+  and `Release.gpg`, the public key and `grafeno.repo` beside them; new
+  packages join the old, so earlier versions stay installable (and
+  downgrades work). The release workflow publishes them on the `gh-pages`
+  branch for GitHub Pages, and signs every release file with minisign, the
+  repositories with GnuPG, and the Windows program and setup with a
+  code-signing certificate, each when its secret is set.
+- `grafeno setup` initializes an instance as `initdb` and
+  `postgresql-setup` do: the data folder (0750, the `grafeno` user's), the
+  settings (a fresh token; address, port, network, durability, memory;
+  0640 root:grafeno), the database and its first administrator (a
+  superuser with a password; or none, with `--no-admin`), and the service,
+  enabled and started. Interactive by default; every answer a flag or a
+  line of an answers file (`--answers`, `--unattended`). A database already
+  in the folder is used as it is. A data folder outside `/var/lib/grafeno`
+  is added to the unit's `ReadWritePaths` (a drop-in), to AppArmor's
+  `local/grafeno` and to SELinux's labels. TLS is not among the questions:
+  the engine serves plain HTTP (behind a proxy for TLS), as before.
+- Several instances on one machine: `default` is `grafeno.toml` and
+  `grafeno.service` (what the packages make on a first install, so
+  existing installs are the default instance); any other name is
+  `<name>.toml` and the templated `grafeno@<name>.service`, with its data
+  in `/var/lib/grafeno/<name>` and its logs in journald. `grafeno
+  instances` lists them (address, service state, database), `grafeno
+  instances drop <name> [--purge]` removes one. On Windows there is one
+  instance, the `Grafeno` service.
+- Upgrades protect the data: the engine itself, before upgrading an older
+  file's layout, copies the file as it is to `grafeno.layout-<old>.redb`
+  beside it (`Grafeno::copy_before_upgrade`, on by default in
+  `OpenOptions`; `copy_before_upgrade = false` in the settings), on every
+  system and for every way of installing; one copy per database, the next
+  upgrade's replacing it; no room for the copy means no upgrade and the
+  file untouched. `grafeno instances rollback <name>` stops the service and
+  puts the copy back (the newer file set aside, not deleted) for the
+  previous version, installed next. Package upgrades restart every running
+  instance. Removing the packages keeps the data; purging the `.deb`
+  removes `/etc/grafeno` and `/var/lib/grafeno` (Debian's rule; the
+  earlier "kept even on purge" is gone); with the `.rpm`, `grafeno
+  instances drop --purge`.
+- `grafeno doctor` checks each instance (or one): the settings and whether
+  they are open to every user, the data folder and whether the service's
+  user can write it, the database's layout (from the server when it runs:
+  `/health` now gives `layout`; else from the file, read without upgrading
+  it: `Grafeno::file_layout`), whether the running server is the installed
+  version, free disk space against the database's size (the copy before
+  an upgrade needs as much), copies left by upgrades, the service, and the
+  port. It fails (exit 1) on a broken check; warnings and notes do not.
+- Confinement: an AppArmor profile (`/etc/apparmor.d/grafeno`, enforced;
+  selected by the units with `AppArmorProfile=-grafeno`, so `grafeno` run
+  by hand is not confined) in the `.deb`, and an SELinux policy module in
+  the `.rpm` (`grafeno_t` entered from systemd, `grafeno_etc_t`,
+  `grafeno_var_lib_t`, `grafeno_port_t` for 7810-7819). The SELinux domain
+  is permissive: no enforcing SELinux machine was available to prove it,
+  so it logs what it would deny and denies nothing.
+- Windows: the guided setup also asks the account the service runs as
+  (`NT SERVICE\Grafeno`, a virtual account given Modify on Grafeno's two
+  folders and nothing else, by default; or LocalSystem) and the first
+  administrator (name and password, handed to `grafeno users create` on
+  its standard input from a file deleted right after); upgrades keep the
+  account; uninstalling asks whether to remove the settings and the data
+  (no by default; `/PURGE=1` unattended). The service writes to the Event
+  Log (source `Grafeno`, registered by the setup; `grafeno.exe` carries a
+  one-message table so Event Viewer shows the text) and to `grafeno.log`,
+  rotated at 10 MiB. `grafeno setup` on Windows makes the settings, the
+  administrator and the service in one step (for the bare zip). winget
+  manifests (`packaging/windows/winget/make-manifests.py`, validated by
+  `winget validate`) come with each release.
+- Tested on clean machines: `packaging/linux/test-install.sh --repo
+  --systemd --arm64` passes in AlmaLinux 9 and 8, Rocky 9, Fedora 42,
+  Debian 12 and Ubuntu 24.04 containers, from the release's files and
+  from the repositories, and in AlmaLinux 9 and Debian 12 on aarch64
+  (emulated): checksums and signatures, the package managers checking the
+  repositories' signatures, the default instance answering, `grafeno
+  doctor`, nothing graphical, and purging the `.deb`. With systemd
+  (AlmaLinux 9): a second instance with an administrator who signs in; an
+  instance with its data in `/srv` (the drop-in written), dropped with its
+  data; a layout-16 database copied before its upgrade, then rolled back;
+  a package upgrade restarting the instances; removal keeping the data.
+  The `installers` workflow repeats it, installs the `.deb` on an Ubuntu
+  runner with AppArmor enforced (the service and an instance with its data
+  elsewhere confined, working, nothing denied), and on a Windows runner
+  installs (the virtual account, an administrator who signs in, events in
+  the Event Log, `grafeno doctor`), upgrades, uninstalls keeping the data,
+  reinstalls over it and uninstalls with `/PURGE=1`.
+- Not done, and why: the repositories, minisign and code signing need
+  keys and a certificate only the project's owner can make (the workflow
+  uses them once the secrets exist; `install.sh` checks minisign once its
+  `MINISIGN_KEY` is set), GitHub Pages must be turned on for `gh-pages`,
+  and the winget manifests must be submitted to `microsoft/winget-pkgs`
+  after a release (it will also ask for a license). Several instances on
+  Windows (one service each) and an enforcing SELinux policy are left for
+  later.
 
 **15.3 The public API as the only contract.**
 

@@ -11,15 +11,15 @@ engines through their API.
 
 Every way of installing the server gives the same `grafeno` program: the
 HTTP server, the MCP server, the shell and the administration commands, and
-nothing else. The installers also run it as a service
-that starts with the system.
+nothing else. The installers also run it as a service that starts with the
+system.
 
 | System | File | What it sets up |
 | ------ | ---- | --------------- |
-| Windows 10/11, Server 2019+ (x64) | `grafeno-<version>-windows-x64-setup.exe` | `C:\Program Files\Grafeno`, the `Grafeno` service, PATH, Start menu shortcuts |
-| Debian, Ubuntu and derivatives (x86_64) | `grafeno_<version>-1_amd64.deb` | `/usr/bin/grafeno`, the `grafeno` systemd service and user |
-| Fedora, RHEL, Rocky, Alma, openSUSE (x86_64) | `grafeno-<version>-1.x86_64.rpm` | the same |
-| Any Linux (x86_64) | `grafeno-x86_64-unknown-linux-musl.tar.gz`, or `install.sh` | the binary; the service with `--service` |
+| Windows 10/11, Server 2019+ (x64) | `grafeno-<version>-windows-x64-setup.exe`, or `winget install Seerendo.Grafeno` | `C:\Program Files\Grafeno`, the `Grafeno` service, PATH, Start menu shortcuts |
+| Debian, Ubuntu and derivatives (amd64, arm64) | Grafeno's APT repository, or `grafeno_<version>-1_<arch>.deb` | `/usr/bin/grafeno`, the `grafeno` user, the default instance and its systemd service |
+| Fedora, RHEL, Rocky, Alma, Oracle Linux, Amazon Linux (x86_64, aarch64) | Grafeno's DNF repository, or `grafeno-<version>-1.<arch>.rpm` | the same |
+| Any Linux (x86_64, aarch64) | `grafeno-<arch>-unknown-linux-musl.tar.gz`, or `install.sh` | the binary; the service with `--service` |
 
 The Linux binary is static (musl): the same file runs on any distribution,
 whatever its glibc version.
@@ -31,63 +31,66 @@ client or Grafeno Studio connects with the token the installer generated:
 grafeno config token
 ```
 
-(On Linux, as root: `sudo grafeno config token`.)
+(On Linux, as root: `sudo grafeno config token`.) `grafeno doctor` checks
+the installation: the settings and their permissions, the data folder, the
+database's layout, free disk space, the port and the service.
 
-### Windows
+### The one-liner: any Linux, AlmaLinux and RHEL included
 
-Run `grafeno-<version>-windows-x64-setup.exe` (it asks for administrator
-rights). As PostgreSQL's setup does, it asks:
-
-- the **program folder** (`C:\Program Files\Grafeno` by default);
-- the **data folder**, where the service keeps its database
-  (`C:\ProgramData\Grafeno\data` by default; another disk is fine);
-- the **port** (7810 by default);
-- **who may connect**: only this computer (`127.0.0.1`), or other computers
-  too (every network interface, with a firewall rule for the port); every
-  request needs the token or an account either way;
-- whether to **run Grafeno as a Windows service** (it starts with Windows)
-  and **add grafeno to the system PATH**.
-
-It writes `C:\ProgramData\Grafeno\grafeno.toml` (address, data, a new
-token) and starts the `Grafeno` service. The Start menu gets *Grafeno Shell*
-(connected to the service) and *Grafeno settings*. The service logs to
-`C:\ProgramData\Grafeno\grafeno.log`.
-
-Unattended (scripts, provisioning), the same answers are parameters:
-
-```powershell
-.\grafeno-0.1.0-windows-x64-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /DIR="C:\Grafeno" /DATADIR="D:\GrafenoData" /PORT=7810 /NETWORK=0 /TASKS="service,path"
+```bash
+curl -fsSL https://raw.githubusercontent.com/Seerendo/grafeno/main/install.sh | sudo sh
 ```
 
-`/NETWORK=1` listens on every interface and opens the port in the firewall;
-`/LOG=setup.log` keeps a log of the install.
+As root, it finds the distribution in `/etc/os-release` and the processor
+(x86_64 or aarch64), adds Grafeno's signed repository and installs the
+package with the system's package manager, so that upgrades come with the
+system's (`dnf upgrade`, `apt upgrade`). The result is the same as
+installing the package by hand: the `grafeno` user, the default instance,
+the systemd service, started.
 
-Manage the service like any other (`services.msc`, or PowerShell as
-administrator):
+| Distribution | What it installs |
+| --- | --- |
+| RHEL, AlmaLinux, Rocky, Oracle Linux, CentOS Stream, Fedora, Amazon Linux | the DNF repository and the `.rpm`, with `dnf` (or `yum`) |
+| Debian, Ubuntu and their derivatives | the APT repository and the `.deb`, with `apt` |
+| Anything else | the static binary to `/usr/local/bin` (add `--service` for the service) |
 
-```powershell
-Restart-Service Grafeno
+If the repository cannot be reached (or with `--no-repo`), it installs the
+release's package file instead. Without root (no `sudo`), or with
+`--binary`, it installs the binary into `~/.local/bin`; `--service` then
+adds a systemd **user** service, with its settings in
+`~/.config/grafeno/grafeno.toml` and its data in `~/.local/share/grafeno`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Seerendo/grafeno/main/install.sh | sh -s -- --service
 ```
 
-Upgrading runs the new installer over the old one: it stops the service,
-replaces the program, keeps the settings and the data (it asks nothing about
-them again) and starts the service. Uninstalling (Settings → Apps, or
-`unins000.exe /VERYSILENT`) removes the program, the service, the firewall
-rule and the PATH entry, and keeps `C:\ProgramData\Grafeno` and the data
-folder.
-
-Without the installer, `grafeno-x86_64-pc-windows-msvc.zip` has the bare
-`grafeno.exe`; as administrator, the service can then be set up by hand:
-
-```powershell
-grafeno config init
-```
-
-```powershell
-grafeno service install
-```
+Every file it downloads is checked against the SHA-256 published with the
+release, and against its minisign signature when a key is known
+(`GRAFENO_MINISIGN_KEY`, and `minisign` installed); a mismatch stops it. On
+SELinux systems it labels a binary it installs so systemd may run it.
+Options, as flags or environment variables (for unattended use):
+`--version 0.1.0` (`GRAFENO_VERSION`), `--binary` (`GRAFENO_METHOD=binary`),
+`--no-repo` (`GRAFENO_REPO=0`), `--prefix DIR` (`GRAFENO_PREFIX`),
+`--service`, `--no-start`; `GRAFENO_BASE_URL` and `GRAFENO_REPO_URL` point
+it at mirrors.
 
 ### Debian and Ubuntu
+
+From the repository (what the one-liner does):
+
+```bash
+sudo install -d /etc/apt/keyrings && curl -fsSL https://seerendo.github.io/grafeno/grafeno.asc | sudo tee /etc/apt/keyrings/grafeno.asc >/dev/null
+```
+
+```bash
+echo "deb [signed-by=/etc/apt/keyrings/grafeno.asc] https://seerendo.github.io/grafeno/deb stable main" | sudo tee /etc/apt/sources.list.d/grafeno.list
+```
+
+```bash
+sudo apt update && sudo apt install grafeno
+```
+
+Or a downloaded package:
 
 ```bash
 sudo apt install ./grafeno_0.1.0-1_amd64.deb
@@ -95,22 +98,38 @@ sudo apt install ./grafeno_0.1.0-1_amd64.deb
 
 ### Fedora, RHEL and derivatives
 
+From the repository (what the one-liner does):
+
 ```bash
-sudo dnf install ./grafeno-0.1.0-1.x86_64.rpm
+sudo curl -fsSL https://seerendo.github.io/grafeno/grafeno.repo -o /etc/yum.repos.d/grafeno.repo
 ```
 
-Fedora 45 and later reject unsigned packages; until releases are signed,
-add `--nogpgcheck` to `dnf` (or `--nosignature` to `rpm -i`). The one-liner
-does so after checking the package's SHA-256.
+```bash
+sudo dnf install grafeno
+```
+
+The repository's packages and metadata are signed; `dnf` asks to trust the
+key the first time (`gpgkey` in `grafeno.repo`). A downloaded package is
+not signed (the repository's copy is): install it with `--nogpgcheck` after
+checking its SHA-256:
+
+```bash
+sudo dnf install --nogpgcheck ./grafeno-0.1.0-1.x86_64.rpm
+```
 
 #### What the packages do
 
 - Create the `grafeno` system user and `/var/lib/grafeno` (its data).
-- Create `/etc/grafeno/grafeno.toml` with a new token, readable by root and
-  the `grafeno` group only. Upgrades keep it.
-- Install and start the `grafeno` systemd service, sandboxed so that it can
-  write its data folder and nothing else (`systemd-analyze security
-  grafeno` rates it 1.3, "OK").
+- On a first install, create the **default instance** (`grafeno setup`):
+  `/etc/grafeno/grafeno.toml` with a new token, readable by root and the
+  `grafeno` group only, and the `grafeno` systemd service, enabled and
+  started. Upgrades keep the settings and restart every running instance.
+- Run the service sandboxed, so that it can write its data folder and
+  nothing else (`systemd-analyze security grafeno` rates it 1.3, "OK"),
+  and confined: the `.deb` loads an **AppArmor** profile (enforced); the
+  `.rpm` installs an **SELinux** module (the `grafeno_t` domain and labels
+  for the program, the settings, the data and ports 7810-7819; the domain
+  is permissive for now: it logs, and denies nothing).
 - Install nothing graphical: no menu entry, no icon, no dependency on a
   desktop stack.
 
@@ -122,40 +141,175 @@ systemctl status grafeno
 journalctl -u grafeno -f
 ```
 
-Removing the package stops the service and keeps `/var/lib/grafeno` and
-`/etc/grafeno`, even on purge: they may be the only copy of someone's
-memory.
+Removing the package stops every instance and keeps `/etc/grafeno` and
+`/var/lib/grafeno`. Purging the `.deb` (`apt purge grafeno`) removes them,
+as Debian expects: take a `grafeno backup` first if the data matters. With
+the `.rpm` (which has no purge), `grafeno instances drop <name> --purge`
+removes an instance's data before the package is removed.
 
-### The one-liner: any Linux, AlmaLinux and RHEL included
+### Instances: `grafeno setup`
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/Seerendo/grafeno/main/install.sh | sudo sh
-```
-
-As root, it finds the distribution in `/etc/os-release` and installs the
-release's package with its package manager, so the result is the same as
-installing the package by hand (the `grafeno` user, the settings, the
-systemd service, started):
-
-| Distribution | What it installs |
-| --- | --- |
-| RHEL, AlmaLinux, Rocky, Oracle Linux, CentOS Stream, Fedora, Amazon Linux | the `.rpm`, with `dnf` (or `yum`) |
-| Debian, Ubuntu and their derivatives | the `.deb`, with `apt` |
-| Anything else | the static binary to `/usr/local/bin` (add `--service` for the service) |
-
-Without root (no `sudo`), or with `--binary`, it installs the binary into
-`~/.local/bin`:
+An instance is a settings file, a data folder and a service, as a
+PostgreSQL cluster is. The packages make the default one; `grafeno setup`
+makes others, as `initdb` and `postgresql-setup` do, asking what its flags
+leave open:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Seerendo/grafeno/main/install.sh | sh
+sudo grafeno setup --instance team
 ```
 
-Every file it downloads is checked against the SHA-256 published with the
-release; a mismatch stops it. On SELinux systems it labels a binary it
-installs so systemd may run it. Options, as flags or environment variables
-(for unattended use): `--version 0.1.0` (`GRAFENO_VERSION`), `--binary`
-(`GRAFENO_METHOD=binary`), `--prefix DIR` (`GRAFENO_PREFIX`), `--service`,
-`--no-start`; `GRAFENO_BASE_URL` points it at a mirror.
+It asks for the data folder (`/var/lib/grafeno/team`), the port (the next
+free one after 7810), whether other computers may connect, and the first
+administrator (a superuser who signs in with a password); then it writes
+`/etc/grafeno/team.toml` (with a new token), creates the database and the
+administrator, and enables and starts `grafeno@team.service`. Unattended,
+every answer is a flag, or a line of an answers file:
+
+```bash
+sudo grafeno setup --unattended --instance team --data /srv/grafeno-team --port 7820 --network --admin root --admin-password-file /root/pw
+```
+
+```toml
+# answers.toml, for grafeno setup --answers answers.toml --unattended
+instance = "team"
+data = "/srv/grafeno-team"
+port = 7820
+network = true
+durability = "eventual"
+memory_mb = 1024
+admin = "root"
+admin_password_file = "/root/pw"
+```
+
+A data folder outside `/var/lib/grafeno` is added to the service's
+`ReadWritePaths` (a drop-in), to the AppArmor profile (`local/grafeno`)
+and to SELinux's labels. `--no-admin` leaves only the token (until
+`grafeno users create` makes an account); `--no-start` enables the service
+without starting it.
+
+```bash
+grafeno instances
+```
+
+```text
+NAME         ADDRESS                SERVICE                  DATABASE
+default      127.0.0.1:7810         running                  /var/lib/grafeno/grafeno.redb
+team         0.0.0.0:7820           running                  /srv/grafeno-team/grafeno.redb
+```
+
+Each instance has its own settings, data, port and logs
+(`journalctl -u grafeno@team`). `sudo grafeno instances drop team` stops
+and removes one (its service and settings; `--purge` its data too).
+
+### Upgrades protect the data
+
+When a new version opens a database whose layout is older (an upgrade that
+changes the file's format), it first copies the file, as it is, to
+`grafeno.layout-<old>.redb` beside it, and only then upgrades it. If the
+copy cannot be made (no room on the disk), the server does not start and
+the file is untouched; `grafeno doctor` warns ahead of time when free space
+is short. One copy is kept per instance (the next upgrade's replaces it);
+`grafeno doctor` lists it with its size, to remove when it is no longer
+needed. `copy_before_upgrade = false` in the settings turns it off.
+
+To go back to the previous version after such an upgrade:
+
+```bash
+sudo grafeno instances rollback default
+```
+
+```bash
+sudo dnf downgrade grafeno
+```
+
+(or `sudo apt install grafeno=<version>-1`). The first command stops the
+service and puts the copy back (what was written since is kept aside as
+`grafeno.before-rollback-<time>.redb`); installing the previous version
+starts it again.
+
+### Windows
+
+Run `grafeno-<version>-windows-x64-setup.exe` (it asks for administrator
+rights), or `winget install Seerendo.Grafeno`. As PostgreSQL's setup does,
+it asks:
+
+- the **program folder** (`C:\Program Files\Grafeno` by default);
+- the **data folder**, where the service keeps its database
+  (`C:\ProgramData\Grafeno\data` by default; another disk is fine);
+- the **port** (7810 by default);
+- **who may connect**: only this computer (`127.0.0.1`), or other computers
+  too (every network interface, with a firewall rule for the port); every
+  request needs the token or an account either way;
+- the **account the service runs as**: `NT SERVICE\Grafeno`, a virtual
+  account that may use only Grafeno's folders (the default), or
+  LocalSystem;
+- the **first administrator**: a name and a password (or none, and the
+  token works meanwhile);
+- whether to **run Grafeno as a Windows service** (it starts with Windows)
+  and **add grafeno to the system PATH**.
+
+It writes `C:\ProgramData\Grafeno\grafeno.toml` (address, data, a new
+token) and starts the `Grafeno` service. The Start menu gets *Grafeno Shell*
+(connected to the service) and *Grafeno settings*. The service writes its
+events to the Event Log (Windows Logs → Application, source `Grafeno`) and
+to `C:\ProgramData\Grafeno\grafeno.log`, which turns into `grafeno.log.1`
+at 10 MiB.
+
+Unattended (scripts, provisioning), the same answers are parameters:
+
+```powershell
+.\grafeno-0.1.0-windows-x64-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /DIR="C:\Grafeno" /DATADIR="D:\GrafenoData" /PORT=7810 /NETWORK=0 /ACCOUNT=virtual /ADMIN=admin /ADMINPASSWORD="..." /TASKS="service,path"
+```
+
+`/NETWORK=1` listens on every interface and opens the port in the firewall;
+`/ACCOUNT=system` runs the service as LocalSystem; `/LOG=setup.log` keeps a
+log of the install.
+
+Manage the service like any other (`services.msc`, or PowerShell as
+administrator):
+
+```powershell
+Restart-Service Grafeno
+```
+
+Upgrading runs the new installer over the old one (or `winget upgrade
+Seerendo.Grafeno`): it stops the service, replaces the program, keeps the
+settings, the data and the service's account (it asks nothing about them
+again) and starts the service. Uninstalling (Settings → Apps) removes the
+program, the service, the firewall rule and the PATH entry, and asks
+whether to remove the settings and the data too (no by default);
+unattended, `unins000.exe /VERYSILENT` keeps them and
+`unins000.exe /VERYSILENT /PURGE=1` removes them.
+
+Without the installer, `grafeno-x86_64-pc-windows-msvc.zip` has the bare
+`grafeno.exe`; as administrator, `grafeno setup` creates the settings, the
+first administrator and the service in one step, or by hand:
+
+```powershell
+grafeno config init
+```
+
+```powershell
+grafeno service install --account "NT SERVICE\Grafeno"
+```
+
+(The virtual account then needs Modify on `C:\ProgramData\Grafeno` and the
+data folder, which the setup grants.)
+
+### Where everything is
+
+| What | Linux (packages) | Windows (setup) |
+| ---- | ---------------- | --------------- |
+| The program | `/usr/bin/grafeno` | `C:\Program Files\Grafeno\grafeno.exe` |
+| Settings, default instance | `/etc/grafeno/grafeno.toml` | `C:\ProgramData\Grafeno\grafeno.toml` |
+| Settings, other instances | `/etc/grafeno/<name>.toml` | (one instance) |
+| Data, default instance | `/var/lib/grafeno/grafeno.redb` | `C:\ProgramData\Grafeno\data\grafeno.redb` |
+| Data, other instances | `/var/lib/grafeno/<name>/grafeno.redb` | |
+| Copy kept before a layout upgrade | `grafeno.layout-<old>.redb` beside the database | the same |
+| The service | `grafeno.service`, `grafeno@<name>.service` | the `Grafeno` service |
+| Logs | journald (`journalctl -u grafeno`) | Event Log (Application, `Grafeno`), `C:\ProgramData\Grafeno\grafeno.log` |
+| Confinement | systemd sandbox; AppArmor `/etc/apparmor.d/grafeno`; SELinux module `grafeno` | the virtual account `NT SERVICE\Grafeno` |
+| Package scripts | `/usr/share/grafeno/setup.sh`, `stop-all.sh` | |
 
 ## A cluster of servers
 
@@ -360,6 +514,7 @@ token = "…"                 # every /v1 request needs `Authorization: Bearer <
 cors_origins = []           # origins allowed to call the API from a browser ("*": any)
 durability = "immediate"    # or "eventual": faster writes, a crash loses at most 0.5 s
 max_requests = 512          # served at once; more get 503 with Retry-After
+copy_before_upgrade = true  # copy the database before a new version upgrades its layout
 
 [query]                     # limits for each GQ query over HTTP and MCP; 0 turns one off
 timeout_secs = 30
@@ -456,27 +611,63 @@ grafeno serve --config grafeno.toml --cors-origin https://studio.example.com
 
 | Files | Command | Needs |
 | ----- | ------- | ----- |
-| Linux `.tar.gz`, `.deb`, `.rpm` | `docker build -f packaging/linux/Dockerfile --output dist/linux .` | Docker |
+| Linux `.tar.gz`, `.deb`, `.rpm`, x86_64 and aarch64 | `docker build -f packaging/linux/Dockerfile --output dist/linux .` | Docker |
+| The APT and DNF repositories | `GRAFENO_GPG_KEY=<key id> packaging/repo/build-repo.sh dist/linux site https://seerendo.github.io/grafeno` | GnuPG, rpm, createrepo_c, apt-utils |
 | Windows setup `.exe` | `cargo build --release -p grafeno-server`, then `iscc /DAppVersion=0.1.0 packaging\windows\grafeno.iss` | Rust (MSVC), Inno Setup 6 |
+| winget manifests | `python packaging/windows/winget/make-manifests.py 0.1.0 dist\grafeno-0.1.0-windows-x64-setup.exe <url> dist\winget` | Python |
 
 No Node and no graphical toolkit: the engine builds from Rust alone. The
-Linux packages also come under names without the version
-(`grafeno-linux-x86_64.rpm`, `grafeno-linux-amd64.deb`), which the one-liner
-asks the latest release for. `packaging/windows/grafeno.ico` (from
-`docs/assets/logo.svg`) is the icon of the executable, the installer and its
-shortcuts. `.github/workflows/release.yml` builds all of them and publishes
-a GitHub release when a `v*` tag is pushed.
+aarch64 binary is cross-compiled with Zig (`cargo zigbuild`), and the
+SELinux module is compiled in an AlmaLinux stage of the same Dockerfile.
+The Linux packages also come under names without the version
+(`grafeno-linux-x86_64.rpm`, `grafeno-linux-amd64.deb`,
+`grafeno-linux-aarch64.rpm`, `grafeno-linux-arm64.deb`), which the
+one-liner asks the latest release for. `packaging/windows/grafeno.ico`
+(from `docs/assets/logo.svg`) is the icon of the executable, the installer
+and its shortcuts.
+
+`.github/workflows/release.yml` builds all of them when a `v*` tag is
+pushed and publishes a GitHub release; it adds the packages to the
+repositories on the `gh-pages` branch (served by GitHub Pages). What signs
+comes from the repository's secrets, each optional:
+
+| Secret | What it signs |
+| ------ | ------------- |
+| `MINISIGN_SECRET_KEY` | every release file (`.minisig` beside each); the one-liner checks them with the public key |
+| `GPG_PRIVATE_KEY` | the repositories' metadata and the `.rpm` files in them |
+| `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD` | `grafeno.exe`, the setup and its uninstaller (Authenticode) |
+
+Making the keys, once: `minisign -G -W` (publish the public key, and set
+`MINISIGN_KEY` in `install.sh` to it), and
+`gpg --quick-gen-key "Grafeno releases" rsa4096 sign never` with no
+passphrase, exported with `gpg --armor --export-secret-keys`. GitHub Pages
+must serve the `gh-pages` branch. The winget manifests come with each
+release (`grafeno-<version>-winget.zip`), to submit to
+`microsoft/winget-pkgs`.
 
 How they are tested on clean machines:
 
-- `packaging/linux/test-install.sh [--systemd] [image ...]` serves
-  `dist/linux` as a release and runs the one-liner, as root and as a user,
-  in clean containers (AlmaLinux 9 and 8, Rocky 9, Fedora 42, Debian 12,
-  Ubuntu 24.04 by default): the version, the user, the settings, the server
-  answering with them, and nothing graphical installed. `--systemd` also
-  boots systemd in an AlmaLinux container: the service runs and is enabled,
-  and removing the package keeps the settings and the data.
-- `.github/workflows/installers.yml` runs that on Linux, and on a Windows
-  runner installs the setup unattended (its own data folder and port),
-  checks the service, the settings and the API, upgrades over it (the
-  settings kept), and uninstalls (the data kept).
+- `packaging/linux/test-install.sh [--repo] [--systemd] [--arm64] [image ...]`
+  serves `dist/linux` as a release, signed with throwaway keys, and runs the
+  one-liner, as root and as a user, in clean containers (AlmaLinux 9 and 8,
+  Rocky 9, Fedora 42, Debian 12, Ubuntu 24.04 by default): the checksum and
+  the signature (a wrong key is refused), the version, the user, the
+  settings, the server answering with them, `grafeno doctor`, nothing
+  graphical installed, and purging the `.deb`. `--repo` builds the
+  repositories with a throwaway GnuPG key and installs from them, the
+  package managers checking the signatures. `--arm64` repeats it on aarch64
+  (emulated). `--systemd` boots systemd in an AlmaLinux container: the
+  service runs and is enabled; `grafeno setup` makes a second instance with
+  an administrator who signs in, and another with its data elsewhere that
+  is then dropped with its data; an old database is copied before its
+  layout is upgraded and `grafeno instances rollback` puts it back; an
+  upgrade restarts the running instances; removing the package keeps the
+  data.
+- `.github/workflows/installers.yml` runs that, installs the `.deb` on the
+  Ubuntu runner itself with its AppArmor profile enforced (the service and
+  an instance with its data elsewhere confined, working, and denied
+  nothing), and on a Windows runner installs the setup unattended (its own
+  data folder and port, the virtual account, an administrator who signs
+  in, events readable in the Event Log, `grafeno doctor`), upgrades over it
+  (the settings and the account kept), uninstalls keeping the data,
+  installs over the kept data, and uninstalls with `/PURGE=1`.

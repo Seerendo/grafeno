@@ -239,16 +239,19 @@ presentan el proyecto y los primeros pasos.
   be installed on their own, as pgAdmin is next to PostgreSQL. The engine's
   packages install the engine only.
 
-- **Phase 15.2, the engine's installers (first part):** a one-liner that
-  installs the `.rpm` or `.deb` with the system's package manager (RHEL,
-  AlmaLinux, Rocky, Fedora, Debian, Ubuntu) or the static binary, always
-  checking checksums; a guided Windows setup (data folder, port, network
-  and firewall, unattended parameters); both tested on clean machines.
+- **Phase 15.2, the engine installed like a database server:** a
+  one-liner that adds signed APT and DNF repositories and installs the
+  package (x86_64 and aarch64), or the static binary with a system or user
+  service, checking checksums and signatures; `grafeno setup` (instances
+  as PostgreSQL clusters, `grafeno@<name>.service`), `grafeno instances`
+  and `grafeno doctor`; the engine copies a database before upgrading its
+  layout, and `grafeno instances rollback` goes back; AppArmor and SELinux
+  policies; a guided Windows setup with a virtual service account, the
+  first administrator, the Event Log and winget manifests; all of it
+  installed, upgraded and removed on clean machines.
 
-Next, the rest of phase 15: the engine and the interface apart (the
-engine installs natively like a database server, from a `curl` one-liner,
-signed APT and DNF repositories or a guided Windows setup, with no Docker
-needed; Grafeno Desktop becomes a separate product that talks to engines
-through their API); then
+Next, the rest of phase 15: the public API as the only contract, then
+Grafeno Desktop as a separate product that talks to engines through their
+API; then
 integrations (Grafito, Python bindings). The plan is in
 [DESIGN.md](../DESIGN.md).

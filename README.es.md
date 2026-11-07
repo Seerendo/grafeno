@@ -38,11 +38,13 @@ integra como biblioteca Rust.
 
 ## Instalar el motor
 
-Windows (un instalador `.exe` con el servicio), Linux (`.deb`, `.rpm` y un
-instalador de una línea con `curl` que también sirve para AlmaLinux, Rocky y
-RHEL) y un `.tar.gz`: consulta la
-[guía de instalación](docs/install.md). El motor se ejecuta como servicio en
-`127.0.0.1:7810`; su configuración está en `grafeno.toml`.
+Windows (un instalador `.exe` con el servicio, o winget), Linux en x86_64 y
+aarch64 (repositorios APT y DNF firmados, `.deb`, `.rpm` y un instalador de
+una línea con `curl` que también sirve para AlmaLinux, Rocky y RHEL) y un
+`.tar.gz`: consulta la [guía de instalación](docs/install.md). El motor se
+ejecuta como servicio en `127.0.0.1:7810`; su configuración está en
+`grafeno.toml`. `grafeno setup` agrega instancias, como los clústeres de
+PostgreSQL, y `grafeno doctor` las revisa.
 
 Desde el código, con Rust instalado:
 

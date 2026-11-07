@@ -5,9 +5,21 @@ The `grafeno` binary serves and manages a Grafeno database (installers:
 
 - `grafeno serve`: a JSON HTTP API, for applications such as Grafito, and
   no interface (Grafeno Studio is installed apart and connects to this API).
+- `grafeno setup`: initializes an instance, as `initdb` does: its data
+  folder, settings (a fresh token), first administrator and service,
+  enabled and started; interactive, or every answer as a flag or an
+  answers file (`--unattended`, `--answers FILE`).
+- `grafeno instances [list | drop NAME [--purge] | rollback NAME]`: the
+  instances on this machine (`default` is `grafeno.toml` and
+  `grafeno.service`, others `<name>.toml` and `grafeno@<name>.service`);
+  `rollback` puts back the copy the last layout upgrade kept.
+- `grafeno doctor [--instance NAME]`: checks the settings and their
+  permissions, the data folder, the database's layout, free disk space,
+  the port and the service; exits with an error if a check fails.
 - `grafeno config init | path | token`: the settings file of an installed
   server (`grafeno.toml`).
-- `grafeno service install | uninstall`: the Windows service.
+- `grafeno service install [--account "NT SERVICE\Grafeno"] | uninstall`:
+  the Windows service (LocalSystem unless an account is given).
 - `grafeno mcp`: an MCP server over stdio, for agents (Claude Code, Claude
   Desktop and any other MCP client).
 - `grafeno shell`: an interactive console for GQ queries and
@@ -329,7 +341,7 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 
 | Method   | Path                                  | Body / query                                            | Returns                       |
 | -------- | ------------------------------------- | ------------------------------------------------------- | ----------------------------- |
-| `GET`    | `/health`                             |                                                         | `{status, version}`           |
+| `GET`    | `/health`                             |                                                         | `{status, version, layout}`   |
 | `GET`    | `/v1/namespaces`                      |                                                         | `[{name, nodes, edges, created_at, description?}]`, empty ones too |
 | `POST`   | `/v1/namespaces`                      | `{name, description?}`                                  | the namespace (201); 409 if it exists |
 | `GET`    | `/v1/namespaces/{ns}`                 |                                                         | the namespace, or 404         |
