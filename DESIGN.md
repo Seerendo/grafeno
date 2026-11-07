@@ -224,8 +224,11 @@ modes cannot share a file. An MCP mode that forwards to an HTTP server
   transaction.
 - **Logo**: a fragment of graphene, three fused six-carbon rings
   (`docs/assets/logo.svg`, `studio/public/favicon.svg`). The Windows icon
-  (`packaging/windows/grafeno.ico`, rendered from the favicon) is embedded
-  in `grafeno.exe` by `build.rs` and used by the installer.
+  (`packaging/windows/grafeno.ico`) is embedded in `grafeno.exe` by
+  `build.rs` and used by the installer; since 15.2 it is rendered from the
+  docs site's mark (`packaging/windows/grafeno-mark.svg`, the rings on a
+  dark graphene lattice) by `packaging/windows/make-icon.sh`, at 16 to 256
+  pixels.
 - The build is embedded in the binary (`include_dir`, when `studio/dist`
   exists at compile time; otherwise `/studio/` explains how to build it) and
   served at `/studio/` without authentication; the API it calls still needs
@@ -3045,7 +3048,9 @@ As built (in two parts: the installers, then the rest):
   rotated at 10 MiB. `grafeno setup` on Windows makes the settings, the
   administrator and the service in one step (for the bare zip). winget
   manifests (`packaging/windows/winget/make-manifests.py`, validated by
-  `winget validate`) come with each release.
+  `winget validate`) come with each release. The installers' icon is the
+  docs site's mark (`grafeno-mark.svg`), rendered to `grafeno.ico` by
+  `packaging/windows/make-icon.sh`.
 - Tested on clean machines: `packaging/linux/test-install.sh --repo
   --systemd --arm64` passes in AlmaLinux 9 and 8, Rocky 9, Fedora 42,
   Debian 12 and Ubuntu 24.04 containers, from the release's files and

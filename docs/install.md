@@ -623,8 +623,9 @@ The Linux packages also come under names without the version
 (`grafeno-linux-x86_64.rpm`, `grafeno-linux-amd64.deb`,
 `grafeno-linux-aarch64.rpm`, `grafeno-linux-arm64.deb`), which the
 one-liner asks the latest release for. `packaging/windows/grafeno.ico`
-(from `docs/assets/logo.svg`) is the icon of the executable, the installer
-and its shortcuts.
+is the icon of the executable, the installer and its shortcuts:
+`packaging/windows/make-icon.sh` renders it (16 to 256 pixels, with Docker)
+from `packaging/windows/grafeno-mark.svg`, the docs site's mark.
 
 `.github/workflows/release.yml` builds all of them when a `v*` tag is
 pushed and publishes a GitHub release; it adds the packages to the
