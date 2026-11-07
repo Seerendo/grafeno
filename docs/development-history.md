@@ -257,8 +257,13 @@ presentan el proyecto y los primeros pasos.
   `supports()`, older engines told from `/health`) and is run against the
   real engine binaries of each supported version.
 
-Next, the rest of phase 15: Grafeno Desktop as a separate product that
-starts an installed engine for local files and talks to engines only
-through their API, then two products with two releases; then
+- **Phase 15.4, the desktop app without an engine:** Grafeno Desktop (in
+  gfStudio) links no engine code; it opens files by starting the installed
+  engine (`grafeno serve --stop-with-stdin` on a loopback port with a
+  token of its own) and talks to every engine over HTTP, with saved
+  servers, the local service, clusters and several windows; measured
+  against Electron and kept on Tauri.
+
+Next, the rest of phase 15: two products with two releases; then
 integrations (Grafito, Python bindings). The plan is in
 [DESIGN.md](../DESIGN.md).

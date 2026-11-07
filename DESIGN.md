@@ -404,7 +404,7 @@ without a current user. They remain possible for embedded use.
     a complete role-based access control, as most databases have: users who
     sign in, roles and privileges granted with `GRANT` and `REVOKE`, rights
     down to labels, properties and records, and an audit log.
-15. **Engine and interface apart** (in progress, 15.1 to 15.3 done; in five steps; see below):
+15. **Engine and interface apart** (in progress, 15.1 to 15.4 done; in five steps; see below):
     the engine's installers install only the engine (Windows `.exe`, Linux
     `.deb`, `.rpm` and a `curl` one-liner), as a professional installation
     in the way PostgreSQL's is, with no Docker needed; and the interface
@@ -3150,7 +3150,7 @@ As built:
   app, which 15.4 replaces by starting the installed engine (`grafeno
   serve` on a loopback port, `grafeno restore`).
 
-**15.4 The desktop application without an engine.**
+**15.4 The desktop application without an engine** (done).
 
 - Grafeno Desktop stops linking the engine crates. Its sources (the Studio
   and the native shell) live in one place, `apps/desktop`, with no build
@@ -3172,6 +3172,59 @@ As built:
 - Done when: the app, built with no engine crate, opens a local file through
   an installed engine, connects to a remote server and to a cluster, and
   passes its end-to-end tests against the engine binary.
+
+As built (the app in gfStudio, `desktop/`; the engine's part here):
+
+- The engine: `grafeno serve --stop-with-stdin` stops cleanly, as on
+  Ctrl+C, when its standard input closes, which is what happens when the
+  program that started it closes it or ends, a crash included; a test runs
+  the real binary, closes its stdin, and finds the file closed cleanly
+  (`verify_file`: clean). With 15.3's `grafeno restore`, it is all the app
+  needs of the engine besides its HTTP API.
+- The app links no engine crate (its own `Cargo.toml`, version 0.2.0, with
+  no path into this repository); its sources live in gfStudio, beside the
+  Studio, rather than in `apps/desktop` here, since the two products were
+  split into two repositories in 15.1.
+- Local files: the app finds the installed engine (`GRAFENO_BIN`, the
+  `PATH`, then where the installers put it, checked with `grafeno
+  --version`) and starts it per window as `grafeno serve --db FILE --addr
+  127.0.0.1:0 --token <256 random bits> --stop-with-stdin`, waiting for its
+  `listening on` line; a file another program holds is refused with a
+  clear message. The Studio calls the session's internal address
+  (`http://grafeno.local/session/<id>/…`), which the app sends to the
+  engine with the token: the Studio never sees the port or the token.
+  Closing the file or the window, or the app ending, closes the engine's
+  stdin. Restoring runs `grafeno restore`. With no engine installed, the
+  start screen says so and links to the installers.
+- Connections: each window has its own (File → New window); saved servers
+  with a token or key, or a sign-in; the local service, found by asking
+  `127.0.0.1:7810/v1/about`; a cluster by its members, separated by commas
+  (the client tries them in turn). Menus act on the focused window.
+- Tests against the engine binary: a file served on a loopback port, the
+  token required, a backup through the API recovered by `grafeno restore`,
+  a held file refused, closing stopping the engine cleanly (the file
+  reopens with its data), no engine left after a session ends, and a file
+  the engine cannot open refused with its reason; they pass. The Linux
+  WebDriver test of the window follows the new paths; it was not run here
+  (it needs Linux with a display), and the gfStudio workflow runs the
+  native tests with an engine built from this repository.
+- Tauri or Electron, measured on the laptop of E1 (Windows 11, WebView2),
+  with the same Studio build (0.9 MB):
+
+  | | Tauri (Grafeno Desktop 0.2.0) | Electron 33.2.1 (a minimal shell) |
+  | --- | --- | --- |
+  | Installer | 3.1 MB (NSIS), 4.4 MB (MSI) | the runtime alone 269 MB, 110 MB as a zip |
+  | Memory after 8 s, the window and its child processes | 376 MB working set, 355 MB private (the app 32 MB, WebView2 the rest) | 330 MB working set, 250 MB private |
+  | Until the window has its title | 0.85 s (a debug build) | 0.48 s |
+
+  Windows' application control (Smart App Control) refused to run the
+  unsigned release build, so Tauri's memory and start were measured on the
+  debug build: its Rust part is unoptimized and runs a console, which
+  makes both numbers worse than a release build's, and WebView2, most of
+  the memory, is the same in both. Memory is about the same because
+  WebView2 is Chromium too; the difference is the installer, 35 times
+  smaller, and a web runtime that Windows updates. Rendering on WebKitGTK
+  (Linux) was not measured: no Linux desktop was at hand. Tauri is kept.
 
 **15.5 Two products, two releases.**
 

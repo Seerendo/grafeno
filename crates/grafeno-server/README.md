@@ -66,6 +66,7 @@ in-memory database.
 | `--addr ADDR`     | `GRAFENO_ADDR`  | `127.0.0.1:7810` |
 | `--token TOKEN`   | `GRAFENO_TOKEN` | none (no auth)   |
 | `--cors-origin O` (repeatable, `*` for any) | | none   |
+| `--stop-with-stdin` |               | off: stop cleanly when standard input closes (for a program that starts the engine, such as Grafeno Desktop) |
 
 ## Shell
 

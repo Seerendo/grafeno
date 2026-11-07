@@ -607,6 +607,13 @@ your own) needs its origin allowed:
 grafeno serve --config grafeno.toml --cors-origin https://studio.example.com
 ```
 
+Grafeno Desktop, the desktop app, needs no origin allowed (it sends the
+requests itself). To open a database file it uses the engine installed
+here: it starts `grafeno serve --stop-with-stdin` for that file on a
+loopback port with a token of its own, and the engine stops when the file
+or the app closes. Install the engine first; the app finds it on the
+`PATH` or where these installers put it (or at `GRAFENO_BIN`).
+
 ## Building the installers
 
 | Files | Command | Needs |
