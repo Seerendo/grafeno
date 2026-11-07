@@ -1,0 +1,6 @@
+measure,value,unit
+events,110000,
+appended one write each,24580,events/s
+appended a thousand a write,211457,events/s
+read back,1419128,events/s
+a change of an account with its event,49,us

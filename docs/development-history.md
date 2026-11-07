@@ -228,8 +228,13 @@ presentan el proyecto y los primeros pasos.
   record policies limit a role to the records that match a condition
   (`@recorded_by = current_user()`, `team = $account.team`).
 
-Next, the rest of phase 14: an audit log, and identities from outside
-(OIDC); phase 15: the engine and the interface apart (the
+- **Phase 14.5, audit:** an audit log of security events (sign-ins and
+  their failures, lockouts, sessions, keys, every change to accounts and
+  roles, refused requests) with who, how, from where and what, each once,
+  replicated and backed up; read with the `audit` privilege as pages, a
+  stream, JSON Lines or `db.audit()` in GQ.
+
+Next, the rest of phase 14: identities from outside (OIDC); phase 15: the engine and the interface apart (the
 engine installs natively like a database server, from a `curl` one-liner,
 signed APT and DNF repositories or a guided Windows setup, with no Docker
 needed; Grafeno Desktop becomes a separate product that talks to engines

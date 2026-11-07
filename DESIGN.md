@@ -397,7 +397,7 @@ without a current user. They remain possible for embedded use.
     Raft; a leader elected among them coordinates writes, the others take
     over when it fails, and reads and large queries spread over all of
     them.
-14. **Users, roles and permissions** (in progress, 14.1 to 14.4 done; six steps; see below):
+14. **Users, roles and permissions** (in progress, 14.1 to 14.5 done; six steps; see below):
     a complete role-based access control, as most databases have: users who
     sign in, roles and privileges granted with `GRANT` and `REVOKE`, rights
     down to labels, properties and records, and an audit log.
@@ -2737,7 +2737,7 @@ routes):
   set up with `schema`, an administrator's privilege); the change log's
   `last` still counts hidden changes.
 
-**14.5 Audit and accountability.**
+**14.5 Audit and accountability** (done).
 
 - An audit log of security events: sign-ins and failures, lockouts, session
   and key creation and revocation, every change to accounts, roles, grants
@@ -2749,6 +2749,66 @@ routes):
   write; administrators can list and end any account's sessions.
 - Done when: every security event appears exactly once, refused requests
   included, and the log survives restarts, failover and backups.
+
+As built (`grafeno/src/audit.rs`, the access tables' writes,
+`grafeno-server/src/audit.rs`, the server's middleware and sign-in):
+
+- An event (`AuditEvent`) has a sequence number, a time, a kind, the
+  account that acted, the credential behind the request (`key:name`,
+  `session:id`, `token`), the address, the target, the outcome (`ok`,
+  `refused`, `failed`) and a detail without secrets or hashes. Layout 17
+  adds the `audit` table; the log is kept by count and age (`[audit]`
+  `max_entries`, `max_age_days`; ten million events and a year by
+  default), pruning at most a hundred events per append.
+- Changes to accounts, keys, sessions and roles append their event in the
+  transaction that makes them (`account_created` / `_changed` / `_deleted`
+  with what changed, a new password named but never shown;
+  `key_created` / `_rotated` / `_changed` / `_revoked`;
+  `session_created` / `_refreshed` / `_ended`; `role_created` /
+  `_changed` / `_deleted` with the role's privileges, levels, roles and
+  policies, so every grant, denial and policy is there), whether they come
+  from the API, GQ or the command line: an event is there exactly when its
+  change is. The server appends what happens outside the database:
+  `signin_failed` (wrong name or password, locked, disabled, expired),
+  `lockout` (when a failure locks an account or an address),
+  `refresh_reused`, and `refused` for every 401 and 403, refused by the
+  middleware or by a handler (a GQ statement, a record), with the method
+  and path. Signing in audits itself (`session_created`).
+- Writes carry their origin (`Origin`: account, credential, address),
+  which the audit log and the change log record: a change's entry names
+  the key or session it was written with (`via`), beside `by`.
+  `recorded_by` on nodes and edges keeps naming the account.
+- Replicated state: events travel in the replication log as themselves
+  (entry format 6), a member that applies an entry writes them as they are
+  and numbers its own after them. On a member that does not lead, an
+  event the server records goes to the leader (`POST
+  /v1/cluster/audit`, with the cluster secret), so it is written once
+  wherever it happened. Backups carry the log.
+- Reading it needs `audit` on the server: `GET /v1/audit?since=&limit=` (a
+  page with `last`, `oldest` and `gap`), the same with `Accept:
+  text/event-stream` (a stream that goes on, resumable with
+  `Last-Event-ID`), `?format=jsonl` (JSON Lines), and `CALL db.audit(since,
+  limit)` in GQ (from a namespace the caller reads); the TypeScript client
+  has `audit()`.
+- Sessions: those who manage accounts list and end other accounts'
+  sessions (`/v1/auth/sessions?account=`), not superusers'.
+- Measured in memory: 24 600 events a second appended one write each (a
+  refused request), 211 000 a thousand a write, 1.4 million a second read
+  back; a change of an account with its event takes 49 µs.
+- Tests: `grafeno/tests/audit.rs` (each change of access audited once,
+  in order, with its origin and no secret; none for a rolled back change;
+  replicated once, numbering going on on the member; surviving a reopen
+  and a backup; retention), `grafeno-server/tests/audit.rs` (every
+  security event over HTTP exactly once: sign-ins, failures, the lockout,
+  sessions, keys, accounts and roles from the API and GQ, refusals by the
+  middleware and by a handler; reading needs the privilege; pages, JSON
+  Lines, GQ and the stream; managing other accounts' sessions), the
+  cluster test (a request refused on a follower recorded once, the log
+  whole after the leader dies and numbered on without a gap), `upgrade.rs`
+  (layout 17 from every layout, fixture `layout-v16`), and the client.
+- Not built in this step: the Studio shows no audit view; events of a
+  request refused while a cluster has no leader are lost (reported on the
+  member's standard error).
 
 **14.6 External identities (optional).**
 
@@ -3018,6 +3078,7 @@ spinning disk, on ARM, or for days at a time.
 | Replication log (13.1) | writes at 80% of the speed with the log on; 568 bytes per record; a replica applies 22 300 records/s | E1-mem | `replication_log.csv` |
 | Raft cluster of three (13.2) | 137 sequential writes/s (618 on one server), p50 7.2 ms; a leader replaced in 0.5 to 0.8 s | E1-disk | `cluster.csv` |
 | Passwords (14.1) | Argon2id at 19 ms a check: 53 sign-ins/s on one core, 141 on 16 threads | E1-mem | `auth.csv` |
+| Audit log (14.5) | 24 600 events/s one write each, 211 000/s a thousand a write; 1.4 M/s read; an account change with its event 49 µs | E1-mem | `audit.csv` |
 | Enforcement on reads (14.4), 50 000 people | a view of the whole namespace costs nothing; per record +25% to +51% on scans and traversals, nothing on full-text search; vector recall@10 0.972 with 45% visible | E1-mem | `visibility.csv` |
 | Roles (14.2), 5 000 roles, 2 811 reached by one account | rights computed in 17 ms once per change; a namespace check 93 ns, a label or property check 271 ns | E1-mem | `rights.csv` |
 | Runbooks on a compose cluster (13.6) | rolling upgrade 13.5 → 13.6, a member lost, a majority lost, a disk replaced: 15 971 operations, all linearizable | E1-disk | `drill.csv` |
@@ -3061,6 +3122,7 @@ real binary. The ones that carry each guarantee:
 | A read split across members returns one server's rows | `grafeno-query/tests/common/mod.rs` (used by `conformance.rs`, `planner.rs`, `cypher.rs`, `queries.rs`, `traversal.rs`, `batch.rs`), `grafeno-server/tests/split.rs`, `aggregate.rs` tests | every read of those suites that can be split, whole against 2, 3 and 5 parts through JSON, row order included; exact sums independent of order; three processes, with a member down |
 | A namespace moves between groups without losing or doubling a write | `grafeno/tests/replication.rs` (copy, catch-up, fence), `grafeno-server/tests/groups.rs` | a namespace copied and caught up equals the source, change log numbers included; a fenced namespace refuses writes; three processes with two more groups, writes routed through any member, a move under three writers retrying busy answers, every acknowledged write found once on every member |
 | A cluster restarts, rejoins and upgrades without anomalies | `grafeno-cluster/tests/operations.rs`, `packaging/compose/drill.sh` | a new cluster from a follower's backup, a member joining from an older backup without a snapshot, a restart; the leader refusing an entry format a voter cannot read; on the compose, every runbook under load checked for linearizability |
+| Every security event is audited once, and the log survives | `grafeno/tests/audit.rs`, `grafeno-server/tests/audit.rs`, `cluster.rs`, `upgrade.rs` | changes of access in their transaction; sign-ins, lockouts, refusals over HTTP; replication, failover, reopening, backups |
 | Nothing hidden is returned or changed | `grafeno-query/tests/visibility.rs`, `grafeno-server/tests/leaks.rs` | 300 random graphs and rights for reads and for writes; the leak matrix over every surface of the server |
 | Access is managed in GQ, the API and the tools, by those who may | `grafeno-query/tests/conformance/scenarios.txt`, `grafeno-query/tests/access.rs`, `grafeno-server/tests/admin.rs`, `shell.rs`, `clients/typescript/test/accounts.test.ts` | every access statement and admin endpoint; refusals without `manage_accounts` or `manage_roles`; superusers only a superuser's; `EXPLAIN` naming what is missing; expiry; an open server keeping a superuser |
 | Rights are the union of roles, and a denial wins | `grafeno/tests/rights.rs`, `grafeno-server/tests/roles.rs` | 2 000 random role graphs against a direct model; over HTTP, patterns with denials, nested roles, a custom editor, server privileges, `public`, scoped keys, cycles refused |
@@ -3099,6 +3161,7 @@ OLD_IMAGE=grafeno:13.5 NEW_IMAGE=grafeno:13.6 packaging/compose/drill.sh   # ima
 cargo run --release -p grafeno-server --example auth_bench -- 60
 cargo run --release -p grafeno --example rights_bench -- 5000 1000
 cargo run --release -p grafeno-query --example visibility_bench -- 50000
+cargo run --release -p grafeno --example audit_bench -- 100000
 FAULT_SECONDS=40 cargo test --release -p grafeno-server --test faults -- --nocapture
 cargo run --release -p grafeno --example changes_bench -- 100000
 cargo run --release -p grafeno-server --example events_bench -- 100000

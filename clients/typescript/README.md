@@ -107,6 +107,15 @@ await admin.changeAccount("ana", { expires_at: "2027-01-01" });
 with; GQ access statements (`GRANT …`, `SHOW
 USERS`) also run through `namespace(…).query`.
 
+## The audit log (14.5)
+
+```ts
+const page = await admin.audit({ since: 0, limit: 100 }); // {events, last, oldest, gap}
+for (const event of page.events) console.log(event.seq, event.kind, event.target, event.outcome);
+```
+
+It needs the `audit` privilege.
+
 ## Expand neighborhoods together
 
 ```ts

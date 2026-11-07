@@ -696,6 +696,20 @@ Argon2id with the server's parameters (19 MiB, 2 passes, 1 lane),
 Checks are bound by memory more than by cores, which is what makes them
 slow to guess offline; sessions and keys (SHA-256) cost a lookup.
 
+## Audit log (`crates/grafeno/examples/audit_bench.rs`)
+
+110 000 events in memory, 2026-11-06:
+
+| | |
+| --- | --- |
+| appended one write each (a refused request, a failed sign-in) | 24 600 events/s |
+| appended a thousand a write | 211 000 events/s |
+| read back in pages of a thousand | 1.4 M events/s |
+| a change of an account, with its event | 49 µs |
+
+A refused request costs one small write; the change of an account writes
+its event in the same transaction.
+
 ## Enforcement on reads (`crates/grafeno-query/examples/visibility_bench.rs`)
 
 50 000 Person nodes (a tenth also `Salary`, half in team red, each with an

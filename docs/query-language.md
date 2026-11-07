@@ -771,6 +771,15 @@ estimates there. A writing statement that would change something its
 caller may not (a label, a property, a policy) fails whole and names the
 privilege; records it may not see are not matched.
 
+The audit log (14.5) is read with `db.audit(since, limit)`, by an account
+with the `audit` privilege:
+
+```cypher
+CALL db.audit(0, 1000) YIELD seq, at, kind, account, via, address, target, outcome, detail
+WHERE kind IN ['signin_failed', 'lockout', 'refused']
+RETURN seq, at, kind, target, address ORDER BY seq DESC LIMIT 20;
+```
+
 Writing statements answer one row, `result`, saying what changed
 (`granted 2 privileges on namespace team-* to analyst`). `EXPLAIN` of a
 statement the caller may not run says which privilege it lacks, in a

@@ -301,6 +301,17 @@ ON NAMESPACE crm NODES Customer WHERE tenant = $account.tenant` keeps each
 account to its tenant's customers (`ALTER USER ana SET ATTRIBUTE tenant =
 'acme'`). What is hidden is absent, as if it did not exist.
 
+Every security event goes to the audit log (14.5): sign-ins and failures,
+lockouts, keys, sessions, changes to accounts and roles, refused requests.
+Read it with an account that has the `audit` privilege (`GET /v1/audit`,
+`?format=jsonl` to keep a copy); `[audit]` sets how much is kept:
+
+```toml
+[audit]
+max_entries = 10000000
+max_age_days = 365
+```
+
 ## Backups
 
 A backup is a consistent copy of the whole database file (every
