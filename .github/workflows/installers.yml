@@ -88,7 +88,7 @@ jobs:
           sudo cat "/proc/$pid/attr/current" | grep -q 'grafeno (enforce)'
           curl -fs -X POST -H 'content-type: application/json' \
             -d '{"name":"root","password":"An-admin-passw0rd"}' http://127.0.0.1:7811/v1/auth/signin | grep -q access_token
-          test -f /srv/grafeno-other/grafeno.redb
+          sudo test -f /srv/grafeno-other/grafeno.redb
       - name: Nothing was denied
         run: |
           if sudo journalctl -k | grep 'apparmor="DENIED"' | grep 'profile="grafeno"'; then

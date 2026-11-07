@@ -280,14 +280,19 @@ begin
     Result := '';
 end;
 
-// The data folder of the installed settings (upgrades), else the page's.
+// The data folder of the installed settings (upgrades, the uninstaller),
+// else the page's. The uninstaller has no wizard pages: DataPage is nil
+// there, so it falls back to the default folder.
 function InstalledDataDir(Param: String): String;
 var
   Lines: TArrayOfString;
   I, Slash: Integer;
   Line: String;
 begin
-  Result := DataDir('');
+  if IsUninstaller() then
+    Result := DefaultDataDir()
+  else
+    Result := DataDir('');
   if not LoadStringsFromFile(ExpandConstant('{#ConfigFile}'), Lines) then
     exit;
   for I := 0 to GetArrayLength(Lines) - 1 do
