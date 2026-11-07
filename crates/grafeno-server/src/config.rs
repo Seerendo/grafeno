@@ -5,7 +5,6 @@
 //! db = "/var/lib/grafeno/grafeno.redb"
 //! addr = "127.0.0.1:7810"
 //! token = "…"            # every /v1 request needs `Authorization: Bearer <token>`
-//! studio = true          # serve Grafeno Studio at /studio/
 //! cors_origins = []      # origins allowed to call the API from a browser
 //! durability = "immediate"  # or "eventual": commits reach the disk within 0.5 s
 //! max_requests = 512     # served at once; more get 503 with Retry-After
@@ -71,7 +70,9 @@ pub struct Config {
     pub addr: Option<SocketAddr>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Ignored since Grafeno 15: the engine serves no interface (Grafeno
+    /// Studio is installed apart). Kept so older settings still load.
+    #[serde(default, skip_serializing)]
     pub studio: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cors_origins: Vec<String>,
@@ -422,7 +423,7 @@ pub fn init(path: &Path, db: &Path, addr: SocketAddr, force: bool) -> Result<Con
         db: Some(db.to_path_buf()),
         addr: Some(addr),
         token: Some(new_token()?),
-        studio: Some(true),
+        studio: None,
         cors_origins: Vec::new(),
         durability: None,
         max_requests: None,
@@ -437,7 +438,7 @@ pub fn init(path: &Path, db: &Path, addr: SocketAddr, force: bool) -> Result<Con
     };
     let text = format!(
         "# Grafeno server settings. Restart the service after changing them.\n\
-         # Every /v1 request needs `Authorization: Bearer <token>`; Grafeno Studio asks for it.\n\
+         # Every /v1 request needs `Authorization: Bearer <token>` (or a key, or a session).\n\
          # `addr = \"0.0.0.0:7810\"` listens on every network interface.\n\n{}",
         toml::to_string(&config).map_err(|error| error.to_string())?
     );
@@ -487,6 +488,13 @@ mod tests {
         );
         assert_ne!(new_token().unwrap(), new_token().unwrap());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn older_settings_with_studio_still_load() {
+        // `studio` served the interface before Grafeno 15; it is ignored now.
+        let config: Config = toml::from_str("studio = false").unwrap();
+        assert!(!toml::to_string(&config).unwrap().contains("studio"));
     }
 
     #[test]

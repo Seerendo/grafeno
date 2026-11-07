@@ -1,0 +1,89 @@
+# The engine's installers, built and installed on clean machines: the Linux
+# packages and the one-liner in containers of several distributions, and
+# the Windows setup on a Windows runner (installed unattended with its own
+# data folder and port, the service checked, then uninstalled).
+name: Installers
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "install.sh"
+      - "packaging/**"
+      - "crates/grafeno-server/Cargo.toml"
+      - ".github/workflows/installers.yml"
+  pull_request:
+    paths:
+      - "install.sh"
+      - "packaging/**"
+      - "crates/grafeno-server/Cargo.toml"
+      - ".github/workflows/installers.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux packages and the one-liner
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the .tar.gz, .deb and .rpm
+        run: docker buildx build -f packaging/linux/Dockerfile --output dist/linux .
+      - name: Install them in clean containers
+        run: packaging/linux/test-install.sh --systemd
+
+  windows:
+    name: Windows setup
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build grafeno.exe
+        run: cargo build --release --locked -p grafeno-server
+      - name: Build the setup
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DAppVersion=0.0.0" packaging\windows\grafeno.iss
+      - name: Install it unattended, with its own data folder and port
+        shell: pwsh
+        run: |
+          $setup = "dist\grafeno-0.0.0-windows-x64-setup.exe"
+          Start-Process $setup -Wait -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/LOG=setup.log', '/DATADIR=C:\GrafenoTest\data', '/PORT=7821', '/TASKS=service,path'
+          Get-Content setup.log -Tail 20
+          $config = "C:\ProgramData\Grafeno\grafeno.toml"
+          Get-Content $config
+          if (-not (Select-String -Path $config -Pattern '127.0.0.1:7821' -Quiet)) { throw "the port is not in the settings" }
+          if (-not (Select-String -Path $config -Pattern 'GrafenoTest' -Quiet)) { throw "the data folder is not in the settings" }
+          if ((Get-Service Grafeno).Status -ne 'Running') { throw "the service is not running" }
+          $healthy = $false
+          foreach ($i in 1..50) {
+            try { Invoke-RestMethod http://127.0.0.1:7821/health | Out-Null; $healthy = $true; break } catch { Start-Sleep -Milliseconds 200 }
+          }
+          if (-not $healthy) { throw "the engine does not answer on 7821" }
+          $token = & "C:\Program Files\Grafeno\grafeno.exe" config token
+          Invoke-RestMethod http://127.0.0.1:7821/v1/namespaces -Headers @{ Authorization = "Bearer $token" } | Out-Null
+          $note = Invoke-WebRequest http://127.0.0.1:7821/studio/ -UseBasicParsing
+          if ($note.Content -notmatch 'installed on its own') { throw "the engine serves an interface" }
+          if (-not (Test-Path "C:\GrafenoTest\data\grafeno.redb")) { throw "no database in the data folder" }
+          if (Get-ChildItem "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Grafeno" -Filter '*Studio*' -ErrorAction SilentlyContinue) { throw "a Studio shortcut was installed" }
+      - name: Upgrade over it, then uninstall (the data stays)
+        shell: pwsh
+        run: |
+          $setup = "dist\grafeno-0.0.0-windows-x64-setup.exe"
+          Start-Process $setup -Wait -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/TASKS=service,path'
+          if ((Get-Service Grafeno).Status -ne 'Running') { throw "the service did not come back after the upgrade" }
+          if (-not (Select-String -Path "C:\ProgramData\Grafeno\grafeno.toml" -Pattern '7821' -Quiet)) { throw "the upgrade lost the settings" }
+          Start-Process "C:\Program Files\Grafeno\unins000.exe" -Wait -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+          if (Get-Service Grafeno -ErrorAction SilentlyContinue) { throw "the service is still there" }
+          if (-not (Test-Path "C:\GrafenoTest\data\grafeno.redb")) { throw "uninstalling removed the data" }
+          if (-not (Test-Path "C:\ProgramData\Grafeno\grafeno.toml")) { throw "uninstalling removed the settings" }

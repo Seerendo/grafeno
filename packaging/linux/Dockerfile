@@ -1,15 +1,10 @@
-# Builds the Linux release files: a static (musl) binary with Grafeno Studio
-# inside, as a .tar.gz, a .deb and an .rpm, with SHA-256 checksums.
+# Builds the Linux release files of the engine: a static (musl) binary, as a
+# .tar.gz, a .deb and an .rpm, with SHA-256 checksums. No interface, no
+# graphical dependency. The packages also come under names without the
+# version (grafeno-linux-amd64.deb, grafeno-linux-x86_64.rpm), which
+# install.sh asks the latest release for.
 #
 #   docker build -f packaging/linux/Dockerfile --output dist/linux .
-
-FROM node:24-slim AS studio
-WORKDIR /src
-COPY clients/typescript clients/typescript
-COPY studio/package.json studio/package-lock.json studio/
-RUN cd studio && npm ci --no-audit --no-fund
-COPY studio studio
-RUN cd studio && npm run build
 
 FROM rust:1-slim-trixie AS build
 RUN apt-get update \
@@ -20,7 +15,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo install --locked cargo-deb cargo-generate-rpm
 WORKDIR /src
 COPY . .
-COPY --from=studio /src/studio/dist studio/dist
 ENV TARGET=x86_64-unknown-linux-musl
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
@@ -29,6 +23,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && mkdir -p /out \
     && cargo deb --no-build --target "$TARGET" -p grafeno-server --output /out/ \
     && cargo generate-rpm --target "$TARGET" -p crates/grafeno-server --output /out/ \
+    && cp /out/grafeno_*_amd64.deb /out/grafeno-linux-amd64.deb \
+    && cp /out/grafeno-*.x86_64.rpm /out/grafeno-linux-x86_64.rpm \
     && staging="$(mktemp -d)" \
     && cp "target/$TARGET/release/grafeno" packaging/linux/grafeno.service packaging/linux/setup.sh \
           README.md "$staging/" \

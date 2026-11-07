@@ -1,21 +1,13 @@
-# Grafeno server image: `grafeno serve` on port 7810 (Grafeno Studio at
-# /studio/), data in /data.
+# The image of the members of the test cluster (docker-compose.yml, drill.sh):
+# `grafeno serve` on port 7810, data in /data. It is a tool for testing
+# clusters on one machine, not a way to install Grafeno (use the installers,
+# docs/install.md). From the repository's root:
 #
-#   docker build -t grafeno .
-#   docker run -p 7810:7810 -v grafeno-data:/data -e GRAFENO_TOKEN=change-me grafeno
-
-FROM node:24-slim AS studio
-WORKDIR /src
-COPY clients/typescript clients/typescript
-COPY studio/package.json studio/package-lock.json studio/
-RUN cd studio && npm ci --no-audit --no-fund
-COPY studio studio
-RUN cd studio && npm run build
+#   docker build -f packaging/compose/Dockerfile -t grafeno .
 
 FROM rust:1-slim-trixie AS build
 WORKDIR /src
 COPY . .
-COPY --from=studio /src/studio/dist studio/dist
 # The workspace's own sources are touched first: the cached target may hold
 # a build of another version whose files look newer than these.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

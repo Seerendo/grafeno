@@ -14,12 +14,6 @@ path = "src/lib.rs"
 name = "grafeno"
 path = "src/main.rs"
 
-[features]
-default = ["studio"]
-# Embed Grafeno Studio (studio/dist, when built) to serve it at /studio/.
-# The desktop app bundles the Studio itself and turns this off.
-studio = []
-
 [dependencies]
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
@@ -34,7 +28,6 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal
 uuid.workspace = true
 rustyline = "15"
 ureq = { version = "3", features = ["json"] }
-include_dir = "0.7"
 tower-http = { version = "0.6", features = ["cors", "catch-panic"] }
 toml = "0.9"
 getrandom = "0.3"
@@ -59,23 +52,18 @@ copyright = "2026, Seerendo"
 extended-description = """\
 Grafeno is a graph engine for agent memory and knowledge: a property graph \
 with namespaces, facts with valid and record time, full-text and vector \
-search, hybrid recall, the GQ query language, an MCP server and the Grafeno \
-Studio web interface. The package runs it as the systemd service `grafeno`."""
+search, hybrid recall, the GQ query language and an MCP server. It has no \
+interface of its own (Grafeno Studio is installed apart). The package runs it \
+as the systemd service `grafeno`."""
 section = "database"
 priority = "optional"
-depends = ""
+depends = "passwd"
 maintainer-scripts = "../../packaging/linux/debian/"
 assets = [
     ["target/release/grafeno", "usr/bin/", "755"],
     ["../../packaging/linux/grafeno.service", "lib/systemd/system/grafeno.service", "644"],
     ["../../packaging/linux/setup.sh", "usr/share/grafeno/setup.sh", "755"],
     ["../../README.md", "usr/share/doc/grafeno/README.md", "644"],
-    ["../../packaging/linux/grafeno-studio.desktop", "usr/share/applications/grafeno-studio.desktop", "644"],
-    ["../../packaging/linux/icons/grafeno-32.png", "usr/share/icons/hicolor/32x32/apps/grafeno.png", "644"],
-    ["../../packaging/linux/icons/grafeno-64.png", "usr/share/icons/hicolor/64x64/apps/grafeno.png", "644"],
-    ["../../packaging/linux/icons/grafeno-128.png", "usr/share/icons/hicolor/128x128/apps/grafeno.png", "644"],
-    ["../../packaging/linux/icons/grafeno-256.png", "usr/share/icons/hicolor/256x256/apps/grafeno.png", "644"],
-    ["../../packaging/linux/icons/grafeno-512.png", "usr/share/icons/hicolor/512x512/apps/grafeno.png", "644"],
 ]
 
 # `cargo generate-rpm`.
@@ -91,13 +79,11 @@ assets = [
     { source = "../../packaging/linux/grafeno.service", dest = "/usr/lib/systemd/system/grafeno.service", mode = "644" },
     { source = "../../packaging/linux/setup.sh", dest = "/usr/share/grafeno/setup.sh", mode = "755" },
     { source = "../../README.md", dest = "/usr/share/doc/grafeno/README.md", mode = "644", doc = true },
-    { source = "../../packaging/linux/grafeno-studio.desktop", dest = "/usr/share/applications/grafeno-studio.desktop", mode = "644" },
-    { source = "../../packaging/linux/icons/grafeno-32.png", dest = "/usr/share/icons/hicolor/32x32/apps/grafeno.png", mode = "644" },
-    { source = "../../packaging/linux/icons/grafeno-64.png", dest = "/usr/share/icons/hicolor/64x64/apps/grafeno.png", mode = "644" },
-    { source = "../../packaging/linux/icons/grafeno-128.png", dest = "/usr/share/icons/hicolor/128x128/apps/grafeno.png", mode = "644" },
-    { source = "../../packaging/linux/icons/grafeno-256.png", dest = "/usr/share/icons/hicolor/256x256/apps/grafeno.png", mode = "644" },
-    { source = "../../packaging/linux/icons/grafeno-512.png", dest = "/usr/share/icons/hicolor/512x512/apps/grafeno.png", mode = "644" },
 ]
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+
+# What the package's scripts need (useradd, getent).
+[package.metadata.generate-rpm.requires]
+shadow-utils = "*"

@@ -83,10 +83,7 @@ impl ServerSettings {
                 .token
                 .or(config.token)
                 .filter(|token| !token.is_empty()),
-            options: Options {
-                studio: !overrides.no_studio && config.studio.unwrap_or(true),
-                cors_origins,
-            },
+            options: Options { cors_origins },
             limits: config.query.limits(),
             scan_threads: config.query.scan_threads.unwrap_or(0),
             durability: config.durability.map(Into::into).unwrap_or_default(),
@@ -362,7 +359,7 @@ pub mod windows {
         let service =
             manager.create_service(&info, ServiceAccess::CHANGE_CONFIG | ServiceAccess::START)?;
         service.set_description(
-            "Graph database for agent memory and knowledge. Studio: http://127.0.0.1:7810/studio/",
+            "Grafeno graph database engine (HTTP API on 127.0.0.1:7810 by default).",
         )?;
         if start {
             service.start::<&str>(&[])?;

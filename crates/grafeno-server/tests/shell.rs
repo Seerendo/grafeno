@@ -211,14 +211,7 @@ fn users_sign_in_from_the_shell() {
         .unwrap()
         .port();
     let mut server = Command::new(env!("CARGO_BIN_EXE_grafeno"))
-        .args([
-            "serve",
-            "--db",
-            db,
-            "--addr",
-            &format!("127.0.0.1:{port}"),
-            "--no-studio",
-        ])
+        .args(["serve", "--db", db, "--addr", &format!("127.0.0.1:{port}")])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

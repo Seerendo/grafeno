@@ -70,7 +70,7 @@ fn start(dir: &Path, groups: u64) -> (Members, Vec<u16>) {
     let mut children = Vec::new();
     for i in 0..3 {
         let config = format!(
-            "db = \"{}\"\naddr = \"127.0.0.1:{}\"\ntoken = \"{TOKEN}\"\nstudio = false\n\n\
+            "db = \"{}\"\naddr = \"127.0.0.1:{}\"\ntoken = \"{TOKEN}\"\n\n\
              [cluster]\nid = {}\naddr = \"127.0.0.1:{}\"\nsecret = \"s\"\nvoters = [1, 2, 3]\n\
              peers = [{}]\ngroups = [{}]\n",
             dir.join(format!("g{groups}-m{}.redb", i + 1))

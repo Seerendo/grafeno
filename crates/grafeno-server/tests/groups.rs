@@ -47,7 +47,7 @@ fn start(dir: &Path, id: u64, cluster: &[(u64, u16, u16)]) -> Child {
         .collect();
     let (_, own, api) = *cluster.iter().find(|(peer, _, _)| *peer == id).unwrap();
     let config = format!(
-        "db = \"{}\"\naddr = \"127.0.0.1:{api}\"\ntoken = \"{TOKEN}\"\nstudio = false\n\n\
+        "db = \"{}\"\naddr = \"127.0.0.1:{api}\"\ntoken = \"{TOKEN}\"\n\n\
          [cluster]\nid = {id}\naddr = \"127.0.0.1:{own}\"\nsecret = \"s3cret\"\nvoters = [1, 2, 3]\n\
          tick_ms = 20\npeers = [{}]\ngroups = [{{ id = 1, voters = [1, 2, 3] }}, {{ id = 2, voters = [1, 2, 3] }}]\n",
         dir.join(format!("member-{id}.redb"))

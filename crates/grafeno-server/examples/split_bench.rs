@@ -155,7 +155,7 @@ fn start(dir: &Path, seed: &Path, count: u64, threads: usize) -> (Members, Vec<u
         let db = dir.join(format!("m{count}-{}.redb", i + 1));
         std::fs::copy(seed, &db).unwrap();
         let mut config = format!(
-            "db = \"{}\"\naddr = \"127.0.0.1:{}\"\ntoken = \"{TOKEN}\"\nstudio = false\n\n\
+            "db = \"{}\"\naddr = \"127.0.0.1:{}\"\ntoken = \"{TOKEN}\"\n\n\
              [query]\nscan_threads = {threads}\ntimeout_secs = 0\nmax_reads = 0\nmax_rows = 0\nmax_memory_mb = 0\n",
             db.to_string_lossy().replace('\\', "/"),
             ports[(count + i) as usize],

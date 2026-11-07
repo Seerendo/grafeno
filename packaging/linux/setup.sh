@@ -26,8 +26,12 @@ fi
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload
     systemctl enable grafeno.service >/dev/null 2>&1 || true
+    if [ "${GRAFENO_NO_START:-0}" = 1 ]; then
+        echo "Grafeno: the service is enabled; start it with: systemctl start grafeno"
+        exit 0
+    fi
     systemctl restart grafeno.service || true
-    echo "Grafeno: the service is running. Studio: http://127.0.0.1:7810/studio/"
+    echo "Grafeno: the service is running on 127.0.0.1:7810 (see $CONFIG)."
 else
     echo "Grafeno: systemd is not running; start the server with:"
     echo "  sudo -u grafeno $GRAFENO_BIN serve --config $CONFIG"

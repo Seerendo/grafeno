@@ -526,41 +526,27 @@ async fn queries_read_and_write() {
 }
 
 #[tokio::test]
-async fn studio_and_cors_options() {
+async fn no_interface_and_cors_options() {
     use grafeno_server::http::{Options, router_with};
     let state = || AppState::new(Arc::new(Grafeno::in_memory().unwrap()), Some("secret"));
     let request = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
 
-    // The Studio is public (the API it calls needs the token).
+    // The engine has no interface (15.1): `/` and the Studio's old place
+    // say where it went, to anyone.
     let app = router_with(state(), &Options::default());
-    let response = app.clone().oneshot(request("/")).await.unwrap();
-    assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
-    assert_eq!(response.headers()[header::LOCATION], "/studio/");
-    let response = app.clone().oneshot(request("/studio/")).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(
-        response.headers()[header::CONTENT_TYPE]
-            .to_str()
-            .unwrap()
-            .starts_with("text/html")
-    );
-    let response = app
-        .clone()
-        .oneshot(request("/studio/explorer/some-client-route"))
-        .await
-        .unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "unknown paths get the app"
-    );
-    if grafeno_server::studio::INCLUDED {
-        let response = app
-            .clone()
-            .oneshot(request("/studio/assets/missing.js"))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    for uri in ["/", "/studio", "/studio/", "/studio/explorer/a-route"] {
+        let response = app.clone().oneshot(request(uri)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        assert!(
+            response.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html")
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("installed on its own"), "{text}");
+        assert!(!text.contains("<script"), "no application is served");
     }
     // No CORS headers unless origins are configured.
     let response = app
@@ -583,17 +569,8 @@ async fn studio_and_cors_options() {
     let app = router_with(
         state(),
         &Options {
-            studio: false,
             cors_origins: vec!["http://studio.example".into()],
         },
-    );
-    assert_eq!(
-        app.clone()
-            .oneshot(request("/studio/"))
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::NOT_FOUND
     );
     let preflight = Request::builder()
         .method("OPTIONS")

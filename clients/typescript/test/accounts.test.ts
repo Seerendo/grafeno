@@ -18,7 +18,7 @@ let server: ChildProcess;
 let url: string;
 
 before(async () => {
-  server = spawn(binary, ["serve", "--memory", "--addr", "127.0.0.1:0", "--token", token, "--no-studio"], {
+  server = spawn(binary, ["serve", "--memory", "--addr", "127.0.0.1:0", "--token", token], {
     stdio: ["ignore", "ignore", "pipe"],
   });
   url = await new Promise<string>((resolve, reject) => {

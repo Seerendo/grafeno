@@ -3,8 +3,4 @@ target
 clients/typescript/node_modules
 clients/typescript/dist
 *.redb
-studio/node_modules
-studio/dist
 dist
-apps/desktop/node_modules
-apps/desktop/gen

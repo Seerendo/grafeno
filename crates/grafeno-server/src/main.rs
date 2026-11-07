@@ -25,7 +25,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Serve the JSON HTTP API and Grafeno Studio (at /studio/).
+    /// Serve the JSON HTTP API.
     Serve {
         /// Settings file (`grafeno.toml`); flags and environment variables
         /// take precedence over it.
@@ -43,7 +43,9 @@ enum Command {
         /// If set, every `/v1` request needs `Authorization: Bearer <token>`.
         #[arg(long, env = "GRAFENO_TOKEN", hide_env_values = true)]
         token: Option<String>,
-        /// Do not serve Grafeno Studio.
+        /// Ignored since Grafeno 15 (the engine serves no interface); kept
+        /// for older scripts.
+        #[arg(hide = true)]
         #[arg(long)]
         no_studio: bool,
         /// Allow browsers on this origin to call the API (repeatable; `*`

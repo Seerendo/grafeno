@@ -22,7 +22,7 @@ env:
 
 jobs:
   frontend:
-    name: Studio and TypeScript client
+    name: TypeScript client
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
@@ -31,15 +31,7 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: |
-            studio/package-lock.json
-            clients/typescript/package-lock.json
-      - name: Install the Studio's dependencies
-        run: npm ci --prefix studio --no-audit --no-fund
-      - name: Test the desktop bridge contract
-        run: npm test --prefix studio
-      - name: Type-check and build the Studio
-        run: npm run build --prefix studio
+          cache-dependency-path: clients/typescript/package-lock.json
       - name: Install the client's dependencies
         run: npm ci --prefix clients/typescript --no-audit --no-fund
       - name: Type-check and build the client
@@ -56,58 +48,10 @@ jobs:
         with:
           node-version: 24
       - name: Test the engine and the server
-        run: cargo test --workspace --locked --exclude grafeno-desktop
+        run: cargo test --workspace --locked
       - name: Build the server for the client tests
         run: cargo build --locked -p grafeno-server
       - name: Test the client against the real server
         run: npm test --prefix clients/typescript
       - name: Run the benchmark script once, without performance thresholds
         run: GRAFENO_BENCH_ROUNDS=1 node clients/typescript/bench/read-many.mjs
-
-  desktop:
-    name: Tauri desktop application
-    runs-on: ubuntu-22.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - name: Test the desktop driver's transport
-        run: python3 -m unittest discover -s apps/desktop/tests -p 'test_*.py'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: studio/package-lock.json
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install the Linux desktop libraries
-        timeout-minutes: 10
-        run: |
-          # Avoids downloads stalling on the runner's Azure mirror.
-          for grafeno_apt_source in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources /etc/apt/apt-mirrors.txt /etc/apt/apt-mirrors-security.txt; do
-            if [ -f "$grafeno_apt_source" ]; then
-              sudo sed -i -E 's|https?://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "$grafeno_apt_source"
-            fi
-          done
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
-            libayatana-appindicator3-dev webkit2gtk-driver xvfb xauth dbus-x11
-      - name: Build the Studio that Tauri embeds
-        run: |
-          npm ci --prefix studio --no-audit --no-fund
-          npm run build --prefix studio
-      - name: Test the desktop bridge
-        run: cargo test --locked -p grafeno-desktop
-      - name: Build the desktop application
-        run: cargo build --locked -p grafeno-desktop
-      - name: Install Tauri's test driver
-        run: cargo install tauri-driver --locked
-      - name: Test the window on a virtual display
-        run: dbus-run-session -- xvfb-run -a -s "-screen 0 1600x1000x24" python3 apps/desktop/tests/ui_smoke.py
-      - name: Keep the desktop screenshots and diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pruebas-escritorio-linux
-          path: reports/desktop-e2e/
-          if-no-files-found: ignore
-          retention-days: 7

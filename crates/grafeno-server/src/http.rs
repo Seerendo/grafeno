@@ -278,22 +278,11 @@ impl AppState {
 }
 
 /// What the HTTP server offers besides the API.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Options {
-    /// Serve Grafeno Studio at `/studio/` (when the binary includes it).
-    pub studio: bool,
-    /// Origins allowed to call the API from a browser (CORS), such as a
-    /// Studio hosted elsewhere; `*` allows any origin.
+    /// Origins allowed to call the API from a browser (CORS), such as
+    /// Grafeno Studio served from a web server; `*` allows any origin.
     pub cors_origins: Vec<String>,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            studio: true,
-            cors_origins: Vec::new(),
-        }
-    }
 }
 
 /// Serves until Ctrl+C (or SIGTERM on Unix, as sent by systemd).
@@ -311,9 +300,6 @@ pub async fn serve_until(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
     eprintln!("grafeno listening on http://{local}");
-    if options.studio && crate::studio::INCLUDED {
-        eprintln!("Grafeno Studio at http://{local}/studio/");
-    }
     crate::events::start(&state);
     axum::serve(
         listener,
@@ -531,14 +517,15 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
         .route_layer(middleware::from_fn_with_state(state.clone(), admit))
         .route_layer(middleware::from_fn_with_state(state.clone(), observe));
-    let mut app = Router::new().route("/health", get(health)).nest("/v1", v1);
-    if options.studio {
-        app = app
-            .route("/", get(crate::studio::redirect))
-            .route("/studio", get(crate::studio::redirect))
-            .route("/studio/", get(crate::studio::index))
-            .route("/studio/{*path}", get(crate::studio::asset));
-    }
+    // No interface here (15.1): `/` and the Studio's old place say where
+    // it went.
+    let app = Router::new()
+        .route("/health", get(health))
+        .nest("/v1", v1)
+        .route("/", get(crate::studio::note))
+        .route("/studio", get(crate::studio::note))
+        .route("/studio/", get(crate::studio::note))
+        .route("/studio/{*path}", get(crate::studio::note));
     // A panic while serving a request (a damaged page, a bug) answers 500
     // instead of dropping the connection.
     let mut app = app
