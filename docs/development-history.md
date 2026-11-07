@@ -234,7 +234,18 @@ presentan el proyecto y los primeros pasos.
   replicated and backed up; read with the `audit` privilege as pages, a
   stream, JSON Lines or `db.audit()` in GQ.
 
-Next, the rest of phase 14: identities from outside (OIDC); phase 15: the engine and the interface apart (the
+- **Phase 15.1, the engine alone:** the engine has no interface; Grafeno
+  Studio and the desktop app moved to their own repository (gfStudio), to
+  be installed on their own, as pgAdmin is next to PostgreSQL. The engine's
+  packages install the engine only.
+
+- **Phase 15.2, the engine's installers (first part):** a one-liner that
+  installs the `.rpm` or `.deb` with the system's package manager (RHEL,
+  AlmaLinux, Rocky, Fedora, Debian, Ubuntu) or the static binary, always
+  checking checksums; a guided Windows setup (data folder, port, network
+  and firewall, unattended parameters); both tested on clean machines.
+
+Next, the rest of phase 15: the engine and the interface apart (the
 engine installs natively like a database server, from a `curl` one-liner,
 signed APT and DNF repositories or a guided Windows setup, with no Docker
 needed; Grafeno Desktop becomes a separate product that talks to engines

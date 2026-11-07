@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="README.md">English</a> · <strong>Español</strong><br>
-  <a href="#empezar-por-el-escritorio">Empezar</a> ·
+  <a href="#instalar-el-motor">Empezar</a> ·
   <a href="docs/install.md">Instalación</a> ·
   <a href="docs/query-language.md">Consultas GQ</a> ·
   <a href="CONTRIBUTING.es.md">Contribuir</a>
@@ -17,9 +17,12 @@ Conecta entidades, documentos y hechos; conserva su procedencia e historial;
 y combina búsqueda por texto, vectores y relaciones para recuperar contexto.
 Su primer cliente es [Grafito](https://github.com/Seerendo/grafito).
 
-En el escritorio, abre una base local con el motor dentro de la aplicación
-Tauri. También puede utilizarse como biblioteca Rust, servidor HTTP o servidor
-MCP para agentes.
+Grafeno es solo el motor, como lo es PostgreSQL: un servidor (API HTTP, MCP
+para agentes, clúster), una consola (`grafeno shell`) y comandos de
+administración, sin interfaz gráfica. **Grafeno Studio**, la interfaz, es un
+producto aparte que se instala por su cuenta (como pgAdmin) y se conecta a los
+motores a través de su API, como cualquier otro cliente. Grafeno también se
+integra como biblioteca Rust.
 
 ## Qué puedes hacer
 
@@ -29,32 +32,29 @@ MCP para agentes.
 | **Consultar el pasado** | Distinguir cuándo un hecho era válido y cuándo el sistema lo conoció mediante `VALID AT` y `KNOWN AT`. |
 | **Encontrar contexto** | Combinar búsqueda BM25, vectores HNSW y expansión del grafo; preparar contexto con un presupuesto de tokens. |
 | **Mantener la memoria** | Resolver entidades, revisar posibles duplicados, registrar fusiones reversibles y resumir comunidades sin un modelo. |
-| **Explorar y consultar** | Visualizar relaciones, editar información y ejecutar GQ, un lenguaje parecido a Cypher. |
+| **Consultar** | GQ, un lenguaje parecido a Cypher, desde la consola, la API HTTP, MCP o cualquier cliente. |
 | **Operar la base** | Cuentas que inician sesión, roles con concesiones y denegaciones hasta etiquetas, propiedades y registros, claves de API, respaldos, importación y exportación, comprobaciones de integridad y reconstrucción de índices. |
 | **Operar un clúster** | Varios servidores sincronizados con Raft: elección de líder, recuperación ante fallos, lecturas linealizables, lecturas grandes repartidas entre miembros y namespaces en varios grupos. |
 
-## Empezar por el escritorio
+## Instalar el motor
 
-**Grafeno Desktop** permite crear o abrir archivos `.redb`, recuperar bases
-recientes y conectarse a un servidor. El modo local ejecuta el motor dentro del
-proceso: no necesita un servicio ni abre un puerto.
+Windows (un instalador `.exe` con el servicio), Linux (`.deb`, `.rpm` y un
+instalador de una línea con `curl` que también sirve para AlmaLinux, Rocky y
+RHEL) y un `.tar.gz`: consulta la
+[guía de instalación](docs/install.md). El motor se ejecuta como servicio en
+`127.0.0.1:7810`; su configuración está en `grafeno.toml`.
 
-Para conocer los paquetes de Windows y Linux, consulta la
-[guía de instalación](docs/install.md) y la
-[documentación de escritorio](apps/desktop/README.es.md).
-
-Para ejecutarlo desde el código, prepara primero los
-[requisitos de desarrollo](CONTRIBUTING.es.md#requisitos). Desde la raíz:
+Desde el código, con Rust instalado:
 
 ```bash
-npm ci --prefix studio
-npm run build --prefix studio
-cargo run --locked -p grafeno-desktop
+cargo build --release -p grafeno-server
 ```
 
-Un archivo `.redb` solo puede estar abierto en un proceso a la vez. Cierra la
-base en el escritorio antes de abrir ese mismo archivo con el servidor o la
-consola, y viceversa.
+El binario queda en `target/release/grafeno`.
+
+Un archivo `.redb` solo puede estar abierto en un proceso a la vez: detén el
+servicio antes de abrir su archivo con la consola, o conecta la consola al
+servicio (`grafeno shell --config …`).
 
 ## Una consulta, relaciones e historia
 
@@ -88,8 +88,8 @@ comunidades y similitud. Consulta la [referencia de GQ](docs/query-language.md).
 
 | Forma de acceso | Punto de entrada |
 | --- | --- |
-| Escritorio local o conexión a un servidor | [Aplicación Tauri](apps/desktop/README.md) |
 | Servicio HTTP, servidor MCP y consola | [Servidor Grafeno](crates/grafeno-server/README.md) |
+| Una interfaz gráfica | Grafeno Studio, instalado aparte, mediante la API HTTP |
 | Aplicaciones JavaScript y TypeScript | [Cliente TypeScript](clients/typescript/README.md) |
 | Biblioteca Rust embebida | [`grafeno`](crates/grafeno/src/lib.rs) y [`grafeno-memory`](crates/grafeno-memory/src/lib.rs) |
 
@@ -105,9 +105,7 @@ Para probar el servidor HTTP con datos temporales en memoria:
 grafeno serve --memory
 ```
 
-Escucha por defecto en `127.0.0.1:7810`. Studio está en
-<http://127.0.0.1:7810/studio/> cuando su compilación se incluye en el binario.
-Los datos de `--memory` se pierden al cerrar el proceso. Para una configuración
+Escucha por defecto en `127.0.0.1:7810`. Los datos de `--memory` se pierden al cerrar el proceso. Para una configuración
 persistente y autenticada, sigue la [guía del servidor](docs/install.md#settings).
 
 ## Cómo está organizado
@@ -118,27 +116,24 @@ persistente y autenticada, sigue la [guía del servidor](docs/install.md#setting
 | `crates/grafeno` | Almacenamiento redb, transacciones, índices, recorridos y algoritmos. |
 | `crates/grafeno-memory` | Recuperación híbrida, contexto, extracción y mantenimiento de memoria. |
 | `crates/grafeno-query` | Parser, planificación y ejecución de GQ. |
-| `crates/grafeno-server` | API HTTP, MCP, consola y administración. |
-| `studio` | Interfaz compartida por el navegador y el escritorio. |
-| `apps/desktop` | Ventana Tauri, archivos locales, menús y puente hacia el motor. |
+| `crates/grafeno-server` | API HTTP, MCP, consola y administración: el binario `grafeno`. |
+| `crates/grafeno-raft`, `crates/grafeno-cluster` | Raft y el clúster. |
 | `clients/typescript` | Cliente HTTP para aplicaciones. |
+| `packaging` | Instalador de Windows, paquetes de Linux, la preparación del instalador de una línea y una compose de clúster. |
 
 ## Desarrollo y pruebas
 
 La [guía de contribución en español](CONTRIBUTING.es.md) y su
-[versión en inglés](CONTRIBUTING.md) incluyen los requisitos, la compilación
-del escritorio y una alternativa que reduce el espacio temporal utilizado.
-
-Para verificar el motor sin instalar las bibliotecas gráficas de Tauri:
+[versión en inglés](CONTRIBUTING.md) incluyen los requisitos y una alternativa
+que reduce el espacio temporal utilizado.
 
 ```bash
-cargo test --workspace --locked --exclude grafeno-desktop
+cargo test --workspace --locked
 ```
 
-El [workflow de contribuciones](.github/workflows/ci.yml) verifica interfaz y
-cliente TypeScript, motor y servidor, integración del cliente, pruebas del
-puente Tauri, compilación y flujos de la ventana en Linux con capturas.
-La revisión visual manual y los instaladores requieren comprobaciones adicionales.
+El [workflow de contribuciones](.github/workflows/ci.yml) verifica el motor y
+el servidor, y el cliente TypeScript contra el binario real. Compilar no
+requiere Node: solo lo usan las pruebas del cliente.
 
 ## Diseño, rendimiento y alcance
 

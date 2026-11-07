@@ -397,11 +397,11 @@ without a current user. They remain possible for embedded use.
     Raft; a leader elected among them coordinates writes, the others take
     over when it fails, and reads and large queries spread over all of
     them.
-14. **Users, roles and permissions** (in progress, 14.1 to 14.5 done; six steps; see below):
+14. **Users, roles and permissions** (done, in five steps; see below):
     a complete role-based access control, as most databases have: users who
     sign in, roles and privileges granted with `GRANT` and `REVOKE`, rights
     down to labels, properties and records, and an audit log.
-15. **Engine and interface apart** (planned, in five steps; see below):
+15. **Engine and interface apart** (in progress, 15.1 done, 15.2 begun; in five steps; see below):
     the engine's installers install only the engine (Windows `.exe`, Linux
     `.deb`, `.rpm` and a `curl` one-liner), as a professional installation
     in the way PostgreSQL's is, with no Docker needed; and the interface
@@ -2438,7 +2438,7 @@ As built (`grafeno/src/access.rs`, `grafeno-server/src/auth.rs`,
   browser.
 - Not built in this step: roles beyond the three levels (14.2), managing
   access in GQ (14.3), finer enforcement (14.4), the audit log (14.5),
-  external identities (14.6), lockout counts shared across members, and a
+  lockout counts shared across members, and a
   prompt in the Studio of an open server to protect it (its first-account
   screen shows when it is not connected).
 
@@ -2810,15 +2810,10 @@ As built (`grafeno/src/audit.rs`, the access tables' writes,
   request refused while a cluster has no leader are lost (reported on the
   member's standard error).
 
-**14.6 External identities (optional).**
-
-- Sign-in through an external identity provider for organizations that have
-  one: OpenID Connect (with its groups mapped to roles), and client
-  certificates (mutual TLS) for services. Local accounts keep working with
-  none of it, and nothing calls out unless configured.
-- Done when: sign-in and group mapping are tested against a local test
-  provider, and the server works offline with it configured but
-  unreachable (local accounts and existing sessions go on).
+Identities from outside (OpenID Connect, client certificates) are not
+planned: as in PostgreSQL or Oracle, the accounts are the engine's own,
+created in the engine (`CREATE USER`, `grafeno users`). An application with
+its own users signs them in itself and reaches Grafeno as its accounts.
 
 **Measures for the phase:** the cost of authorization on reads and writes
 (none, a namespace grant, label and property restrictions, record
@@ -2847,7 +2842,8 @@ releases:
   (PostgreSQL is the model): Windows setup `.exe` (with the service), Linux
   `.deb` and `.rpm` from signed package repositories (with the systemd
   unit), a `curl … | sh` one-liner, and a `.tar.gz` for offline machines.
-  Docker stays available and is never required.
+  No Docker image is published (the installers make it unnecessary); a
+  test cluster's compose builds its own.
 - **Grafeno Desktop**, the interface: the Studio as a desktop application,
   Windows `.exe` (and `.msi`), Linux `.deb`, `.rpm` (and `.AppImage`). It
   contains no engine: it talks to engines (on the same machine or others,
@@ -2858,7 +2854,7 @@ Phases 13 and 14 add views to the Studio as it is (cluster status, sign-in,
 users and roles); this phase moves them with it. Each step ends with tests,
 documentation and its own commit.
 
-**15.1 The engine alone.**
+**15.1 The engine alone** (done).
 
 - The Studio leaves the engine: no `studio` feature, no `include_dir`, no
   `/studio/` route (it answers with a short note pointing to Grafeno
@@ -2874,7 +2870,36 @@ documentation and its own commit.
   and installing its packages on a clean Windows and in clean Debian and
   Fedora containers brings no graphical files or dependencies.
 
-**15.2 A professional installation of the engine.**
+As built:
+
+- The Studio, the desktop app and a copy of the TypeScript client moved to
+  their own repository, **gfStudio** (Grafeno Studio), with their own
+  checks; their history up to here stays in this one (14.5, `87dc149`). The
+  desktop app came as it was, to be rebuilt there to talk to engines only
+  over HTTP. The TypeScript client stays here as the engine's client
+  library (the API's contract, 15.3), as node-postgres is next to
+  PostgreSQL; no installer of the engine carries it.
+- The engine serves no interface: no `studio` feature, no `include_dir`, no
+  `build.rs` step but the Windows icon; `/` and `/studio/` answer a short
+  page saying the engine has no interface and Grafeno Studio is installed
+  on its own. `studio` in `grafeno.toml` and `--no-studio` are still
+  accepted (and ignored), so older settings and scripts keep working.
+- The packages install the engine only: the binary, the settings, the
+  service (or systemd unit), the setup script and the README. The `.deb`
+  and `.rpm` lost the `grafeno-studio.desktop` entry and the `hicolor`
+  icons (`packaging/linux/icons` is gone) and depend on nothing graphical;
+  the Windows setup lost the Studio shortcut and "Open Grafeno Studio". No
+  Docker image is offered any more (the installers make it unnecessary): the
+  Dockerfile that remains builds the test cluster of `packaging/compose`.
+  The Linux packages build without a Node stage; CI and
+  the release workflow build and test the engine with Rust alone (Node
+  only for the client's tests).
+- The binary (Windows, release) went from 27 877 888 to 26 907 136 bytes
+  (0.93 MiB, 3.5% smaller).
+- Tests: `http.rs` (the note at `/` and `/studio/…`, CORS), `config.rs`
+  (older settings with `studio` load), the whole workspace with no Node.
+
+**15.2 A professional installation of the engine** (begun: the installers).
 
 Today: `install.sh` (`curl -fsSL …/install.sh | sh`) downloads a release
 archive, checks its SHA-256 and installs the binary, and with `--service`
@@ -2930,6 +2955,40 @@ upgrades that protect the data, a guided Windows setup, and signatures.
   the repositories, the packages and the Windows setup each install,
   initialize, upgrade (with the backup taken) and remove the engine,
   interactively and unattended, and `grafeno doctor` passes after each.
+
+Built so far (the installers, the first part):
+
+- The one-liner (`install.sh`): as root it reads `/etc/os-release` and
+  installs the release's package with the system's manager: the `.rpm` with
+  `dnf` or `yum` on RHEL, AlmaLinux, Rocky, Oracle Linux, CentOS Stream,
+  Fedora and Amazon Linux, the `.deb` with `apt` on Debian, Ubuntu and their
+  derivatives; elsewhere, without root or with `--binary`, the static
+  binary (with `--service`, the unit), labelled for SELinux. Every download
+  is checked against its published SHA-256, which is now required. Options
+  as flags or environment variables (`--version`, `--binary`, `--prefix`,
+  `--service`, `--no-start`). Releases carry the packages also under names
+  without the version, which the latest-release URL needs.
+- The packages declare what their scripts need (`shadow-utils`, `passwd`),
+  and the setup step can leave the service enabled but stopped
+  (`GRAFENO_NO_START`).
+- The Windows setup is guided as PostgreSQL's is: the program folder, the
+  data folder, the port, only this computer or the network (with a
+  firewall rule, removed on uninstall), the service and the PATH; the same
+  as parameters for an unattended install (`/DATADIR=`, `/PORT=`,
+  `/NETWORK=`, `/DIR=`, `/TASKS=`). An upgrade asks nothing about settings
+  and keeps them; uninstalling keeps the settings and the data.
+- Tested on clean machines: `packaging/linux/test-install.sh` runs the
+  one-liner as root and as a user in AlmaLinux 9 and 8, Rocky 9, Fedora 42,
+  Debian 12 and Ubuntu 24.04 containers (all pass: the version, the user,
+  the settings, the server answering with them, nothing graphical
+  installed or required), and boots systemd in AlmaLinux 9 (the service
+  runs and is enabled; removing the package keeps the data). The
+  `installers` workflow repeats it, and installs, upgrades and uninstalls
+  the Windows setup unattended on a clean Windows runner.
+- Not built yet (the rest of 15.2): signed APT and DNF repositories and
+  signed packages, aarch64 packages, `grafeno setup` and several instances,
+  backups taken by package upgrades, `grafeno doctor`, a `winget` package,
+  and SELinux and AppArmor policies.
 
 **15.3 The public API as the only contract.**
 

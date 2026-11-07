@@ -1,44 +1,17 @@
 # Installing Grafeno
 
-There are two families of installers:
-
-- **Grafeno Desktop**, the desktop application: Grafeno Studio in its own
-  window, which opens database files with the engine inside the app (no
-  service, no port) or connects to a Grafeno server. For using Grafeno on
-  your own computer.
-- **The Grafeno server**: the `grafeno` program as a service, for agents
-  and applications that need Grafeno running all the time (and for
-  machines without a desktop).
-
-Both can be installed side by side. A database file can be open in one of
-them at a time.
-
-## Grafeno Desktop
-
-| System | File |
-| ------ | ---- |
-| Windows 10/11 (x64) | `grafeno-desktop-<version>-windows-x64-setup.exe` (for your user, no administrator) or `grafeno-desktop-<version>-windows-x64.msi` |
-| Debian, Ubuntu (x86_64) | `grafeno-desktop_<version>_amd64.deb` |
-| Fedora, RHEL, openSUSE (x86_64) | `grafeno-desktop-<version>-1.x86_64.rpm` |
-| Any Linux (x86_64) | `grafeno-desktop-<version>-x86_64.AppImage` (`chmod +x`, then run it) |
-
-The installers add **Grafeno Desktop** to the Start menu or the application
-menu, with the Grafeno icon, and make `.redb` files open with it. On
-Windows the window uses WebView2, already part of Windows 10 and 11 (the
-setup installs it if it is missing); on Linux the packages depend on
-WebKitGTK, which the package manager installs.
-
-On first start it shows the start screen: **New database…** creates a
-file, **Open…** opens one, recent databases are listed, and **A Grafeno
-server** connects to the installed service (`http://127.0.0.1:7810` with
-the token from `grafeno config token`) or another machine. More in
-[apps/desktop/README.md](../apps/desktop/README.md).
+This guide installs **the engine**: the `grafeno` program, as a service
+that starts with the system. It has no graphical interface, as PostgreSQL
+has none: work with it from its console (`grafeno shell`), its HTTP API,
+MCP, or any client. **Grafeno Studio**, the graphical interface, is a
+separate product with its own installers (as pgAdmin is), which connects to
+engines through their API.
 
 ## The Grafeno server
 
-Every way of installing the server gives the same `grafeno` program: the HTTP server
-with Grafeno Studio (the web interface) inside, the MCP server, the shell
-and the administration commands. The installers also run it as a service
+Every way of installing the server gives the same `grafeno` program: the
+HTTP server, the MCP server, the shell and the administration commands, and
+nothing else. The installers also run it as a service
 that starts with the system.
 
 | System | File | What it sets up |
@@ -47,13 +20,12 @@ that starts with the system.
 | Debian, Ubuntu and derivatives (x86_64) | `grafeno_<version>-1_amd64.deb` | `/usr/bin/grafeno`, the `grafeno` systemd service and user |
 | Fedora, RHEL, Rocky, Alma, openSUSE (x86_64) | `grafeno-<version>-1.x86_64.rpm` | the same |
 | Any Linux (x86_64) | `grafeno-x86_64-unknown-linux-musl.tar.gz`, or `install.sh` | the binary; the service with `--service` |
-| Containers | `Dockerfile` | an image serving on port 7810, data in `/data` |
 
 The Linux binary is static (musl): the same file runs on any distribution,
 whatever its glibc version.
 
-After installing, open **Grafeno Studio** at <http://127.0.0.1:7810/studio/>.
-It asks for the server's token, which the installer generated:
+After installing, the engine serves on `127.0.0.1:7810`. Its console, a
+client or Grafeno Studio connects with the token the installer generated:
 
 ```bash
 grafeno config token
@@ -64,17 +36,31 @@ grafeno config token
 ### Windows
 
 Run `grafeno-<version>-windows-x64-setup.exe` (it asks for administrator
-rights). It lets you choose to:
+rights). As PostgreSQL's setup does, it asks:
 
-- **Run Grafeno as a Windows service**: the `Grafeno` service starts with
-  Windows and serves on `127.0.0.1:7810`.
-- **Add grafeno to the system PATH**: to run `grafeno` from any terminal
-  (open a new one after installing).
+- the **program folder** (`C:\Program Files\Grafeno` by default);
+- the **data folder**, where the service keeps its database
+  (`C:\ProgramData\Grafeno\data` by default; another disk is fine);
+- the **port** (7810 by default);
+- **who may connect**: only this computer (`127.0.0.1`), or other computers
+  too (every network interface, with a firewall rule for the port); every
+  request needs the token or an account either way;
+- whether to **run Grafeno as a Windows service** (it starts with Windows)
+  and **add grafeno to the system PATH**.
 
-It creates `C:\ProgramData\Grafeno\grafeno.toml` (address, token, Studio)
-and keeps the database in `C:\ProgramData\Grafeno\data`. The Start menu gets
-*Grafeno Studio*, *Grafeno Shell* (connected to the service) and *Grafeno
-settings*. The service logs to `C:\ProgramData\Grafeno\grafeno.log`.
+It writes `C:\ProgramData\Grafeno\grafeno.toml` (address, data, a new
+token) and starts the `Grafeno` service. The Start menu gets *Grafeno Shell*
+(connected to the service) and *Grafeno settings*. The service logs to
+`C:\ProgramData\Grafeno\grafeno.log`.
+
+Unattended (scripts, provisioning), the same answers are parameters:
+
+```powershell
+.\grafeno-0.1.0-windows-x64-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /DIR="C:\Grafeno" /DATADIR="D:\GrafenoData" /PORT=7810 /NETWORK=0 /TASKS="service,path"
+```
+
+`/NETWORK=1` listens on every interface and opens the port in the firewall;
+`/LOG=setup.log` keeps a log of the install.
 
 Manage the service like any other (`services.msc`, or PowerShell as
 administrator):
@@ -84,9 +70,11 @@ Restart-Service Grafeno
 ```
 
 Upgrading runs the new installer over the old one: it stops the service,
-replaces the program, and keeps the settings and data. Uninstalling
-(Settings → Apps) removes the program, the service and the PATH entry, and
-keeps `C:\ProgramData\Grafeno`.
+replaces the program, keeps the settings and the data (it asks nothing about
+them again) and starts the service. Uninstalling (Settings → Apps, or
+`unins000.exe /VERYSILENT`) removes the program, the service, the firewall
+rule and the PATH entry, and keeps `C:\ProgramData\Grafeno` and the data
+folder.
 
 Without the installer, `grafeno-x86_64-pc-windows-msvc.zip` has the bare
 `grafeno.exe`; as administrator, the service can then be set up by hand:
@@ -112,7 +100,8 @@ sudo dnf install ./grafeno-0.1.0-1.x86_64.rpm
 ```
 
 Fedora 45 and later reject unsigned packages; until releases are signed,
-add `--nogpgcheck` to `dnf` (or `--nosignature` to `rpm -i`).
+add `--nogpgcheck` to `dnf` (or `--nosignature` to `rpm -i`). The one-liner
+does so after checking the package's SHA-256.
 
 #### What the packages do
 
@@ -122,8 +111,8 @@ add `--nogpgcheck` to `dnf` (or `--nosignature` to `rpm -i`).
 - Install and start the `grafeno` systemd service, sandboxed so that it can
   write its data folder and nothing else (`systemd-analyze security
   grafeno` rates it 1.3, "OK").
-- Add **Grafeno Studio** to the application menu, with the Grafeno icon:
-  it opens the service's Studio in the browser.
+- Install nothing graphical: no menu entry, no icon, no dependency on a
+  desktop stack.
 
 ```bash
 systemctl status grafeno
@@ -137,33 +126,36 @@ Removing the package stops the service and keeps `/var/lib/grafeno` and
 `/etc/grafeno`, even on purge: they may be the only copy of someone's
 memory.
 
-### Any Linux: install.sh
+### The one-liner: any Linux, AlmaLinux and RHEL included
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Seerendo/grafeno/main/install.sh | sudo sh
+```
+
+As root, it finds the distribution in `/etc/os-release` and installs the
+release's package with its package manager, so the result is the same as
+installing the package by hand (the `grafeno` user, the settings, the
+systemd service, started):
+
+| Distribution | What it installs |
+| --- | --- |
+| RHEL, AlmaLinux, Rocky, Oracle Linux, CentOS Stream, Fedora, Amazon Linux | the `.rpm`, with `dnf` (or `yum`) |
+| Debian, Ubuntu and their derivatives | the `.deb`, with `apt` |
+| Anything else | the static binary to `/usr/local/bin` (add `--service` for the service) |
+
+Without root (no `sudo`), or with `--binary`, it installs the binary into
+`~/.local/bin`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Seerendo/grafeno/main/install.sh | sh
 ```
 
-It downloads the latest release for your architecture, checks its SHA-256,
-and installs `grafeno` to `~/.local/bin` (or `/usr/local/bin` as root). With
-`--service` (as root, with systemd) it also sets up the service as the
-packages do:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Seerendo/grafeno/main/install.sh | sudo sh -s -- --service
-```
-
-Other options: `--version v0.1.0`, `--prefix DIR`. `GRAFENO_BASE_URL`
-points it at a mirror.
-
-### Docker
-
-```bash
-docker build -t grafeno .
-```
-
-```bash
-docker run -d -p 7810:7810 -v grafeno-data:/data -e GRAFENO_TOKEN=change-me grafeno
-```
+Every file it downloads is checked against the SHA-256 published with the
+release; a mismatch stops it. On SELinux systems it labels a binary it
+installs so systemd may run it. Options, as flags or environment variables
+(for unattended use): `--version 0.1.0` (`GRAFENO_VERSION`), `--binary`
+(`GRAFENO_METHOD=binary`), `--prefix DIR` (`GRAFENO_PREFIX`), `--service`,
+`--no-start`; `GRAFENO_BASE_URL` points it at a mirror.
 
 ## A cluster of servers
 
@@ -254,7 +246,7 @@ first account, a superuser, with the server stopped or through it:
 grafeno users create admin --superuser --config /etc/grafeno/grafeno.toml
 ```
 
-(On an open server, Grafeno Studio also offers to create it.) Then make
+(On an open server, Grafeno Studio also offers to create it when it connects.) Then make
 the people who sign in, with grants per namespace, and service accounts
 for agents and applications, which use API keys:
 
@@ -365,7 +357,6 @@ grafeno import --format graphml -n notes notes.graphml
 db = "/var/lib/grafeno/grafeno.redb"
 addr = "127.0.0.1:7810"     # "0.0.0.0:7810" listens on every network interface
 token = "…"                 # every /v1 request needs `Authorization: Bearer <token>`
-studio = true               # serve Grafeno Studio at /studio/
 cors_origins = []           # origins allowed to call the API from a browser ("*": any)
 durability = "immediate"    # or "eventual": faster writes, a crash loses at most 0.5 s
 max_requests = 512          # served at once; more get 503 with Retry-After
@@ -449,29 +440,43 @@ stays up means writes arrive faster than one writer commits them (about
 past the queue's limit. Load large exports with `?bulk=true`: they then go
 in chunks between the agents' writes instead of before them.
 
-## Grafeno Studio on its own
+## Browsers and Grafeno Studio
 
-The Studio is a static web app. Besides the copy inside `grafeno`, its build
-(`studio/dist`) can be hosted anywhere and pointed at a server, which must
-then allow that origin:
+The engine serves no interface (before Grafeno 15 it had the Studio at
+`/studio/`; that address now says where it went). Grafeno Studio, installed
+on its own, connects to the engine's address with its token. A web page that
+calls the API from a browser (the Studio hosted on a web server, an app of
+your own) needs its origin allowed:
 
 ```bash
 grafeno serve --config grafeno.toml --cors-origin https://studio.example.com
 ```
-
-`grafeno serve --no-studio` turns the built-in copy off.
 
 ## Building the installers
 
 | Files | Command | Needs |
 | ----- | ------- | ----- |
 | Linux `.tar.gz`, `.deb`, `.rpm` | `docker build -f packaging/linux/Dockerfile --output dist/linux .` | Docker |
-| Windows setup `.exe` | `cd studio && npm ci && npm run build`, then `cargo build --release -p grafeno-server`, then `iscc /DAppVersion=0.1.0 packaging\windows\grafeno.iss` | Node 22+, Rust (MSVC), Inno Setup 6 |
-| Grafeno Desktop (the installers of the system it runs on: `.exe` and `.msi`, or `.deb`, `.rpm` and `.AppImage`) | `npm ci --prefix studio`, `npm ci --prefix apps/desktop`, then `cd apps/desktop && npx tauri build` | Node 22+, Rust; on Linux WebKitGTK (see [apps/desktop/README.md](../apps/desktop/README.md)) |
+| Windows setup `.exe` | `cargo build --release -p grafeno-server`, then `iscc /DAppVersion=0.1.0 packaging\windows\grafeno.iss` | Rust (MSVC), Inno Setup 6 |
 
-Every icon comes from `docs/assets/logo.svg`: `npm run icons` in
-`apps/desktop` renders the desktop app's icons, `packaging/windows/grafeno.ico`
-(the server's executable, installer and shortcuts) and
-`packaging/linux/icons/` (the server packages' menu entry).
-`.github/workflows/release.yml` builds all of them and publishes a GitHub
-release when a `v*` tag is pushed.
+No Node and no graphical toolkit: the engine builds from Rust alone. The
+Linux packages also come under names without the version
+(`grafeno-linux-x86_64.rpm`, `grafeno-linux-amd64.deb`), which the one-liner
+asks the latest release for. `packaging/windows/grafeno.ico` (from
+`docs/assets/logo.svg`) is the icon of the executable, the installer and its
+shortcuts. `.github/workflows/release.yml` builds all of them and publishes
+a GitHub release when a `v*` tag is pushed.
+
+How they are tested on clean machines:
+
+- `packaging/linux/test-install.sh [--systemd] [image ...]` serves
+  `dist/linux` as a release and runs the one-liner, as root and as a user,
+  in clean containers (AlmaLinux 9 and 8, Rocky 9, Fedora 42, Debian 12,
+  Ubuntu 24.04 by default): the version, the user, the settings, the server
+  answering with them, and nothing graphical installed. `--systemd` also
+  boots systemd in an AlmaLinux container: the service runs and is enabled,
+  and removing the package keeps the settings and the data.
+- `.github/workflows/installers.yml` runs that on Linux, and on a Windows
+  runner installs the setup unattended (its own data folder and port),
+  checks the service, the settings and the API, upgrades over it (the
+  settings kept), and uninstalls (the data kept).

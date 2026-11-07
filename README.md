@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>English</strong> · <a href="README.es.md">Español</a><br>
-  <a href="#start-with-the-desktop">Get started</a> ·
+  <a href="#install-the-engine">Get started</a> ·
   <a href="docs/install.md">Installation</a> ·
   <a href="docs/query-language.md">GQ queries</a> ·
   <a href="CONTRIBUTING.md">Contribute</a>
@@ -17,9 +17,11 @@ entities, documents and facts; preserves provenance and history; and combines
 text, vector and graph retrieval to assemble context. Its first client is
 [Grafito](https://github.com/Seerendo/grafito).
 
-On the desktop, open a local database with the engine inside the Tauri
-application. Grafeno can also run as a Rust library, HTTP server or MCP server
-for agents.
+Grafeno is the engine alone, as PostgreSQL is: a server (HTTP API, MCP for
+agents, clustering), a console (`grafeno shell`) and administration commands,
+with no graphical interface. **Grafeno Studio**, the interface, is a separate
+product installed on its own (as pgAdmin is), and connects to engines through
+their API like any other client. Grafeno also embeds as a Rust library.
 
 ## What you can do
 
@@ -29,31 +31,28 @@ for agents.
 | **Query the past** | Distinguish when a fact was valid from when the system knew it using `VALID AT` and `KNOWN AT`. |
 | **Retrieve context** | Combine BM25 text search, HNSW vectors and graph expansion; pack context into a token budget. |
 | **Maintain memory** | Resolve entities, review possible duplicates, record reversible merges and summarize communities without a model. |
-| **Explore and query** | Visualize relationships, edit information and run GQ, a Cypher-like language. |
+| **Query** | GQ, a Cypher-like language, from the console, the HTTP API, MCP or any client. |
 | **Operate the database** | Accounts that sign in, roles with grants and denials down to labels, properties and records, API keys, backups, import and export, integrity checks and index rebuilds. |
 | **Run a cluster** | Several servers kept in sync with Raft: a leader elected, failover, linearizable reads, large reads split across members, namespaces on several groups. |
 
-## Start with the desktop
+## Install the engine
 
-**Grafeno Desktop** creates or opens `.redb` files, keeps recent databases and
-connects to servers. Local mode runs the engine inside the process: it needs no
-service and opens no port.
+Windows (a setup `.exe` with the service), Linux (`.deb`, `.rpm`, and a
+`curl` one-liner that also suits AlmaLinux, Rocky and RHEL) and a `.tar.gz`:
+see the [installation guide](docs/install.md). The engine runs
+as a service on `127.0.0.1:7810`; its settings are in `grafeno.toml`.
 
-For Windows and Linux packages, see the [installation guide](docs/install.md)
-and the [desktop documentation](apps/desktop/README.md).
-
-To run from source, prepare the [development requirements](CONTRIBUTING.md#requirements)
-first. From the repository root:
+From source, with Rust installed:
 
 ```bash
-npm ci --prefix studio
-npm run build --prefix studio
-cargo run --locked -p grafeno-desktop
+cargo build --release -p grafeno-server
 ```
 
-A `.redb` file can be open in only one process at a time. Close the database in
-the desktop application before opening the same file with the server or shell,
-and vice versa.
+The binary is `target/release/grafeno`.
+
+A `.redb` file can be open in only one process at a time: stop the service
+before opening its file with the console, or connect the console to the
+service instead (`grafeno shell --config …`).
 
 ## A query, relationships and history
 
@@ -87,8 +86,8 @@ communities and similarity. See the [GQ reference](docs/query-language.md).
 
 | Access mode | Entry point |
 | --- | --- |
-| Local desktop or server connection | [Tauri application](apps/desktop/README.md) |
 | HTTP service, MCP server and shell | [Grafeno server](crates/grafeno-server/README.md) |
+| A graphical interface | Grafeno Studio, installed apart, through the HTTP API |
 | JavaScript and TypeScript applications | [TypeScript client](clients/typescript/README.md) |
 | Embedded Rust library | [`grafeno`](crates/grafeno/src/lib.rs) and [`grafeno-memory`](crates/grafeno-memory/src/lib.rs) |
 
@@ -104,9 +103,8 @@ To try the HTTP server with temporary in-memory data:
 grafeno serve --memory
 ```
 
-It listens on `127.0.0.1:7810` by default. Studio is at
-<http://127.0.0.1:7810/studio/> when its build is embedded in the binary.
-Data in `--memory` is lost when the process exits. For persistent, authenticated
+It listens on `127.0.0.1:7810` by default. Data in `--memory` is lost when
+the process exits. For persistent, authenticated
 configuration, follow the [server guide](docs/install.md#settings).
 
 ## Repository structure
@@ -117,34 +115,31 @@ configuration, follow the [server guide](docs/install.md#settings).
 | `crates/grafeno` | redb storage, transactions, indexes, traversals and algorithms. |
 | `crates/grafeno-memory` | Hybrid retrieval, context, extraction and memory maintenance. |
 | `crates/grafeno-query` | GQ parser, planning and execution. |
-| `crates/grafeno-server` | HTTP API, MCP, shell and administration. |
-| `studio` | Interface shared by the browser and desktop application. |
-| `apps/desktop` | Tauri window, local files, menus and engine bridge. |
+| `crates/grafeno-server` | HTTP API, MCP, shell and administration: the `grafeno` binary. |
+| `crates/grafeno-raft`, `crates/grafeno-cluster` | Raft and the cluster. |
 | `clients/typescript` | HTTP client for applications. |
+| `packaging` | Windows setup, Linux packages, the one-liner's setup, a cluster compose. |
 
 ## Development and tests
 
 The [contribution guide](CONTRIBUTING.md) and its
-[Spanish version](CONTRIBUTING.es.md) cover prerequisites, desktop builds and an
-alternative that reduces temporary storage usage.
-
-To check the engine without installing the Tauri graphical libraries:
+[Spanish version](CONTRIBUTING.es.md) cover prerequisites and an alternative
+that reduces temporary storage usage.
 
 ```bash
-cargo test --workspace --locked --exclude grafeno-desktop
+cargo test --workspace --locked
 ```
 
-The [contribution workflow](.github/workflows/ci.yml) checks the Studio and
-TypeScript client, engine and server, client integration, Tauri bridge tests
-and the desktop build and window flows on Linux, with screenshots. Manual
-visual review and installers need additional checks.
+The [contribution workflow](.github/workflows/ci.yml) checks the engine and
+the server, and the TypeScript client against the real binary. Building needs
+no Node: only the client's tests use it.
 
 ## Design, performance and scope
 
 - [Design and decisions](DESIGN.md): architecture, storage and temporal semantics.
 - [Performance](docs/performance.md) and [benchmarks](docs/benchmarks.md): methods, data and limits of project measurements.
 - [Batched reads: contract, tests and reproducible measurements](docs/read-many.md).
-- [Graph expansion](docs/graph-expansion.md): batched neighborhoods and protection from stale replies.
+- [Graph expansion](docs/graph-expansion.md): batched neighborhoods (the endpoint the Studio's graph view uses).
 - [Development history](docs/development-history.md): every phase built so far, in detail.
 
 Embeddings are provided by the client. Context uses an estimated token count by

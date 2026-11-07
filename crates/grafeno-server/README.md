@@ -4,7 +4,7 @@ The `grafeno` binary serves and manages a Grafeno database (installers:
 [docs/install.md](../../docs/install.md)):
 
 - `grafeno serve`: a JSON HTTP API, for applications such as Grafito, and
-  Grafeno Studio, the web interface, at `/studio/`.
+  no interface (Grafeno Studio is installed apart and connects to this API).
 - `grafeno config init | path | token`: the settings file of an installed
   server (`grafeno.toml`).
 - `grafeno service install | uninstall`: the Windows service.
@@ -50,7 +50,6 @@ in-memory database.
 | `--memory`        |                 | off              |
 | `--addr ADDR`     | `GRAFENO_ADDR`  | `127.0.0.1:7810` |
 | `--token TOKEN`   | `GRAFENO_TOKEN` | none (no auth)   |
-| `--no-studio`     |                 | Studio on        |
 | `--cors-origin O` (repeatable, `*` for any) | | none   |
 
 ## Shell
@@ -121,19 +120,6 @@ grafeno import --db restored.redb backup.jsonl
 | `--addr`      | `GRAFENO_ADDR`      | `127.0.0.1:7810`   | `serve`         |
 | `--token`     | `GRAFENO_TOKEN`     | none (no auth)     | `serve`         |
 | `--namespace` | `GRAFENO_NAMESPACE` | `default`          | `mcp`           |
-
-## Docker
-
-```bash
-docker build -t grafeno .
-```
-
-```bash
-docker run -p 7810:7810 -v grafeno-data:/data -e GRAFENO_TOKEN=change-me grafeno
-```
-
-The image listens on `0.0.0.0:7810` and stores data in `/data`. Set a token
-whenever the port is reachable by anything but the application.
 
 ## Access
 

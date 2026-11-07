@@ -14,8 +14,14 @@ port (`addr` in `[cluster]`, 7811 here); open it between members only, as
 traffic between members is authenticated by the shared secret but not
 encrypted.
 
-- **Docker compose**: `packaging/compose/` holds a three-member cluster
-  with two Raft groups (`docker-compose.yml`, `m1.toml` to `m3.toml`):
+- **Docker compose** (to try a cluster on one machine and to run the
+  drills; not a way to install Grafeno): `packaging/compose/` holds a
+  three-member cluster with two Raft groups (`docker-compose.yml`,
+  `m1.toml` to `m3.toml`) and the image its members run:
+
+  ```bash
+  docker build -f packaging/compose/Dockerfile -t grafeno .
+  ```
 
   ```bash
   cd packaging/compose
@@ -54,7 +60,7 @@ leader in about a second.
   `snapshots_installed_total`, and `peer_lag{member}` on the leader.
   Alert on `peer_lag` growing, on `leader_changes_total` rising more than
   once in a while, and on a group with no member where `leader` is 1.
-- Grafeno Studio (and the desktop app) has a **Cluster** view: the
+- Grafeno Studio (installed apart) has a **Cluster** view: the
   groups as the member it talks to sees them, the lag of the others when
   that member leads, what each member runs, where namespaces live, and
   moves.

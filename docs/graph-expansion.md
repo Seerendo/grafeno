@@ -84,7 +84,7 @@ attributed to the canvas. These numbers are not guarantees.
 ## Validation
 
 ```bash
-npm test --prefix studio
+npm test --prefix studio   # in the gfStudio repository
 cargo test --locked -p grafeno-server --test http neighborhoods
 cargo test --locked -p grafeno-server --test access
 npm test --prefix clients/typescript
