@@ -3067,7 +3067,11 @@ As built (in two parts: the installers, then the rest):
   elsewhere confined, working, nothing denied), and on a Windows runner
   installs (the virtual account, an administrator who signs in, events in
   the Event Log, `grafeno doctor`), upgrades, uninstalls keeping the data,
-  reinstalls over it and uninstalls with `/PURGE=1`.
+  reinstalls over it and uninstalls with `/PURGE=1`. It found two bugs of
+  the setup before any release: the uninstaller read a wizard page that
+  does not exist there (it stopped before removing the service), and the
+  data folder was read only from double-quoted TOML strings, while TOML
+  writes Windows paths between single quotes.
 - Not done, and why: the repositories, minisign and code signing need
   keys and a certificate only the project's owner can make (the workflow
   uses them once the secrets exist; `install.sh` checks minisign once its
