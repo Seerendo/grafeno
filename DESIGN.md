@@ -226,7 +226,7 @@ modes cannot share a file. An MCP mode that forwards to an HTTP server
   (`docs/assets/logo.svg`, `studio/public/favicon.svg`). The Windows icon
   (`packaging/windows/grafeno.ico`) is embedded in `grafeno.exe` by
   `build.rs` and used by the installer; since 15.2 it is rendered from the
-  docs site's mark (`packaging/windows/grafeno-mark.svg`, the rings on a
+  Grafeno site's mark (`packaging/windows/grafeno-mark.svg`, the rings on a
   dark graphene lattice) by `packaging/windows/make-icon.sh`, at 16 to 256
   pixels.
 - The build is embedded in the binary (`include_dir`, when `studio/dist`
@@ -3049,7 +3049,7 @@ As built (in two parts: the installers, then the rest):
   administrator and the service in one step (for the bare zip). winget
   manifests (`packaging/windows/winget/make-manifests.py`, validated by
   `winget validate`) come with each release. The installers' icon is the
-  docs site's mark (`grafeno-mark.svg`), rendered to `grafeno.ico` by
+  Grafeno site's mark (`grafeno-mark.svg`), rendered to `grafeno.ico` by
   `packaging/windows/make-icon.sh`.
 - Tested on clean machines: `packaging/linux/test-install.sh --repo
   --systemd --arm64` passes in AlmaLinux 9 and 8, Rocky 9, Fedora 42,

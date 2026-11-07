@@ -644,7 +644,7 @@ The Linux packages also come under names without the version
 one-liner asks the latest release for. `packaging/windows/grafeno.ico`
 is the icon of the executable, the installer and its shortcuts:
 `packaging/windows/make-icon.sh` renders it (16 to 256 pixels, with Docker)
-from `packaging/windows/grafeno-mark.svg`, the docs site's mark.
+from `packaging/windows/grafeno-mark.svg`, the Grafeno site's mark.
 
 `.github/workflows/release.yml` builds all of them when an `engine-v*` tag is
 pushed and publishes a GitHub release; it adds the packages to the

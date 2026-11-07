@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Renders grafeno-mark.svg (the mark of the docs site, grafeno-docs
-# static/img/grafeno-mark.svg) into grafeno.ico: the icon of grafeno.exe,
+# Renders grafeno-mark.svg (Grafeno's mark, as the Grafeno site has it in
+# grafeno-site/public/grafeno-mark.svg) into grafeno.ico: the icon of grafeno.exe,
 # the Windows setup, its uninstaller and its shortcuts. Sizes 16 to 256.
 #
 #   packaging/windows/make-icon.sh
