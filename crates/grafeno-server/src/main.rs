@@ -52,6 +52,11 @@ enum Command {
         /// for any), such as a Studio hosted elsewhere.
         #[arg(long = "cors-origin")]
         cors_origins: Vec<String>,
+        /// Stop (cleanly, as on Ctrl+C) when standard input closes: for a
+        /// program that starts the engine, such as Grafeno Desktop, so that
+        /// it stops with that program even if the program dies.
+        #[arg(long)]
+        stop_with_stdin: bool,
     },
     /// Initialize an instance, as initdb does: its data folder, settings
     /// (a fresh token), first administrator and service, enabled and
@@ -748,6 +753,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             token,
             no_studio,
             cors_origins,
+            stop_with_stdin,
         } => {
             let config = config.map(|path| Config::load(&path)).transpose()?;
             let overrides = Overrides {
@@ -758,7 +764,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 no_studio,
                 cors_origins,
             };
-            service::run_until_signal(ServerSettings::resolve(config, overrides))?;
+            let settings = ServerSettings::resolve(config, overrides);
+            if stop_with_stdin {
+                service::run_until_signal_or_stdin(settings)?;
+            } else {
+                service::run_until_signal(settings)?;
+            }
         }
         Command::Config(command) => match command {
             ConfigCommand::Init {

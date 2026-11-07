@@ -292,6 +292,29 @@ pub fn run_until_signal(settings: ServerSettings) -> Result<(), Box<dyn std::err
     run(settings, http::shutdown_signal())
 }
 
+/// Serves until Ctrl+C, SIGTERM, or standard input closing (the program
+/// that started the engine closed it, or ended): `grafeno serve
+/// --stop-with-stdin`.
+pub fn run_until_signal_or_stdin(
+    settings: ServerSettings,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (closed, wait) = tokio::sync::oneshot::channel::<()>();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut stdin = std::io::stdin();
+        let mut buffer = [0u8; 256];
+        // Whatever is written is ignored; the end of the stream stops it.
+        while matches!(stdin.read(&mut buffer), Ok(n) if n > 0) {}
+        let _ = closed.send(());
+    });
+    run(settings, async move {
+        tokio::select! {
+            _ = http::shutdown_signal() => {}
+            _ = wait => {}
+        }
+    })
+}
+
 #[cfg(windows)]
 pub mod windows {
     //! The Windows service, named `Grafeno`.
