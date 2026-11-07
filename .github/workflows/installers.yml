@@ -72,10 +72,11 @@ jobs:
           pid="$(systemctl show -p MainPID --value grafeno)"
           sudo cat "/proc/$pid/attr/current" | grep -q 'grafeno (enforce)'
           token="$(sudo grafeno config token)"
+          id="$(curl -fs -X POST -H "Authorization: Bearer $token" -H 'content-type: application/json' \
+            -d '{"labels":["Note"],"text":"written under AppArmor"}' http://127.0.0.1:7810/v1/notes/nodes \
+            | sed 's/.*"id":"\([^"]*\)".*/\1/')"
           curl -fs -X POST -H "Authorization: Bearer $token" -H 'content-type: application/json' \
-            -d '{"labels":["Note"],"text":"written under AppArmor"}' http://127.0.0.1:7810/v1/notes/nodes
-          curl -fs -X POST -H "Authorization: Bearer $token" -H 'content-type: application/json' \
-            -d '{"query":"AppArmor"}' http://127.0.0.1:7810/v1/notes/search/text | grep -q 'written under'
+            -d '{"query":"AppArmor"}' http://127.0.0.1:7810/v1/notes/search/text | grep -q "$id"
           sudo grafeno doctor
       - name: An instance with its data elsewhere is confined and works too
         run: |
@@ -133,7 +134,8 @@ jobs:
           if (-not $healthy) { throw "the engine does not answer on 7821" }
           $token = & "C:\Program Files\Grafeno\grafeno.exe" config token
           $headers = @{ Authorization = "Bearer $token" }
-          Invoke-RestMethod http://127.0.0.1:7821/v1/notes/nodes -Method Post -Headers $headers -ContentType 'application/json' -Body '{"labels":["Note"],"text":"written by the virtual account"}' | Out-Null
+          $created = Invoke-RestMethod http://127.0.0.1:7821/v1/notes/nodes -Method Post -Headers $headers -ContentType 'application/json' -Body '{"labels":["Note"],"text":"written by the virtual account"}'
+          "NOTE_ID=$($created.id)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           $session = Invoke-RestMethod http://127.0.0.1:7821/v1/auth/signin -Method Post -ContentType 'application/json' -Body '{"name":"root","password":"An-admin-passw0rd"}'
           if (-not $session.access_token) { throw "the administrator cannot sign in" }
           $note = Invoke-WebRequest http://127.0.0.1:7821/studio/ -UseBasicParsing
@@ -155,6 +157,8 @@ jobs:
           if ($service.StartName -ne 'NT SERVICE\Grafeno') { throw "the upgrade changed the account to $($service.StartName)" }
           if (-not (Select-String -Path "C:\ProgramData\Grafeno\grafeno.toml" -Pattern '7821' -Quiet)) { throw "the upgrade lost the settings" }
           Start-Process "C:\Program Files\Grafeno\unins000.exe" -Wait -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+          # The SCM deletes a service once every handle to it is closed.
+          foreach ($i in 1..30) { if (-not (Get-Service Grafeno -ErrorAction SilentlyContinue)) { break }; Start-Sleep -Milliseconds 500 }
           if (Get-Service Grafeno -ErrorAction SilentlyContinue) { throw "the service is still there" }
           if (-not (Test-Path "C:\GrafenoTest\data\grafeno.redb")) { throw "uninstalling removed the data" }
           if (-not (Test-Path "C:\ProgramData\Grafeno\grafeno.toml")) { throw "uninstalling removed the settings" }
@@ -168,7 +172,7 @@ jobs:
           }
           $token = & "C:\Program Files\Grafeno\grafeno.exe" config token
           $found = Invoke-RestMethod http://127.0.0.1:7821/v1/notes/search/text -Method Post -Headers @{ Authorization = "Bearer $token" } -ContentType 'application/json' -Body '{"query":"virtual"}'
-          if (-not ($found | ConvertTo-Json -Depth 5 | Select-String 'written by the virtual account' -Quiet)) { throw "the kept data is not served" }
+          if (-not ($found | ConvertTo-Json -Depth 5 | Select-String $env:NOTE_ID -Quiet)) { throw "the kept data is not served" }
           Start-Process "C:\Program Files\Grafeno\unins000.exe" -Wait -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/PURGE=1'
           if (Test-Path "C:\GrafenoTest\data") { throw "/PURGE=1 kept the data" }
           if (Test-Path "C:\ProgramData\Grafeno") { throw "/PURGE=1 kept the settings" }
