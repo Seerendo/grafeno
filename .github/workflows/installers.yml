@@ -55,6 +55,15 @@ jobs:
     needs: linux
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # A process's AppArmor label: attr/apparmor/current on kernels that
+      # stack security modules, attr/current on older ones.
+      CONFINED: |
+        confined() {
+          label="$(sudo cat "/proc/$1/attr/apparmor/current" 2>/dev/null || sudo cat "/proc/$1/attr/current")"
+          echo "process $1: $label"
+          case "$label" in *"grafeno (enforce)"*) ;; *) echo "not confined by grafeno"; return 1 ;; esac
+        }
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -66,11 +75,12 @@ jobs:
           for _ in $(seq 50); do curl -fs http://127.0.0.1:7810/health && break; sleep 0.2; done
       - name: The service runs confined, and works
         run: |
+          eval "$CONFINED"
           set -x
           sudo aa-status | grep -A3 'profiles are in enforce mode' | tee /dev/stderr
           sudo aa-status --json | grep -q '"grafeno": "enforce"'
           pid="$(systemctl show -p MainPID --value grafeno)"
-          sudo cat "/proc/$pid/attr/current" | grep -q 'grafeno (enforce)'
+          confined "$pid"
           token="$(sudo grafeno config token)"
           id="$(curl -fs -X POST -H "Authorization: Bearer $token" -H 'content-type: application/json' \
             -d '{"labels":["Note"],"text":"written under AppArmor"}' http://127.0.0.1:7810/v1/notes/nodes \
@@ -80,12 +90,13 @@ jobs:
           sudo grafeno doctor
       - name: An instance with its data elsewhere is confined and works too
         run: |
+          eval "$CONFINED"
           printf 'An-admin-passw0rd\n' > /tmp/pw
           sudo grafeno setup --instance other --unattended --data /srv/grafeno-other \
             --admin root --admin-password-file /tmp/pw
           for _ in $(seq 50); do curl -fs http://127.0.0.1:7811/health && break; sleep 0.2; done
           pid="$(systemctl show -p MainPID --value grafeno@other)"
-          sudo cat "/proc/$pid/attr/current" | grep -q 'grafeno (enforce)'
+          confined "$pid"
           curl -fs -X POST -H 'content-type: application/json' \
             -d '{"name":"root","password":"An-admin-passw0rd"}' http://127.0.0.1:7811/v1/auth/signin | grep -q access_token
           sudo test -f /srv/grafeno-other/grafeno.redb
