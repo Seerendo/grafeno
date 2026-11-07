@@ -13,6 +13,7 @@ use redb::{
 use serde::Serialize;
 
 use crate::access::{ACCOUNTS, API_KEYS, SESSIONS};
+use crate::audit::AUDIT;
 use crate::changes::CHANGES;
 use crate::constraints::CONSTRAINTS;
 use crate::db::{FileIntegrity, Grafeno, ReadTx};
@@ -174,6 +175,7 @@ pub(crate) fn restore_into(from: &ReadTransaction, to: &WriteTransaction) -> Res
         API_KEYS,
         SESSIONS,
         ROLES,
+        AUDIT,
         MERGES,
         MATCH_RULES,
         STATE,
@@ -224,6 +226,7 @@ impl ReadTx {
                 API_KEYS.name(),
                 SESSIONS.name(),
                 ROLES.name(),
+                AUDIT.name(),
                 MERGES.name(),
                 MATCH_RULES.name(),
                 STATE.name(),
@@ -266,6 +269,7 @@ impl ReadTx {
             entries += copy(from, &tx, API_KEYS)?;
             entries += copy(from, &tx, SESSIONS)?;
             entries += copy(from, &tx, ROLES)?;
+            entries += copy(from, &tx, AUDIT)?;
             entries += copy(from, &tx, MERGES)?;
             entries += copy(from, &tx, MATCH_RULES)?;
             entries += copy(from, &tx, STATE)?;
@@ -279,7 +283,7 @@ impl ReadTx {
         let entries = outcome?;
         let bytes = publish(partial, path)?;
         Ok(BackupStats {
-            tables: 26,
+            tables: 27,
             entries,
             bytes,
         })

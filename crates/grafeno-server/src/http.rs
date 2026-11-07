@@ -72,6 +72,8 @@ pub struct Writes {
     apis: std::collections::HashMap<u64, String>,
     /// Reads from this estimated cost split across members (13.4).
     split_cost: f64,
+    /// The cluster secret, for handing audit events to the leader (14.5).
+    secret: Option<Arc<str>>,
 }
 
 impl Writes {
@@ -121,6 +123,11 @@ impl Writes {
     /// The cluster member, on a cluster.
     pub fn cluster(&self) -> Option<&Arc<grafeno_cluster::Node>> {
         self.cluster.as_ref()
+    }
+
+    /// The cluster secret, on a cluster.
+    pub fn secret(&self) -> Option<&str> {
+        self.secret.as_deref()
     }
 
     /// A member's API address, if configured.
@@ -173,6 +180,7 @@ impl AppState {
                 cluster: None,
                 apis: Default::default(),
                 split_cost: crate::cluster::DEFAULT_SPLIT_COST,
+                secret: None,
             }),
             keys: Arc::new(crate::auth::Credentials::load(&db).unwrap_or_default()),
             throttle: Arc::default(),
@@ -210,6 +218,7 @@ impl AppState {
             cluster: Some(node),
             apis,
             split_cost: self.writer.split_cost,
+            secret: self.writer.secret.clone(),
         });
         state.runners = Arc::default();
         state.db = db;
@@ -222,12 +231,14 @@ impl AppState {
         node: Arc<grafeno_cluster::Node>,
         apis: std::collections::HashMap<u64, String>,
         split_cost: f64,
+        secret: Option<&str>,
     ) -> Self {
         self.writer = Arc::new(Writes {
             local: self.writer.local.clone(),
             cluster: Some(node),
             apis,
             split_cost,
+            secret: secret.map(Arc::from),
         });
         self
     }
@@ -379,6 +390,8 @@ pub fn router_with(state: AppState, options: &Options) -> Router {
         .route("/algorithms", get(algorithms))
         .route("/whoami", get(crate::accounts::whoami))
         .route("/privileges", get(crate::roles::catalog))
+        .route("/audit", get(crate::audit::read))
+        .route("/cluster/audit", post(crate::audit::receive))
         // 14.3: the same accounts and roles under /admin, and grants.
         .route(
             "/admin/users",
@@ -709,12 +722,16 @@ pub(crate) async fn write<T: Send + 'static>(
     work: impl Fn(&mut WriteTx) -> grafeno::Result<T> + Send + 'static,
 ) -> ApiResult<T> {
     let writer = state.writer.clone();
-    // Writes of a group share a transaction: each one acts as its caller.
+    // Writes of a group share a transaction: each one acts as its caller,
+    // from where it came (14.5).
     let actor = auth::current().actor();
+    let origin = crate::audit::origin();
     let work = move |tx: &mut WriteTx| {
         tx.act_as(actor.clone());
+        tx.set_origin(origin.clone());
         let result = work(tx);
         tx.act_as(None);
+        tx.set_origin(None);
         result
     };
     tokio::task::spawn_blocking(move || writer.write(work))
@@ -731,10 +748,13 @@ async fn write_bulk<T: Send + 'static>(
 ) -> ApiResult<T> {
     let writer = state.writer.clone();
     let actor = auth::current().actor();
+    let origin = crate::audit::origin();
     let work = move |tx: &mut WriteTx| {
         tx.act_as(actor.clone());
+        tx.set_origin(origin.clone());
         let result = work(tx);
         tx.act_as(None);
+        tx.set_origin(None);
         result
     };
     tokio::task::spawn_blocking(move || {
@@ -822,6 +842,23 @@ async fn auth(State(state): State<AppState>, request: Request, next: Next) -> Re
         .and_then(|value| value.strip_prefix("Bearer "))
         .map(str::to_owned);
     let need = auth::need(request.method().as_str(), request.uri().path());
+    let public = matches!(need, Need::Public);
+    let address = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|info| info.0.ip().to_string());
+    // Inside the nested router the path lost `/v1`: the audit log keeps
+    // the one the client sent.
+    let (method, path) = (
+        request.method().to_string(),
+        request
+            .extensions()
+            .get::<axum::extract::OriginalUri>()
+            .map_or_else(
+                || request.uri().path().to_owned(),
+                |o| o.0.path().to_owned(),
+            ),
+    );
     let open = state.token.is_none() && !state.keys.has_accounts();
     let caller = match given {
         _ if open => Ok(Caller::Owner),
@@ -852,6 +889,10 @@ async fn auth(State(state): State<AppState>, request: Request, next: Next) -> Re
         (Err(_), Need::Public) => Caller::Anonymous,
         (Err(error), _) => {
             let _ = axum::body::to_bytes(request.into_body(), 1024 * 1024).await;
+            // Refused for its credential: audited (14.5).
+            let mut event = crate::audit::refusal(&method, &path, error.code, &error.message);
+            event.address = address;
+            crate::audit::record(&state, event).await;
             return error.into_response();
         }
     };
@@ -868,9 +909,60 @@ async fn auth(State(state): State<AppState>, request: Request, next: Next) -> Re
         Need::Namespace(ns, actions) => Err(caller.refusal(&ns, actions)),
     };
     if let Err(message) = allowed {
-        return refuse(request, StatusCode::FORBIDDEN, "forbidden", message).await;
+        // Refused for a privilege: audited, as the caller (14.5).
+        let event = crate::audit::refusal(&method, &path, "forbidden", &message);
+        let refused = refuse(request, StatusCode::FORBIDDEN, "forbidden", message);
+        auth::ADDRESS
+            .scope(
+                address.clone(),
+                auth::CALLER.scope(caller.clone(), async {
+                    let mut event = event;
+                    if let Some(origin) = crate::audit::origin() {
+                        event.account = origin.account;
+                        event.via = origin.via;
+                        event.address = origin.address;
+                    }
+                    crate::audit::record(&state, event).await;
+                }),
+            )
+            .await;
+        return refused.await;
     }
-    auth::CALLER.scope(caller, next.run(request)).await
+    let response = auth::ADDRESS
+        .scope(
+            address.clone(),
+            auth::CALLER.scope(caller.clone(), next.run(request)),
+        )
+        .await;
+    // Refused by the handler itself (a statement, a record): audited too.
+    // Signing in audits itself.
+    let status = response.status();
+    if !public && (status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED) {
+        auth::ADDRESS
+            .scope(
+                address,
+                auth::CALLER.scope(caller, async {
+                    let mut event = crate::audit::refusal(
+                        &method,
+                        &path,
+                        if status == StatusCode::FORBIDDEN {
+                            "forbidden"
+                        } else {
+                            "unauthorized"
+                        },
+                        "",
+                    );
+                    if let Some(origin) = crate::audit::origin() {
+                        event.account = origin.account;
+                        event.via = origin.via;
+                        event.address = origin.address;
+                    }
+                    crate::audit::record(&state, event).await;
+                }),
+            )
+            .await;
+    }
+    response
 }
 
 async fn refuse(

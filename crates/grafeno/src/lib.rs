@@ -23,6 +23,7 @@
 
 mod access;
 pub mod algo;
+mod audit;
 mod backup;
 mod changes;
 mod check;
@@ -39,6 +40,8 @@ mod replication;
 mod resolve;
 mod rights;
 mod view;
+pub use audit::{AuditEvent, AuditPage, AuditRetention, NewAuditEvent, Outcome};
+pub use db::Origin;
 pub use view::View;
 mod state;
 mod stats;

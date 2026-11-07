@@ -25,6 +25,7 @@ fn context(manage_accounts: bool, manage_roles: bool) -> AccessContext {
         superuser: false,
         manage_accounts,
         manage_roles,
+        read_audit: false,
         effective_roles: vec!["people".into()],
         hash_password: Some(hasher),
     }

@@ -312,6 +312,40 @@ fn three_processes_replicate_route_and_fail_over() {
     );
     assert_eq!(code, 200, "{body}");
 
+    // The audit log (14.5): a request refused on a follower is recorded
+    // once, in the replicated log, and the log outlives its leader.
+    let (code, _) = with(
+        members[follower].api,
+        "gfk_wrong",
+        "GET",
+        "/v1/c/stats",
+        None,
+    );
+    assert_eq!(code, 401);
+    let audit = |port: u16| -> Vec<Value> {
+        call(port, "GET", "/v1/audit?limit=10000", None)
+            .map(|(_, page)| page["events"].as_array().cloned().unwrap_or_default())
+            .unwrap_or_default()
+    };
+    let refused = |events: &[Value]| {
+        events
+            .iter()
+            .filter(|e| e["kind"] == "refused" && e["target"] == "GET /v1/c/stats")
+            .count()
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut before = audit(members[first].api);
+    while refused(&before) == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        before = audit(members[first].api);
+    }
+    assert_eq!(refused(&before), 1, "{before:#?}");
+    assert!(
+        before
+            .iter()
+            .any(|e| e["kind"] == "account_created" && e["target"] == "ana")
+    );
+
     // The leader's process dies: the others go on.
     let killed = members[first].id;
     if let Some(mut child) = members[first].child.take() {
@@ -335,6 +369,30 @@ fn three_processes_replicate_route_and_fail_over() {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(count(survivor.api), 9);
+    // The new leader holds every event of the old one, and goes on from it.
+    let after = audit(members[second].api);
+    assert_eq!(
+        &after[..before.len()],
+        &before[..],
+        "the audit log after failover"
+    );
+    assert_eq!(refused(&after), 1);
+    let (code, _) = with(members[second].api, "gfk_wrong", "GET", "/v1/c/stats", None);
+    assert_eq!(code, 401);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut later = audit(members[second].api);
+    while refused(&later) < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        later = audit(members[second].api);
+    }
+    assert_eq!(refused(&later), 2);
+    for (i, event) in later.iter().enumerate() {
+        assert_eq!(
+            event["seq"],
+            i as u64 + 1,
+            "numbered without gaps across leaders"
+        );
+    }
     assert_eq!(
         status(&members[second]).unwrap()["voters"],
         json!([1, 2, 3])

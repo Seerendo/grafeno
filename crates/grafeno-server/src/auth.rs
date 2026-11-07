@@ -539,6 +539,7 @@ pub fn access_context(caller: &Caller) -> grafeno_query::AccessContext {
         superuser: caller.is_owner(),
         manage_accounts: caller.can_server(Act::ManageAccounts),
         manage_roles: caller.can_server(Act::ManageRoles),
+        read_audit: caller.can_server(Act::Audit),
         effective_roles: match caller {
             Caller::Account { view, .. } => view.rights.roles.clone(),
             _ => Vec::new(),
@@ -568,6 +569,13 @@ fn scope_allows(scope: &KeyScope, action: Act, ns: &str) -> bool {
 tokio::task_local! {
     /// The caller of the request being served.
     pub static CALLER: Caller;
+    /// Where the request being served comes from (14.5).
+    pub static ADDRESS: Option<String>;
+}
+
+/// The address of the current request's client, when known.
+pub fn address() -> Option<String> {
+    ADDRESS.try_with(Clone::clone).ok().flatten()
 }
 
 /// The caller of the current request (the owner outside of one: tests,
@@ -634,6 +642,9 @@ pub fn need(method: &str, path: &str) -> Need {
         ["admin", "grants", ..] => Need::Caller,
         ["algorithms"] | ["whoami"] | ["privileges"] => Need::Caller,
         ["metrics"] => Need::Server(Act::Metrics),
+        ["audit"] => Need::Server(Act::Audit),
+        // Members hand audit events to the leader with the cluster secret.
+        ["cluster", "audit"] => Need::Public,
         // Listing filters what the caller may read; creating checks the
         // name in the handler.
         ["namespaces"] => Need::Caller,

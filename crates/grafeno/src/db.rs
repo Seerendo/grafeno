@@ -59,7 +59,8 @@ use crate::{Hit, text, vector};
 /// 15. Replaces `principals` with `accounts`, `api_keys` and `sessions`:
 ///     each principal becomes a service account and a key (14.1).
 /// 16. Adds `roles` (14.2), empty until one is defined.
-pub const SCHEMA_VERSION: u64 = 16;
+/// 17. Adds `audit` (14.5), the audit log, empty until something happens.
+pub const SCHEMA_VERSION: u64 = 17;
 
 /// The tables replaced in version 3, by name (their types no longer matter).
 const OLD_ADJ_OUT: TableDefinition<AdjKey, u128> = TableDefinition::new("adj_out");
@@ -243,6 +244,7 @@ impl Grafeno {
         tx.open_table(API_KEYS).map_err(storage)?;
         tx.open_table(SESSIONS).map_err(storage)?;
         tx.open_table(ROLES).map_err(storage)?;
+        tx.open_table(crate::audit::AUDIT).map_err(storage)?;
         tx.open_table(MERGES).map_err(storage)?;
         tx.open_table(MATCH_RULES).map_err(storage)?;
         tx.open_table(STATE).map_err(storage)?;
@@ -408,6 +410,7 @@ impl Grafeno {
             applying: false,
             commit_at: None,
             past_fences: false,
+            origin: None,
         })
     }
 
@@ -1190,6 +1193,16 @@ pub struct Actor {
     pub view: Option<Arc<crate::View>>,
 }
 
+/// Where the writes of a transaction come from (14.5), for the audit log
+/// and the change log: the account (none for the server's token), the
+/// credential (`key:name`, `session:id`, `token`) and the address.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Origin {
+    pub account: Option<String>,
+    pub via: Option<String>,
+    pub address: Option<String>,
+}
+
 impl PartialEq for Actor {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
@@ -1248,6 +1261,8 @@ pub struct WriteTx {
     pub(crate) commit_at: Option<Timestamp>,
     /// Writes to namespaces fenced for a move go through (the move's own).
     pub(crate) past_fences: bool,
+    /// Where its writes come from (14.5).
+    pub(crate) origin: Option<Origin>,
 }
 
 impl WriteTx {
@@ -1260,6 +1275,16 @@ impl WriteTx {
 
     pub fn actor(&self) -> Option<&Actor> {
         self.actor.as_ref()
+    }
+
+    /// Writes from now on come from `origin` (who, with what credential,
+    /// from where), as the audit log and the change log record it.
+    pub fn set_origin(&mut self, origin: Option<Origin>) {
+        self.origin = origin;
+    }
+
+    pub fn origin(&self) -> Option<&Origin> {
+        self.origin.as_ref()
     }
 
     /// Fails if the actor may change only its own records and this one is

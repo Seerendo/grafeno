@@ -777,13 +777,30 @@ impl WriteTx {
                 pending.extend(below.roles);
             }
         }
+        let existed = self.role(&role.name)?.is_some();
         self.note(crate::replication::Touch::Role(role.name.clone()));
         self.tx
             .open_table(ROLES)
             .map_err(storage)?
             .insert(role.name.as_str(), encode(role)?.as_slice())
             .map_err(storage)?;
-        self.bump_access()
+        self.bump_access()?;
+        // Grants, denials and policies are changes of the role: the event
+        // holds what it is now.
+        self.audit_access(
+            if existed {
+                "role_changed"
+            } else {
+                "role_created"
+            },
+            &role.name,
+            serde_json::json!({
+                "privileges": role.privileges,
+                "grants": role.grants,
+                "roles": role.roles,
+                "policies": role.policies,
+            }),
+        )
     }
 
     /// Removes a role, and every account's and role's grant of it; returns
@@ -798,6 +815,11 @@ impl WriteTx {
                     .map_err(storage)?
                     .insert(role.name.as_str(), encode(&role)?.as_slice())
                     .map_err(storage)?;
+                self.audit_access(
+                    "role_changed",
+                    &role.name,
+                    serde_json::json!({ "roles": role.roles, "lost": name }),
+                )?;
             }
         }
         for mut account in self.accounts()? {
@@ -815,6 +837,9 @@ impl WriteTx {
             .map_err(storage)?
             .is_some();
         self.bump_access()?;
+        if removed {
+            self.audit_access("role_deleted", name, serde_json::Value::Null)?;
+        }
         Ok(removed)
     }
 

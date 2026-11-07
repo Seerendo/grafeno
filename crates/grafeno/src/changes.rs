@@ -69,6 +69,9 @@ pub struct Change {
     /// The principal that wrote it, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
+    /// The key or session it wrote with (`key:name`, `session:id`), 14.5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 /// What [`ReadTx::changes`] returns.
@@ -251,6 +254,7 @@ impl WriteTx {
             to: None,
             parts: part.into_iter().collect(),
             by: self.actor.as_ref().map(|actor| actor.name.clone()),
+            via: self.origin.as_ref().and_then(|origin| origin.via.clone()),
         };
         self.pending_changes
             .add(ns, node.id.as_u128(), false, change);
@@ -275,6 +279,7 @@ impl WriteTx {
                 vec![Part::Record]
             },
             by: self.actor.as_ref().map(|actor| actor.name.clone()),
+            via: self.origin.as_ref().and_then(|origin| origin.via.clone()),
         };
         self.pending_changes
             .add(ns, edge.id.as_u128(), true, change);

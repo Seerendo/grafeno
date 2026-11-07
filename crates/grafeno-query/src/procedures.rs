@@ -58,6 +58,14 @@ pub(crate) const PROCEDURES: &[Procedure] = &[
         description: "Nodes whose property looks like the text (typos, word order), through the fuzzy index on it; measure: dice, jaro_winkler, edit, tokens, …",
     },
     Procedure {
+        name: "db.audit",
+        args: "since = 0, limit = 1000",
+        columns: &[
+            "seq", "at", "kind", "account", "via", "address", "target", "outcome", "detail",
+        ],
+        description: "The audit log after `since` (14.5); needs the audit privilege.",
+    },
+    Procedure {
         name: "db.stats",
         args: "",
         columns: &["nodes", "edges", "texts", "vectors", "dimension"],
@@ -161,6 +169,51 @@ pub(crate) fn call(
             .collect()
     };
     Ok(match procedure.name {
+        "db.audit" => {
+            if !ctx.may_audit {
+                return Err(QueryError {
+                    forbidden: true,
+                    ..QueryError::runtime("reading the audit log needs the audit privilege")
+                });
+            }
+            let since = match args.first() {
+                None | Some(Value::Null) => 0,
+                Some(Value::Int(n)) if *n >= 0 => *n as u64,
+                Some(other) => {
+                    return Err(QueryError::runtime(format!(
+                        "db.audit(since, limit): since is a sequence number, not {}",
+                        other.to_json()
+                    )));
+                }
+            };
+            let limit = match args.get(1) {
+                None | Some(Value::Null) => 1000,
+                _ => limit_arg(args, 1)?,
+            };
+            read.audit(since, limit)?
+                .events
+                .into_iter()
+                .map(|event| {
+                    let text = |value: Option<String>| value.map_or(Value::Null, Value::Str);
+                    vec![
+                        Value::Int(event.seq as i64),
+                        Value::Time(event.at),
+                        Value::Str(event.kind),
+                        text(event.account),
+                        text(event.via),
+                        text(event.address),
+                        text(event.target),
+                        Value::Str(
+                            serde_json::to_value(event.outcome)
+                                .ok()
+                                .and_then(|v| v.as_str().map(str::to_owned))
+                                .unwrap_or_default(),
+                        ),
+                        Value::from_json(&event.detail),
+                    ]
+                })
+                .collect()
+        }
         "db.labels" => counted(read.stats(ns)?.node_labels),
         "db.edgeLabels" => counted(read.stats(ns)?.edge_labels),
         "db.propertyKeys" => {

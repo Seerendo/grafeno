@@ -54,6 +54,8 @@ pub(crate) struct Context<'a> {
     pub(crate) budget: &'a Budget,
     /// What the caller may see (14.4); everything when `None`.
     pub(crate) view: Option<&'a std::sync::Arc<grafeno::View>>,
+    /// Whether the caller may read the audit log (14.5).
+    pub(crate) may_audit: bool,
 }
 
 /// Part `part` of `parts` of the candidates of a query's first match (a

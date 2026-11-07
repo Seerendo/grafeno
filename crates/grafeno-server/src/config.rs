@@ -88,6 +88,9 @@ pub struct Config {
     pub writer: WriterConfig,
     #[serde(default, skip_serializing_if = "ChangesConfig::is_empty")]
     pub changes: ChangesConfig,
+    /// How much of the audit log is kept (14.5).
+    #[serde(default, skip_serializing_if = "AuditConfig::is_empty")]
+    pub audit: AuditConfig,
     #[serde(
         default,
         skip_serializing_if = "crate::events::BackgroundConfig::is_empty"
@@ -167,6 +170,33 @@ impl ChangesConfig {
         let base = grafeno::Retention::default();
         grafeno::Retention {
             enabled: self.enabled.unwrap_or(base.enabled),
+            max_entries: self.max_entries.unwrap_or(base.max_entries),
+            max_age_secs: self
+                .max_age_days
+                .map_or(base.max_age_secs, |days| days.saturating_mul(86_400)),
+        }
+    }
+}
+
+/// `[audit]`: how much of the audit log is kept; missing values take
+/// [`grafeno::AuditRetention`]'s defaults (ten million events, a year).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_entries: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age_days: Option<u64>,
+}
+
+impl AuditConfig {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn retention(&self) -> grafeno::AuditRetention {
+        let base = grafeno::AuditRetention::default();
+        grafeno::AuditRetention {
             max_entries: self.max_entries.unwrap_or(base.max_entries),
             max_age_secs: self
                 .max_age_days
@@ -400,6 +430,7 @@ pub fn init(path: &Path, db: &Path, addr: SocketAddr, force: bool) -> Result<Con
         memory: MemoryConfig::default(),
         writer: WriterConfig::default(),
         changes: ChangesConfig::default(),
+        audit: AuditConfig::default(),
         background: crate::events::BackgroundConfig::default(),
         cluster: None,
         auth: AuthSection::default(),

@@ -147,3 +147,15 @@ test("record policies and attributes (14.4)", async () => {
   const privileges = await admin.privilegesOf("team-reader");
   assert.ok(privileges.rows.some((row) => row[1] === "policy"));
 });
+
+test("the audit log (14.5)", async () => {
+  const admin = new Grafeno({ url, token });
+  await admin.createAccount({ name: "audited", kind: "service" });
+  const anonymous = new Grafeno({ url, token: "gfk_wrong" });
+  await assert.rejects(anonymous.namespaces(), (error) => error instanceof GrafenoError && error.status === 401);
+  const page = await admin.audit({ limit: 10000 });
+  assert.ok(page.events.some((event) => event.kind === "account_created" && event.target === "audited"));
+  assert.ok(page.events.some((event) => event.kind === "refused" && event.outcome === "refused"));
+  const later = await admin.audit({ since: page.last - 1 });
+  assert.equal(later.events.length, 1);
+});

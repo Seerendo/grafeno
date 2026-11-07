@@ -146,6 +146,30 @@ export interface Policy {
       };
 }
 
+/** A security event of the audit log (14.5). */
+export interface AuditEvent {
+  seq: number;
+  /** Microseconds since the epoch. */
+  at: number;
+  /** `account_created`, `signin_failed`, `lockout`, `key_rotated`, `refused`, … */
+  kind: string;
+  account?: string;
+  /** The key or session behind the request: `key:name`, `session:id`, `token`. */
+  via?: string;
+  address?: string;
+  target?: string;
+  outcome: "ok" | "refused" | "failed";
+  detail?: unknown;
+}
+
+/** A page of the audit log. */
+export interface AuditPage {
+  events: AuditEvent[];
+  last: number;
+  oldest: number;
+  gap: boolean;
+}
+
 /** A role an administrator defined (14.2). */
 export interface RoleDefinition {
   name: string;
@@ -895,6 +919,15 @@ export class Grafeno {
   /** Deletes an account with its keys and sessions (superusers). */
   async deleteAccount(name: string): Promise<void> {
     await this.request("DELETE", `/v1/accounts/${encodeURIComponent(name)}`);
+  }
+
+  /** Audit events after `since` (the `audit` privilege), 14.5. */
+  audit(options: { since?: number; limit?: number } = {}): Promise<AuditPage> {
+    const query = new URLSearchParams();
+    if (options.since !== undefined) query.set("since", String(options.since));
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    const suffix = query.size > 0 ? `?${query}` : "";
+    return this.request("GET", `/v1/audit${suffix}`);
   }
 
   /** Every privilege by what it applies to (14.2). */

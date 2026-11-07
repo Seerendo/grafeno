@@ -6,6 +6,7 @@ pub mod access_cli;
 pub mod accounts;
 pub mod admin;
 pub mod api;
+pub mod audit;
 pub mod auth;
 pub mod cluster;
 pub mod config;

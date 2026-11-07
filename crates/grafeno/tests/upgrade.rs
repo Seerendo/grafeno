@@ -100,7 +100,7 @@ fn verify(db: &Grafeno, version: u64) {
         // Principals became service accounts with a key each (layout 15).
         let accounts = read.accounts().unwrap();
         let expected = match version {
-            15 => 2,
+            15 | 16 => 2,
             14 => 3,
             _ => 1,
         };
@@ -116,7 +116,7 @@ fn verify(db: &Grafeno, version: u64) {
             (key.account.as_str(), key.secret_hash.as_str()),
             ("reader", "00".repeat(32).as_str())
         );
-        if version == 15 {
+        if version >= 15 {
             let ana = read.account("ana").unwrap().unwrap();
             assert_eq!(ana.kind, grafeno::AccountKind::User);
             assert!(ana.own_only && ana.password_hash.is_some());
@@ -129,10 +129,20 @@ fn verify(db: &Grafeno, version: u64) {
                     .read_only
             );
             assert_eq!(read.sessions(Some("ana")).unwrap().len(), 1);
-            assert!(
-                read.roles().unwrap().is_empty(),
-                "roles start empty (layout 16)"
-            );
+            if version == 15 {
+                assert!(
+                    read.roles().unwrap().is_empty(),
+                    "roles start empty (layout 16)"
+                );
+            } else {
+                // A role with a denial and a record policy (14.4), held by ana
+                // with her attributes.
+                let analyst = read.role("analyst").unwrap().unwrap();
+                assert_eq!(analyst.privileges.len(), 1);
+                assert_eq!(analyst.policies.len(), 1);
+                assert_eq!(ana.roles, vec!["analyst".to_owned()]);
+                assert_eq!(ana.attributes["team"], "red");
+            }
         } else if version >= 14 {
             assert!(read.account("admin-key").unwrap().unwrap().superuser);
             let agent = read.account("agent").unwrap().unwrap();
@@ -144,6 +154,8 @@ fn verify(db: &Grafeno, version: u64) {
         }
     }
     assert!(read.merges(NS, None).unwrap().is_empty());
+    // The audit log (layout 17) starts empty: the upgrade audits nothing.
+    assert!(read.audit(0, 10).unwrap().events.is_empty(), "v{version}");
     if version >= 11 {
         assert_eq!(read.constraints(NS).unwrap().len(), 1, "v{version}");
     }
@@ -159,7 +171,7 @@ fn verify(db: &Grafeno, version: u64) {
 
 #[test]
 fn every_past_layout_upgrades() {
-    for version in 1..=15 {
+    for version in 1..=16 {
         let path = fixture(version);
         {
             let db = Grafeno::open(&path).unwrap_or_else(|e| panic!("v{version}: {e}"));

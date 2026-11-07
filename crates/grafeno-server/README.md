@@ -225,6 +225,29 @@ curl -X PATCH localhost:7810/v1/accounts/ana -H "Authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' -d '{"attributes": {"tenant": "acme"}}'
 ```
 
+**The audit log** (14.5) keeps every security event once: sign-ins and
+their failures, lockouts, sessions, keys, changes to accounts and roles
+(grants, denials and policies included) and every refused request, with
+the account, the key or session, the address, the target and the outcome.
+Reading it needs the `audit` privilege:
+
+```bash
+curl "localhost:7810/v1/audit?since=0&limit=100" -H "Authorization: Bearer $TOKEN"
+```
+
+```bash
+curl -N localhost:7810/v1/audit -H "Authorization: Bearer $TOKEN" -H "Accept: text/event-stream"
+```
+
+```bash
+curl "localhost:7810/v1/audit?format=jsonl" -H "Authorization: Bearer $TOKEN" > audit.jsonl
+```
+
+In GQ, `CALL db.audit(0, 1000) YIELD seq, at, kind, account, via, address,
+target, outcome, detail`. `[audit]` in `grafeno.toml` sets how much is
+kept (`max_entries`, `max_age_days`). Those who manage accounts list and
+end other accounts' sessions (not superusers').
+
 Without a token, accounts close the server: the first account must be a
 superuser, and a change that would leave no active superuser (or no
 accounts) is refused. Accounts can expire (`ALTER USER … SET EXPIRES`,
@@ -275,6 +298,7 @@ superuser, and from then on every request needs a credential.
 | `GET`, `POST` | `/v1/accounts` | `{name, kind: user\|service, password?, grants, roles, superuser, own_only, description}` | `manage_accounts`; only superusers make superusers |
 | `GET`, `PATCH`, `DELETE` | `/v1/accounts/{name}` | `{password?, grants?, roles?, superuser?, own_only?, disabled?, description?}` | `manage_accounts`, not on superusers; disabling or a new password ends its sessions |
 | `GET` | `/v1/privileges` | | every action by object, and the built-in levels (anyone signed in) |
+| `GET` | `/v1/audit` | `?since=&limit=`, `?format=jsonl`, or `Accept: text/event-stream` | audit events (`audit`): `{events, last, oldest, gap}`, JSON Lines, or a stream |
 | `GET`, `POST`, `PATCH`, `DELETE` | `/v1/admin/users`, `/v1/admin/users/{name}` | as `/v1/accounts`, plus `expires_at` (microseconds, ISO 8601, or `null`) | the accounts under the design's name (14.3) |
 | `GET`, `PUT`, `DELETE` | `/v1/admin/roles`, `/v1/admin/roles/{name}` | as `/v1/roles` | the roles (`manage_roles`) |
 | `GET` | `/v1/admin/grants?holder=name` | | `{columns: [source, access, privilege, on], rows}`: an account's or a role's privileges (its own: anyone; others: `manage_roles` or `manage_accounts`) |

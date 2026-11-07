@@ -550,6 +550,8 @@ pub(crate) struct Shared {
     pub(crate) planner: crate::planstats::Cache,
     /// Whether commits append to the replication log.
     pub(crate) replication: std::sync::atomic::AtomicBool,
+    /// How much of the audit log is kept (14.5).
+    pub(crate) audit_retention: crate::audit::Retention,
 }
 
 impl Default for Shared {
@@ -559,6 +561,7 @@ impl Default for Shared {
             projections: Mutex::default(),
             projection_budget: std::sync::atomic::AtomicUsize::new(DEFAULT_PROJECTION_CACHE),
             changes: crate::changes::Hub::default(),
+            audit_retention: crate::audit::Retention::default(),
             planner: crate::planstats::Cache::default(),
             replication: std::sync::atomic::AtomicBool::new(false),
         }

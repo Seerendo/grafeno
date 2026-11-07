@@ -38,6 +38,8 @@ pub struct AccessContext {
     pub superuser: bool,
     pub manage_accounts: bool,
     pub manage_roles: bool,
+    /// May read the audit log (`audit` on the server), 14.5.
+    pub read_audit: bool,
     /// The roles the caller reaches, for `SHOW CURRENT USER`.
     pub effective_roles: Vec<String>,
     /// For `SET PASSWORD`; without one, passwords cannot be set in GQ.
@@ -52,6 +54,7 @@ impl AccessContext {
             superuser: true,
             manage_accounts: true,
             manage_roles: true,
+            read_audit: true,
             effective_roles: Vec::new(),
             hash_password,
         }

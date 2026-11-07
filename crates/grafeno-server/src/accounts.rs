@@ -10,7 +10,9 @@ use axum::Json;
 use axum::extract::{FromRequestParts, Path, State};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
-use grafeno::{Account, AccountKind, ApiKey, Grant, KeyScope, Session, Timestamp};
+use grafeno::{
+    Account, AccountKind, ApiKey, Grant, KeyScope, NewAuditEvent, Outcome, Session, Timestamp,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -59,6 +61,22 @@ impl<S: Send + Sync> FromRequestParts<S> for ClientAddress {
                 .map(|info| info.0.ip().to_string()),
         ))
     }
+}
+
+/// A sign-in that did not open a session, in the audit log (14.5).
+async fn failed_signin(
+    state: &AppState,
+    name: &str,
+    address: &Option<String>,
+    reason: &str,
+    outcome: Outcome,
+) {
+    let mut event = NewAuditEvent::new("signin_failed")
+        .target(name)
+        .outcome(outcome)
+        .detail(json!({ "reason": reason }));
+    event.address = address.clone();
+    crate::audit::record(state, event).await;
 }
 
 fn unauthorized(code: &'static str, message: impl Into<String>) -> ApiError {
@@ -386,11 +404,14 @@ pub async fn signin(
     Body(input): Body<Credentials>,
 ) -> ApiResult<Json<Value>> {
     let throttle = state.throttle.clone();
-    throttle
-        .check(state.auth.lockout, &input.name, address.as_deref())
-        .map_err(|message| {
-            ApiError::with_status(StatusCode::TOO_MANY_REQUESTS, "locked", message)
-        })?;
+    if let Err(message) = throttle.check(state.auth.lockout, &input.name, address.as_deref()) {
+        failed_signin(&state, &input.name, &address, "locked", Outcome::Refused).await;
+        return Err(ApiError::with_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            "locked",
+            message,
+        ));
+    }
     let db = state.db.clone();
     let name = input.name.clone();
     let password = input.password;
@@ -410,12 +431,33 @@ pub async fn signin(
     .map_err(|e| ApiError::internal(e.to_string()))??;
     let Some(account) = account else {
         throttle.failed(&input.name, address.as_deref());
+        failed_signin(
+            &state,
+            &input.name,
+            &address,
+            "wrong name or password",
+            Outcome::Failed,
+        )
+        .await;
+        // This failure locks the account or the address: said once.
+        if throttle
+            .check(state.auth.lockout, &input.name, address.as_deref())
+            .is_err()
+        {
+            let mut event = NewAuditEvent::new("lockout")
+                .target(input.name.clone())
+                .outcome(Outcome::Refused);
+            event.address = address.clone();
+            crate::audit::record(&state, event).await;
+        }
         return Err(unauthorized("unauthorized", "wrong name or password"));
     };
     if account.disabled {
+        failed_signin(&state, &input.name, &address, "disabled", Outcome::Refused).await;
         return Err(unauthorized("account_disabled", "the account is disabled"));
     }
     if account.expired(Timestamp::now()) {
+        failed_signin(&state, &input.name, &address, "expired", Outcome::Refused).await;
         return Err(unauthorized("account_expired", "the account expired"));
     }
     throttle.succeeded(&account.name);
@@ -446,7 +488,18 @@ pub async fn refresh(
         .ok_or_else(|| unauthorized("unauthorized", "the session ended"))?;
     if !crate::http::constant_time_eq(hash.as_bytes(), session.refresh_hash.as_bytes()) {
         let ended = id.clone();
-        crate::http::write(&state, move |tx| tx.delete_session(&ended)).await?;
+        let account = session.account.clone();
+        crate::http::write(&state, move |tx| {
+            // A refresh token used twice: one of the two users stole it.
+            tx.audit(
+                NewAuditEvent::new("refresh_reused")
+                    .target(account.clone())
+                    .outcome(Outcome::Refused)
+                    .detail(json!({ "session": ended })),
+            )?;
+            tx.delete_session(&ended)
+        })
+        .await?;
         return Err(unauthorized(
             "unauthorized",
             "the refresh token was already used: the session is ended",
@@ -520,17 +573,32 @@ pub async fn sessions(
     axum::extract::Query(query): axum::extract::Query<SessionsQuery>,
 ) -> ApiResult<Json<Vec<Value>>> {
     let caller = auth::current();
-    let account = match (&query.account, caller.is_owner()) {
+    // Superusers and those who manage accounts (14.5) list anyone's; the
+    // sessions of superusers are only superusers' to see.
+    let manages = caller.can_server(grafeno::Act::ManageAccounts);
+    let account = match (&query.account, manages) {
         (Some(name), true) if name == "*" => None,
         (Some(name), true) => Some(name.clone()),
         (Some(name), false) if Some(name.as_str()) != caller.account().map(|a| a.name.as_str()) => {
             return Err(ApiError::forbidden_message(
-                "only superusers list other accounts' sessions",
+                "listing other accounts' sessions needs the manage_accounts privilege",
             ));
         }
         _ => Some(me(&caller)?.name.clone()),
     };
-    let list = state.db.begin_read()?.sessions(account.as_deref())?;
+    let read = state.db.begin_read()?;
+    let mut list = read.sessions(account.as_deref())?;
+    if !caller.is_owner() {
+        let mine = caller.account().map(|a| a.name.clone());
+        let mut kept = Vec::with_capacity(list.len());
+        for session in list {
+            let superuser = read.account(&session.account)?.is_some_and(|a| a.superuser);
+            if !superuser || Some(&session.account) == mine.as_ref() {
+                kept.push(session);
+            }
+        }
+        list = kept;
+    }
     Ok(Json(
         list.iter()
             .map(|s| serde_json::to_value(session_output(s, &caller)).unwrap_or(Value::Null))
@@ -550,9 +618,16 @@ pub async fn end_session(
         .begin_read()?
         .session(&id)?
         .ok_or_else(|| ApiError::not_found_message(format!("no session {id:?}")))?;
-    if !caller.is_owner()
-        && Some(session.account.as_str()) != caller.account().map(|a| a.name.as_str())
-    {
+    let own = Some(session.account.as_str()) == caller.account().map(|a| a.name.as_str());
+    let of_superuser = state
+        .db
+        .begin_read()?
+        .account(&session.account)?
+        .is_some_and(|a| a.superuser);
+    let may = own
+        || caller.is_owner()
+        || (caller.can_server(grafeno::Act::ManageAccounts) && !of_superuser);
+    if !may {
         return Err(ApiError::forbidden_message(
             "that session is another account's",
         ));

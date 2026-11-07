@@ -37,6 +37,8 @@ pub struct ServerSettings {
     pub import_chunk: usize,
     /// The change log's window.
     pub changes: grafeno::Retention,
+    /// How much of the audit log is kept (14.5).
+    pub audit: grafeno::AuditRetention,
     /// Work that runs from the change log.
     pub background: crate::events::BackgroundConfig,
     /// Membership of a cluster, if this server is a member.
@@ -93,6 +95,7 @@ impl ServerSettings {
             writer: config.writer.options(),
             import_chunk: config.writer.import_chunk(),
             changes: config.changes.retention(),
+            audit: config.audit.retention(),
             background: config.background.clone(),
             cluster: config.cluster.clone(),
             auth: config.auth.config(),
@@ -116,6 +119,7 @@ pub fn run(
     grafeno_query::set_parallelism(settings.scan_threads);
     db.set_durability(settings.durability);
     db.set_change_retention(settings.changes);
+    db.set_audit_retention(settings.audit);
     let mut state = AppState::with_writer(db.clone(), settings.token.as_deref(), settings.writer)
         .with_background(settings.background.clone())
         .with_import_chunk(settings.import_chunk)
@@ -136,7 +140,12 @@ pub fn run(
         let split_cost = cluster
             .split_cost
             .map_or(crate::cluster::DEFAULT_SPLIT_COST, |cost| cost as f64);
-        state = state.with_cluster(node.clone(), apis.clone(), split_cost);
+        state = state.with_cluster(
+            node.clone(),
+            apis.clone(),
+            split_cost,
+            Some(cluster.secret.as_str()),
+        );
         // More groups (13.5): the ones this member votes in.
         let mut nodes = std::collections::HashMap::new();
         for group in &cluster.groups {

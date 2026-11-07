@@ -45,10 +45,10 @@ pub const FENCE: (&str, &str) = ("cluster", "moved");
 /// 1: records and bulk work (13.1). 2: also change log entries copied as
 /// they are ([`Op::Change`], 13.5). 3: accounts, API keys and sessions
 /// instead of principals (14.1). 4: roles (14.2). 5: record policies and
-/// account attributes (14.4). An entry carries the oldest format that
+/// account attributes (14.4). 6: audit events (14.5). An entry carries the oldest format that
 /// can hold it, so a member of the version before reads every entry that
 /// does not need the new one.
-pub const ENTRY_FORMAT: u32 = 5;
+pub const ENTRY_FORMAT: u32 = 6;
 
 pub(crate) const ENABLED: &str = "replication_enabled";
 const FIRST: &str = "replication_first";
@@ -69,6 +69,8 @@ pub(crate) enum Touch {
     ApiKey(String),
     Session(String),
     Role(String),
+    /// An audit event (14.5).
+    Audit(u64),
     Namespace(String),
     MatchRule(String, String),
     State(String, String, String),
@@ -159,6 +161,11 @@ pub enum Op {
         name: String,
         role: Option<Json>,
     },
+    /// An audit event as it is (or `None`: pruned), 14.5.
+    Audit {
+        seq: u64,
+        event: Option<Json>,
+    },
     Namespace {
         ns: String,
         meta: Option<Json>,
@@ -212,7 +219,8 @@ impl Op {
             | Op::Account { .. }
             | Op::ApiKey { .. }
             | Op::Session { .. }
-            | Op::Role { .. } => None,
+            | Op::Role { .. }
+            | Op::Audit { .. } => None,
         }
     }
 
@@ -230,6 +238,7 @@ impl Op {
             Op::ApiKey { name, .. } => Touch::ApiKey(name.clone()),
             Op::Session { id, .. } => Touch::Session(id.clone()),
             Op::Role { name, .. } => Touch::Role(name.clone()),
+            Op::Audit { seq, .. } => Touch::Audit(*seq),
             Op::Namespace { ns, .. } => Touch::Namespace(ns.clone()),
             Op::MatchRule { ns, label, .. } => Touch::MatchRule(ns.clone(), label.clone()),
             Op::State { ns, kind, key, .. } => Touch::State(ns.clone(), kind.clone(), key.clone()),
@@ -323,6 +332,7 @@ impl Touch {
             | Touch::ApiKey(_)
             | Touch::Session(_)
             | Touch::Role(_)
+            | Touch::Audit(_)
             | Touch::Bulk(_) => None,
         }
     }
@@ -443,6 +453,16 @@ impl WriteTx {
                     .open_table(crate::access::API_KEYS)
                     .map_err(storage)?
                     .get(name.as_str())
+                    .map_err(storage)?
+                    .map(|guard| json_of(guard.value()))
+                    .transpose()?,
+            },
+            Touch::Audit(seq) => Op::Audit {
+                seq: *seq,
+                event: tx
+                    .open_table(crate::audit::AUDIT)
+                    .map_err(storage)?
+                    .get(*seq)
                     .map_err(storage)?
                     .map(|guard| json_of(guard.value()))
                     .transpose()?,
@@ -595,7 +615,9 @@ impl WriteTx {
                     || v.as_object().is_some_and(|o| !o.is_empty())
             })
         };
-        let format = if ops.iter().any(|op| match op {
+        let format = if ops.iter().any(|op| matches!(op, Op::Audit { .. })) {
+            6
+        } else if ops.iter().any(|op| match op {
             Op::Role { role, .. } => nonempty(role, "policies"),
             Op::Account { account, .. } => nonempty(account, "attributes"),
             _ => false,
@@ -834,6 +856,10 @@ impl WriteTx {
                 }
                 drop(table);
                 self.bump_access()?;
+            }
+            Op::Audit { seq, event } => {
+                let bytes = event.as_ref().map(bytes_of).transpose()?;
+                self.apply_audit(*seq, bytes.as_deref())?;
             }
             Op::Role { name, role } => {
                 let mut table = self.tx.open_table(crate::rights::ROLES).map_err(storage)?;

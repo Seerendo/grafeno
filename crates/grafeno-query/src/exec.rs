@@ -651,6 +651,8 @@ struct Runner<'a> {
     slice: Option<crate::eval::Slice>,
     /// What the caller may see and change (14.4).
     view: Option<std::sync::Arc<grafeno::View>>,
+    /// Whether the caller may read the audit log (14.5).
+    may_audit: bool,
 }
 
 /// The rows flowing between clauses and the variables they bind, in order.
@@ -695,6 +697,10 @@ impl<'a> Runner<'a> {
             reads_seen: 0,
             slice: None,
             view: limits.view.clone(),
+            may_audit: limits
+                .access
+                .as_ref()
+                .is_none_or(|access| access.read_audit),
         })
     }
 
@@ -722,6 +728,10 @@ impl<'a> Runner<'a> {
             reads_seen: 0,
             slice: None,
             view: limits.view.clone(),
+            may_audit: limits
+                .access
+                .as_ref()
+                .is_none_or(|access| access.read_audit),
         }
     }
 
@@ -735,6 +745,7 @@ impl<'a> Runner<'a> {
             info: &self.info,
             budget: &self.budget,
             view: self.view.as_ref(),
+            may_audit: self.may_audit,
         }
     }
 

@@ -385,13 +385,19 @@ impl WriteTx {
                 return Err(Error::Invalid(format!("no role {role:?}")));
             }
         }
+        let before = self.account(&account.name)?;
         self.note(crate::replication::Touch::Account(account.name.clone()));
         self.tx
             .open_table(ACCOUNTS)
             .map_err(storage)?
             .insert(account.name.as_str(), encode(account)?.as_slice())
             .map_err(storage)?;
-        self.bump_access()
+        self.bump_access()?;
+        let (kind, detail) = match &before {
+            None => ("account_created", summary(account)),
+            Some(before) => ("account_changed", changes(before, account)),
+        };
+        self.audit_access(kind, &account.name, detail)
     }
 
     /// Removes an account with its keys and sessions; returns whether it
@@ -414,6 +420,9 @@ impl WriteTx {
             .map_err(storage)?
             .is_some();
         self.bump_access()?;
+        if removed {
+            self.audit_access("account_deleted", name, serde_json::Value::Null)?;
+        }
         Ok(removed)
     }
 
@@ -438,48 +447,85 @@ impl WriteTx {
 
     /// Writes a key as it is (a new secret, a new expiry).
     pub fn put_api_key(&mut self, key: &ApiKey) -> Result<()> {
+        let before = self.api_key(&key.name)?;
         self.note(crate::replication::Touch::ApiKey(key.name.clone()));
         self.tx
             .open_table(API_KEYS)
             .map_err(storage)?
             .insert(key.name.as_str(), encode(key)?.as_slice())
             .map_err(storage)?;
-        Ok(())
+        let kind = match &before {
+            None => "key_created",
+            Some(before) if before.secret_hash != key.secret_hash => "key_rotated",
+            Some(_) => "key_changed",
+        };
+        self.audit_access(
+            kind,
+            &key.name,
+            serde_json::json!({ "account": key.account, "scope": key.scope, "expires_at": key.expires_at }),
+        )
     }
 
     /// Removes a key; its secret stops working. Returns whether it existed.
     pub fn delete_api_key(&mut self, name: &str) -> Result<bool> {
+        let before = self.api_key(name)?;
         self.note(crate::replication::Touch::ApiKey(name.to_owned()));
-        Ok(self
+        let removed = self
             .tx
             .open_table(API_KEYS)
             .map_err(storage)?
             .remove(name)
             .map_err(storage)?
-            .is_some())
+            .is_some();
+        if let Some(key) = before {
+            self.audit_access(
+                "key_revoked",
+                name,
+                serde_json::json!({ "account": key.account }),
+            )?;
+        }
+        Ok(removed)
     }
 
     /// Writes a session as it is (signed in, refreshed).
     pub fn put_session(&mut self, session: &Session) -> Result<()> {
+        let existed = self.session(&session.id)?.is_some();
         self.note(crate::replication::Touch::Session(session.id.clone()));
         self.tx
             .open_table(SESSIONS)
             .map_err(storage)?
             .insert(session.id.as_str(), encode(session)?.as_slice())
             .map_err(storage)?;
-        Ok(())
+        self.audit_access(
+            if existed {
+                "session_refreshed"
+            } else {
+                "session_created"
+            },
+            &session.account,
+            serde_json::json!({ "session": session.id, "address": session.address }),
+        )
     }
 
     /// Ends a session; returns whether it existed.
     pub fn delete_session(&mut self, id: &str) -> Result<bool> {
+        let before = self.session(id)?;
         self.note(crate::replication::Touch::Session(id.to_owned()));
-        Ok(self
+        let removed = self
             .tx
             .open_table(SESSIONS)
             .map_err(storage)?
             .remove(id)
             .map_err(storage)?
-            .is_some())
+            .is_some();
+        if let Some(session) = before {
+            self.audit_access(
+                "session_ended",
+                &session.account,
+                serde_json::json!({ "session": id }),
+            )?;
+        }
+        Ok(removed)
     }
 
     /// Ends the sessions of `account` whose refresh token expired before
@@ -496,6 +542,40 @@ impl WriteTx {
         }
         Ok(expired.len())
     }
+}
+
+/// What the audit log says of an account: everything but its password's
+/// hash (whether it has one).
+fn summary(account: &Account) -> serde_json::Value {
+    serde_json::json!({
+        "kind": account.kind,
+        "has_password": account.password_hash.is_some(),
+        "grants": account.grants,
+        "roles": account.roles,
+        "superuser": account.superuser,
+        "own_only": account.own_only,
+        "disabled": account.disabled,
+        "expires_at": account.expires_at,
+        "attributes": account.attributes,
+    })
+}
+
+/// What changed in an account, for the audit log (a new password is named,
+/// never shown).
+fn changes(before: &Account, after: &Account) -> serde_json::Value {
+    let (old, new) = (summary(before), summary(after));
+    let mut changed = serde_json::Map::new();
+    if let (Some(old), Some(new)) = (old.as_object(), new.as_object()) {
+        for (key, value) in new {
+            if old.get(key) != Some(value) {
+                changed.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    if before.password_hash != after.password_hash && after.password_hash.is_some() {
+        changed.insert("password".into(), serde_json::json!("changed"));
+    }
+    serde_json::Value::Object(changed)
 }
 
 /// Layout 15: every principal becomes a service account and a key of the

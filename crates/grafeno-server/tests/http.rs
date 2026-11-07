@@ -1210,15 +1210,16 @@ async fn metrics_count_requests_writes_and_limits() {
             .to_vec(),
     )
     .unwrap();
+    // Three nodes, and the audit event of the refused request (14.5).
     for line in [
-        "grafeno_writes_total 3",
+        "grafeno_writes_total 4",
         "grafeno_write_groups_total",
         "grafeno_write_queue{lane=\"interactive\"} 0",
         "grafeno_queries_total 1",
         "grafeno_query_limits_total{limit=\"max_rows\"} 1",
         "grafeno_http_requests_total{status=\"4xx\"} 2",
         "grafeno_commit_seconds_bucket{le=\"+Inf\"}",
-        "grafeno_write_seconds_count{lane=\"interactive\"} 3",
+        "grafeno_write_seconds_count{lane=\"interactive\"} 4",
     ] {
         assert!(text.contains(line), "missing {line:?} in:\n{text}");
     }
