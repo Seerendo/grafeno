@@ -74,13 +74,33 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
-/// A setup write, tried again while a change of leader loses it (`busy`
-/// means it was not committed): a slow machine may elect again early on.
-fn seed(api: u16, statement: &str) -> (u16, Value) {
+/// The member that is the leader now, waiting up to 30 s for one: a slow
+/// machine may elect again early on, so the leader is looked for each time
+/// rather than remembered.
+fn leader_of(members: &[Member]) -> usize {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
+        if let Some(at) = members
+            .iter()
+            .position(|m| m.child.is_some() && status(m.api).is_some_and(|s| s["role"] == "leader"))
+        {
+            return at;
+        }
+        assert!(Instant::now() < deadline, "no leader");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// A setup write, sent to the current leader and tried again while a change
+/// of leader loses it: `busy` (503) means it was not committed, and
+/// `not_leader` (421) that the member asked lost its leadership and knows no
+/// other leader yet.
+fn seed(members: &[Member], statement: &str) -> (u16, Value) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let api = members[leader_of(members)].api;
         let (code, body) = query(api, statement, "off");
-        if code != 503 || Instant::now() > deadline {
+        if !matches!(code, 421 | 503) || Instant::now() > deadline {
             return (code, body);
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -134,25 +154,15 @@ fn split_reads_return_what_one_member_does() {
             child: Some(start(&dir, *id, &cluster)),
         })
         .collect();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let leader = loop {
-        if let Some(at) = members
-            .iter()
-            .position(|m| status(m.api).is_some_and(|s| s["role"] == "leader"))
-        {
-            break at;
-        }
-        assert!(Instant::now() < deadline, "no leader");
-        std::thread::sleep(Duration::from_millis(100));
-    };
+    leader_of(&members);
     // 3 000 people, 20 companies, some acquaintances.
     let (code, body) = seed(
-        members[leader].api,
+        &members,
         "UNWIND range(0, 19) AS c CREATE (:Company {name: 'company ' + toString(c), c: c})",
     );
     assert_eq!(code, 200, "{body}");
     let (code, body) = seed(
-        members[leader].api,
+        &members,
         "UNWIND range(1, 3000) AS i \
          CREATE (p:Person {i: i, name: 'person ' + toString(i), age: i % 80, score: (i * 7919 % 1000) / 10.0, \
                  city: ['Lima', 'Quito', 'Bogotá', 'La Paz', 'Santiago'][i % 5]}) \
@@ -160,7 +170,7 @@ fn split_reads_return_what_one_member_does() {
     );
     assert_eq!(code, 200, "{body}");
     let (code, body) = seed(
-        members[leader].api,
+        &members,
         "MATCH (a:Person), (b:Person) WHERE a.i % 50 = 0 AND b.i = a.i + 1 CREATE (a)-[:knows]->(b)",
     );
     assert_eq!(code, 200, "{body}");
@@ -191,7 +201,8 @@ fn split_reads_return_what_one_member_does() {
             assert!(!whole["rows"].as_array().unwrap().is_empty(), "{text}");
         }
     };
-    // From a follower and from the leader.
+    // From a follower and from the leader (the one there is now).
+    let leader = leader_of(&members);
     check(members[(leader + 1) % 3].api, 1);
     check(members[leader].api, 1);
     // Small reads do not split by default; writes never do.
@@ -202,7 +213,9 @@ fn split_reads_return_what_one_member_does() {
     );
     assert!(small.get("split").is_none());
 
-    // A member down: its part runs on the member that splits.
+    // A member down, a follower (stopping the leader would mean an election
+    // in the middle of the reads): its part runs on the member that splits.
+    let leader = leader_of(&members);
     let down = (leader + 2) % 3;
     if let Some(mut child) = members[down].child.take() {
         child.kill().unwrap();
