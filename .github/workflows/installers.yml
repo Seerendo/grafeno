@@ -123,10 +123,12 @@ jobs:
           Get-Content $config
           if (-not (Select-String -Path $config -Pattern '127.0.0.1:7821' -Quiet)) { throw "the port is not in the settings" }
           if (-not (Select-String -Path $config -Pattern 'GrafenoTest' -Quiet)) { throw "the data folder is not in the settings" }
-          $service = Get-CimInstance Win32_Service -Filter "Name='Grafeno'"
-          $service | Format-List Name, State, StartMode, StartName
-          if ($service.State -ne 'Running') { throw "the service is not running" }
-          if ($service.StartName -ne 'NT SERVICE\Grafeno') { throw "the service runs as $($service.StartName)" }
+          # sc.exe, not WMI: WMI keeps a handle to the service, which stops
+          # the uninstaller's deletion from completing.
+          sc.exe qc Grafeno
+          $account = ((sc.exe qc Grafeno) -match 'SERVICE_START_NAME' | Out-String).Split(':', 2)[1].Trim()
+          if ((Get-Service Grafeno).Status -ne 'Running') { throw "the service is not running" }
+          if ($account -ne 'NT SERVICE\Grafeno') { throw "the service runs as $account" }
           $healthy = $false
           foreach ($i in 1..50) {
             try { Invoke-RestMethod http://127.0.0.1:7821/health | Out-Null; $healthy = $true; break } catch { Start-Sleep -Milliseconds 200 }
@@ -152,14 +154,18 @@ jobs:
         run: |
           $setup = "dist\grafeno-0.0.0-windows-x64-setup.exe"
           Start-Process $setup -Wait -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/TASKS=service,path'
-          $service = Get-CimInstance Win32_Service -Filter "Name='Grafeno'"
-          if ($service.State -ne 'Running') { throw "the service did not come back after the upgrade" }
-          if ($service.StartName -ne 'NT SERVICE\Grafeno') { throw "the upgrade changed the account to $($service.StartName)" }
+          $account = ((sc.exe qc Grafeno) -match 'SERVICE_START_NAME' | Out-String).Split(':', 2)[1].Trim()
+          if ((Get-Service Grafeno).Status -ne 'Running') { throw "the service did not come back after the upgrade" }
+          if ($account -ne 'NT SERVICE\Grafeno') { throw "the upgrade changed the account to $account" }
           if (-not (Select-String -Path "C:\ProgramData\Grafeno\grafeno.toml" -Pattern '7821' -Quiet)) { throw "the upgrade lost the settings" }
           Start-Process "C:\Program Files\Grafeno\unins000.exe" -Wait -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
           # The SCM deletes a service once every handle to it is closed.
           foreach ($i in 1..30) { if (-not (Get-Service Grafeno -ErrorAction SilentlyContinue)) { break }; Start-Sleep -Milliseconds 500 }
-          if (Get-Service Grafeno -ErrorAction SilentlyContinue) { throw "the service is still there" }
+          if (Get-Service Grafeno -ErrorAction SilentlyContinue) {
+            sc.exe queryex Grafeno
+            & "C:\Program Files\Grafeno\grafeno.exe" service uninstall
+            throw "the service is still there"
+          }
           if (-not (Test-Path "C:\GrafenoTest\data\grafeno.redb")) { throw "uninstalling removed the data" }
           if (-not (Test-Path "C:\ProgramData\Grafeno\grafeno.toml")) { throw "uninstalling removed the settings" }
       - name: Install again over the kept data, then uninstall removing it
