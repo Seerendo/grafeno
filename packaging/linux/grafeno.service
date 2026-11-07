@@ -1,6 +1,6 @@
 [Unit]
 Description=Grafeno graph engine
-Documentation=https://github.com/Seerendo/grafeno
+Documentation=https://github.com/grafenodb/grafeno
 After=network.target
 
 [Service]

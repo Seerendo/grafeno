@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs the Grafeno engine on Linux (x86_64 and aarch64).
 #
-#   curl -fsSL https://raw.githubusercontent.com/Seerendo/grafeno/main/install.sh | sudo sh
+#   curl -fsSL https://raw.githubusercontent.com/grafenodb/grafeno/main/install.sh | sudo sh
 #
 # As root, on a distribution whose package manager it knows, it installs the
 # package, which creates the `grafeno` user and the default instance
@@ -36,9 +36,9 @@
 
 set -eu
 
-REPO="Seerendo/grafeno"
+REPO="grafenodb/grafeno"
 BASE_URL="${GRAFENO_BASE_URL:-https://github.com/$REPO/releases}"
-REPO_URL="${GRAFENO_REPO_URL:-https://seerendo.github.io/grafeno}"
+REPO_URL="${GRAFENO_REPO_URL:-https://grafenodb.github.io/grafeno}"
 REPO_URL="${REPO_URL%/}"
 VERSION="${GRAFENO_VERSION:-latest}"
 METHOD="${GRAFENO_METHOD:-auto}"
@@ -259,7 +259,7 @@ elif [ "$SERVICE" = 1 ]; then
     cat > "$UNIT_DIR/grafeno.service" <<UNIT
 [Unit]
 Description=Grafeno graph engine (user service)
-Documentation=https://github.com/Seerendo/grafeno
+Documentation=https://github.com/grafenodb/grafeno
 
 [Service]
 ExecStart=$PREFIX/grafeno serve --config $CONF

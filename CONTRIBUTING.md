@@ -5,7 +5,7 @@
 This guide prepares the engine and its TypeScript client for development and
 verification. Run commands from the repository root unless a different
 directory is specified. The graphical interface, Grafeno Studio, lives in its
-own repository (gfStudio) since Grafeno 15.
+own repository ([Grafeno Studio](https://github.com/grafenodb/grafeno-studio)) since Grafeno 15.
 
 ## Requirements
 

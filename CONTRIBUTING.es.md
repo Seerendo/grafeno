@@ -5,7 +5,7 @@
 Esta guía prepara el motor y su cliente TypeScript para desarrollar y
 verificar cambios. Ejecuta los comandos desde la raíz del repositorio salvo
 que se indique otro directorio. La interfaz gráfica, Grafeno Studio, vive en
-su propio repositorio (gfStudio) desde Grafeno 15.
+su propio repositorio ([Grafeno Studio](https://github.com/grafenodb/grafeno-studio)) desde Grafeno 15.
 
 ## Requisitos
 

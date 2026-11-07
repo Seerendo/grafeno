@@ -2,7 +2,7 @@
 # an instance made by `grafeno setup --instance <name>`.
 [Unit]
 Description=Grafeno graph engine (instance %i)
-Documentation=https://github.com/Seerendo/grafeno
+Documentation=https://github.com/grafenodb/grafeno
 After=network.target
 
 [Service]

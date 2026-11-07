@@ -16,7 +16,7 @@ system.
 
 | System | File | What it sets up |
 | ------ | ---- | --------------- |
-| Windows 10/11, Server 2019+ (x64) | `grafeno-<version>-windows-x64-setup.exe`, or `winget install Seerendo.Grafeno` | `C:\Program Files\Grafeno`, the `Grafeno` service, PATH, Start menu shortcuts |
+| Windows 10/11, Server 2019+ (x64) | `grafeno-<version>-windows-x64-setup.exe`, or `winget install GrafenoDB.Grafeno` | `C:\Program Files\Grafeno`, the `Grafeno` service, PATH, Start menu shortcuts |
 | Debian, Ubuntu and derivatives (amd64, arm64) | Grafeno's APT repository, or `grafeno_<version>-1_<arch>.deb` | `/usr/bin/grafeno`, the `grafeno` user, the default instance and its systemd service |
 | Fedora, RHEL, Rocky, Alma, Oracle Linux, Amazon Linux (x86_64, aarch64) | Grafeno's DNF repository, or `grafeno-<version>-1.<arch>.rpm` | the same |
 | Any Linux (x86_64, aarch64) | `grafeno-<arch>-unknown-linux-musl.tar.gz`, or `install.sh` | the binary; the service with `--service` |
@@ -38,7 +38,7 @@ database's layout, free disk space, the port and the service.
 ### The one-liner: any Linux, AlmaLinux and RHEL included
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Seerendo/grafeno/main/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/grafenodb/grafeno/main/install.sh | sudo sh
 ```
 
 As root, it finds the distribution in `/etc/os-release` and the processor
@@ -61,7 +61,7 @@ adds a systemd **user** service, with its settings in
 `~/.config/grafeno/grafeno.toml` and its data in `~/.local/share/grafeno`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Seerendo/grafeno/main/install.sh | sh -s -- --service
+curl -fsSL https://raw.githubusercontent.com/grafenodb/grafeno/main/install.sh | sh -s -- --service
 ```
 
 Every file it downloads is checked against the SHA-256 published with the
@@ -79,11 +79,11 @@ it at mirrors.
 From the repository (what the one-liner does):
 
 ```bash
-sudo install -d /etc/apt/keyrings && curl -fsSL https://seerendo.github.io/grafeno/grafeno.asc | sudo tee /etc/apt/keyrings/grafeno.asc >/dev/null
+sudo install -d /etc/apt/keyrings && curl -fsSL https://grafenodb.github.io/grafeno/grafeno.asc | sudo tee /etc/apt/keyrings/grafeno.asc >/dev/null
 ```
 
 ```bash
-echo "deb [signed-by=/etc/apt/keyrings/grafeno.asc] https://seerendo.github.io/grafeno/deb stable main" | sudo tee /etc/apt/sources.list.d/grafeno.list
+echo "deb [signed-by=/etc/apt/keyrings/grafeno.asc] https://grafenodb.github.io/grafeno/deb stable main" | sudo tee /etc/apt/sources.list.d/grafeno.list
 ```
 
 ```bash
@@ -101,7 +101,7 @@ sudo apt install ./grafeno_0.1.0-1_amd64.deb
 From the repository (what the one-liner does):
 
 ```bash
-sudo curl -fsSL https://seerendo.github.io/grafeno/grafeno.repo -o /etc/yum.repos.d/grafeno.repo
+sudo curl -fsSL https://grafenodb.github.io/grafeno/grafeno.repo -o /etc/yum.repos.d/grafeno.repo
 ```
 
 ```bash
@@ -230,7 +230,7 @@ starts it again.
 ### Windows
 
 Run `grafeno-<version>-windows-x64-setup.exe` (it asks for administrator
-rights), or `winget install Seerendo.Grafeno`. As PostgreSQL's setup does,
+rights), or `winget install GrafenoDB.Grafeno`. As PostgreSQL's setup does,
 it asks:
 
 - the **program folder** (`C:\Program Files\Grafeno` by default);
@@ -273,7 +273,7 @@ Restart-Service Grafeno
 ```
 
 Upgrading runs the new installer over the old one (or `winget upgrade
-Seerendo.Grafeno`): it stops the service, replaces the program, keeps the
+GrafenoDB.Grafeno`): it stops the service, replaces the program, keeps the
 settings, the data and the service's account (it asks nothing about them
 again) and starts the service. Uninstalling (Settings → Apps) removes the
 program, the service, the firewall rule and the PATH entry, and asks
@@ -631,7 +631,7 @@ of `GET /v1/about`, now 1).
 | Files | Command | Needs |
 | ----- | ------- | ----- |
 | Linux `.tar.gz`, `.deb`, `.rpm`, x86_64 and aarch64 | `docker build -f packaging/linux/Dockerfile --output dist/linux .` | Docker |
-| The APT and DNF repositories | `GRAFENO_GPG_KEY=<key id> packaging/repo/build-repo.sh dist/linux site https://seerendo.github.io/grafeno` | GnuPG, rpm, createrepo_c, apt-utils |
+| The APT and DNF repositories | `GRAFENO_GPG_KEY=<key id> packaging/repo/build-repo.sh dist/linux site https://grafenodb.github.io/grafeno` | GnuPG, rpm, createrepo_c, apt-utils |
 | Windows setup `.exe` | `cargo build --release -p grafeno-server`, then `iscc /DAppVersion=0.1.0 packaging\windows\grafeno.iss` | Rust (MSVC), Inno Setup 6 |
 | winget manifests | `python packaging/windows/winget/make-manifests.py 0.1.0 dist\grafeno-0.1.0-windows-x64-setup.exe <url> dist\winget` | Python |
 

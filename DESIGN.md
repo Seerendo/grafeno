@@ -2876,7 +2876,7 @@ documentation and its own commit.
 As built:
 
 - The Studio, the desktop app and a copy of the TypeScript client moved to
-  their own repository, **gfStudio** (Grafeno Studio), with their own
+  their own repository, **Grafeno Studio** ([grafenodb/grafeno-studio](https://github.com/grafenodb/grafeno-studio)), with their own
   checks; their history up to here stays in this one (14.5, `87dc149`). The
   desktop app came as it was, to be rebuilt there to talk to engines only
   over HTTP. The TypeScript client stays here as the engine's client
@@ -3141,7 +3141,7 @@ As built:
   (which has no `/v1/about`): both pass, the older as legacy. The CI runs it
   against the engine it builds and the latest published release (none yet:
   it says so and runs the current one only).
-- Grafeno Studio (gfStudio): checks each engine with `connect()`, refuses
+- Grafeno Studio (its repository): checks each engine with `connect()`, refuses
   an incompatible one with a clear message, hides the views an engine
   lacks (memory, cluster, access), and backs up through `GET /v1/backup`
   for local and remote databases alike (the desktop app only writes the
@@ -3173,7 +3173,7 @@ As built:
   an installed engine, connects to a remote server and to a cluster, and
   passes its end-to-end tests against the engine binary.
 
-As built (the app in gfStudio, `desktop/`; the engine's part here):
+As built (the app in the Grafeno Studio repository, `desktop/`; the engine's part here):
 
 - The engine: `grafeno serve --stop-with-stdin` stops cleanly, as on
   Ctrl+C, when its standard input closes, which is what happens when the
@@ -3182,7 +3182,7 @@ As built (the app in gfStudio, `desktop/`; the engine's part here):
   (`verify_file`: clean). With 15.3's `grafeno restore`, it is all the app
   needs of the engine besides its HTTP API.
 - The app links no engine crate (its own `Cargo.toml`, version 0.2.0, with
-  no path into this repository); its sources live in gfStudio, beside the
+  no path into this repository); its sources live in the Grafeno Studio repository, beside the
   Studio, rather than in `apps/desktop` here, since the two products were
   split into two repositories in 15.1.
 - Local files: the app finds the installed engine (`GRAFENO_BIN`, the
@@ -3206,7 +3206,7 @@ As built (the app in gfStudio, `desktop/`; the engine's part here):
   reopens with its data), no engine left after a session ends, and a file
   the engine cannot open refused with its reason; they pass. The Linux
   WebDriver test of the window follows the new paths; it was not run here
-  (it needs Linux with a display), and the gfStudio workflow runs the
+  (it needs Linux with a display), and the Grafeno Studio repository's workflow runs the
   native tests with an engine built from this repository.
 - Tauri or Electron, measured on the laptop of E1 (Windows 11, WebView2),
   with the same Studio build (0.9 MB):
@@ -3250,7 +3250,7 @@ As built (the products already live in two repositories since 15.1):
   the version in `Cargo.toml` or has no section in the change log. The
   one-liner asks for `engine-v<version>` (`--version 0.1.0`), and the
   winget manifests point at those tags.
-- Grafeno Studio and Grafeno Desktop (gfStudio): one product, version
+- Grafeno Studio and Grafeno Desktop (the Grafeno Studio repository): one product, version
   0.2.0 (`desktop/Cargo.toml`, `desktop/tauri.conf.json` and
   `studio/package.json` must agree), its own `CHANGELOG.md` saying which
   engines each version works with (API version 1, engine 0.1.0 or later),
@@ -3260,7 +3260,7 @@ As built (the products already live in two repositories since 15.1):
   Studio's web build as a `.zip`, with checksums, minisign signatures and
   Windows code signing when their secrets exist.
 - Install tests per product: the engine's `installers` workflow (15.2)
-  shows its packages bring nothing graphical; gfStudio's `installers`
+  shows its packages bring nothing graphical; the Grafeno Studio repository's `installers`
   workflow builds the desktop packages and the engine's from their
   repositories and installs them side by side. `desktop/packaging/
   test-install.sh` passes in Debian 12 and Fedora 42 containers: the
@@ -3273,8 +3273,8 @@ As built (the products already live in two repositories since 15.1):
   the desktop (`/S`, for the user), checks that the desktop brings no
   service and no `grafeno.exe`, that removing it leaves the service
   running with its data, and that removing the engine leaves the desktop
-  and the data; it runs once gfStudio has its GitHub repository (it has
-  none yet), and was not run on this laptop, where installing the engine's
+  and the data; it runs on that repository's
+  pushes, and was not run on this laptop, where installing the engine's
   setup would replace a real service.
 - The Linux packages of the desktop app, built in a container on Debian
   12 (`desktop/packaging/Dockerfile`): 6.1 MB as a `.deb` or an `.rpm`.

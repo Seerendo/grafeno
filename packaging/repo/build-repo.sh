@@ -8,7 +8,7 @@
 # DIST holds the release's .deb and .rpm files (dist/linux); SITE is the
 # repositories' folder, as published (new packages are added to what it
 # holds, so older versions stay installable); URL is where SITE is served
-# (https://seerendo.github.io/grafeno). The key that signs is the secret
+# (https://grafenodb.github.io/grafeno). The key that signs is the secret
 # key in GnuPG's keyring whose id is $GRAFENO_GPG_KEY.
 #
 # SITE gets:

@@ -87,7 +87,7 @@ no deben atribuirse al lienzo. Estos números no son garantías.
 ## Validación
 
 ```bash
-npm test --prefix studio   # en el repositorio gfStudio
+npm test --prefix studio   # en el repositorio de Grafeno Studio
 cargo test --locked -p grafeno-server --test http neighborhoods
 cargo test --locked -p grafeno-server --test access
 npm test --prefix clients/typescript

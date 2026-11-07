@@ -235,7 +235,7 @@ presentan el proyecto y los primeros pasos.
   stream, JSON Lines or `db.audit()` in GQ.
 
 - **Phase 15.1, the engine alone:** the engine has no interface; Grafeno
-  Studio and the desktop app moved to their own repository (gfStudio), to
+  Studio and the desktop app moved to their own repository (Grafeno Studio), to
   be installed on their own, as pgAdmin is next to PostgreSQL. The engine's
   packages install the engine only.
 
@@ -258,7 +258,7 @@ presentan el proyecto y los primeros pasos.
   real engine binaries of each supported version.
 
 - **Phase 15.4, the desktop app without an engine:** Grafeno Desktop (in
-  gfStudio) links no engine code; it opens files by starting the installed
+  the Grafeno Studio repository) links no engine code; it opens files by starting the installed
   engine (`grafeno serve --stop-with-stdin` on a loopback port with a
   token of its own) and talks to every engine over HTTP, with saved
   servers, the local service, clusters and several windows; measured

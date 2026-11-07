@@ -1,14 +1,14 @@
-"""Writes the winget manifests of a release (Seerendo.Grafeno), for a pull
+"""Writes the winget manifests of a release (GrafenoDB.Grafeno), for a pull
 request to microsoft/winget-pkgs:
 
     python packaging/windows/winget/make-manifests.py VERSION SETUP.exe URL OUT
 
 VERSION is the release's (0.1.0), SETUP.exe the setup built for it (its
 SHA-256 goes in the manifest), URL where the release serves it, OUT the
-folder to write manifests/s/Seerendo/Grafeno/VERSION/ into. Then:
+folder to write manifests/g/GrafenoDB/Grafeno/VERSION/ into. Then:
 
-    winget validate --manifest OUT/manifests/s/Seerendo/Grafeno/VERSION
-    wingetcreate submit OUT/manifests/s/Seerendo/Grafeno/VERSION   (or a PR by hand)
+    winget validate --manifest OUT/manifests/g/GrafenoDB/Grafeno/VERSION
+    wingetcreate submit OUT/manifests/g/GrafenoDB/Grafeno/VERSION   (or a PR by hand)
 """
 
 import hashlib
@@ -16,7 +16,7 @@ import pathlib
 import sys
 
 SCHEMA = "1.6.0"
-ID = "Seerendo.Grafeno"
+ID = "GrafenoDB.Grafeno"
 
 
 def main() -> None:
@@ -24,7 +24,7 @@ def main() -> None:
         sys.exit(__doc__)
     version, setup, url, out = sys.argv[1:]
     sha = hashlib.sha256(pathlib.Path(setup).read_bytes()).hexdigest().upper()
-    folder = pathlib.Path(out) / "manifests" / "s" / "Seerendo" / "Grafeno" / version
+    folder = pathlib.Path(out) / "manifests" / "g" / "GrafenoDB" / "Grafeno" / version
     folder.mkdir(parents=True, exist_ok=True)
     header = "# Created by packaging/windows/winget/make-manifests.py\n"
     files = {
@@ -61,10 +61,10 @@ ManifestVersion: {SCHEMA}
 PackageIdentifier: {ID}
 PackageVersion: {version}
 PackageLocale: en-US
-Publisher: Seerendo
-PublisherUrl: https://github.com/Seerendo
+Publisher: GrafenoDB
+PublisherUrl: https://github.com/grafenodb
 PackageName: Grafeno
-PackageUrl: https://github.com/Seerendo/grafeno
+PackageUrl: https://github.com/grafenodb/grafeno
 License: Unspecified
 ShortDescription: A graph engine for agent memory and knowledge, run as a Windows service.
 Description: |-
@@ -78,7 +78,7 @@ Tags:
   - graph
   - graph-database
   - knowledge-graph
-ReleaseNotesUrl: https://github.com/Seerendo/grafeno/releases/tag/engine-v{version}
+ReleaseNotesUrl: https://github.com/grafenodb/grafeno/releases/tag/engine-v{version}
 ManifestType: defaultLocale
 ManifestVersion: {SCHEMA}
 """,
