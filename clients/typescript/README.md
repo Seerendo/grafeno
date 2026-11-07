@@ -61,6 +61,28 @@ Field names follow the API (snake_case); see
 Errors are thrown as `GrafenoError`, with the HTTP `status` and the API's
 `code`.
 
+## Versions and capabilities (15.3)
+
+The client is the published contract of the HTTP API. It has its own
+version (`CLIENT_VERSION`, 0.2.0) and speaks the API versions in
+`API_VERSIONS` (`[1]`). Before using an engine, check it:
+
+```ts
+const grafeno = new Grafeno({ url, token });
+const about = await grafeno.connect(); // fails with `incompatible` if no API version is shared
+console.log(about.version, about.api.version, about.capabilities);
+if (grafeno.supports("audit")) showAuditLog();
+if (grafeno.supports("cluster.groups")) showPlacement();
+```
+
+`connect()` reads `GET /v1/about`; an engine from before it (0.1.0) is told
+from `/health` (`about.legacy`, with the capabilities of that time), so the
+same client works with it. Offer only what `supports()` allows, rather
+than failing on an older engine. `settings()` reads what a server runs with
+(superusers). `test/contract.test.ts` runs the client against the real
+engine binaries listed in `GRAFENO_CONTRACT_BINS` (the CI gives it the
+engine being built and the latest release).
+
 ## Development
 
 ```bash

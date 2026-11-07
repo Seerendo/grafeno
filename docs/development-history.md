@@ -250,8 +250,15 @@ presentan el proyecto y los primeros pasos.
   first administrator, the Event Log and winget manifests; all of it
   installed, upgraded and removed on clean machines.
 
-Next, the rest of phase 15: the public API as the only contract, then
-Grafeno Desktop as a separate product that talks to engines through their
-API; then
+- **Phase 15.3, the API as the only contract:** `GET /v1/about` (version,
+  API version, capabilities) and `x-grafeno-api` on every response,
+  `GET /v1/settings`, `grafeno restore`; a test that every route is
+  documented; the TypeScript client 0.2.0 checks engines (`connect()`,
+  `supports()`, older engines told from `/health`) and is run against the
+  real engine binaries of each supported version.
+
+Next, the rest of phase 15: Grafeno Desktop as a separate product that
+starts an installed engine for local files and talks to engines only
+through their API, then two products with two releases; then
 integrations (Grafito, Python bindings). The plan is in
 [DESIGN.md](../DESIGN.md).

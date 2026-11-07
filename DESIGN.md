@@ -404,7 +404,7 @@ without a current user. They remain possible for embedded use.
     a complete role-based access control, as most databases have: users who
     sign in, roles and privileges granted with `GRANT` and `REVOKE`, rights
     down to labels, properties and records, and an audit log.
-15. **Engine and interface apart** (in progress, 15.1 and 15.2 done; in five steps; see below):
+15. **Engine and interface apart** (in progress, 15.1 to 15.3 done; in five steps; see below):
     the engine's installers install only the engine (Windows `.exe`, Linux
     `.deb`, `.rpm` and a `curl` one-liner), as a professional installation
     in the way PostgreSQL's is, with no Docker needed; and the interface
@@ -3081,7 +3081,7 @@ As built (in two parts: the installers, then the rest):
   Windows (one service each) and an enforcing SELinux policy are left for
   later.
 
-**15.3 The public API as the only contract.**
+**15.3 The public API as the only contract** (done).
 
 - Everything the interface does goes through the documented HTTP API:
   whatever it reaches today in-process or through app-only commands
@@ -3097,6 +3097,58 @@ As built (in two parts: the installers, then the rest):
   client against the real engine binary of each supported version.
 - Done when: the interface has no call outside the public API, and the
   contract tests pass against the current engine and the previous release.
+
+As built:
+
+- `GET /v1/about` (public): the product, the engine's version, the API
+  version and every version it answers to (`api: {version: 1, supported:
+  [1]}`), the layout, the capabilities, how callers authenticate (`token`,
+  `accounts`, `open`) and, on a cluster, the member and its group. Every
+  response under `/v1` carries `x-grafeno-api: 1`. The rule: the API
+  version changes only for a change that would break a client of the
+  previous one; additions keep it and add a capability. The capabilities
+  are 42 names (`crates/grafeno-server/src/about.rs`), one per feature a
+  client may have to check (`audit`, `query.split`, `cluster.groups`, …),
+  each documented in the server's README.
+- `GET /v1/settings` (superusers): what the server runs with (its file,
+  flags and defaults resolved), without the token or the cluster secret,
+  which were the database's settings the interface could not see.
+- The API is the routes the server answers, all of them in the README's
+  tables: `tests/contract.rs` reads the router's `.route(...)` calls and
+  the tables and fails on any difference (it found ten routes missing from
+  the tables, the cluster's internal ones among them, and five rows that
+  named routes in a shape the router did not have; the internal routes now
+  have a table of their own).
+- `grafeno restore BACKUP NEW`: recovering a backup into a new file
+  (pages checked, layout upgraded, namespaces verified), the part of the
+  desktop app's restore that needs the engine, now a command of the
+  installed binary.
+- The TypeScript client is the published contract: version 0.2.0 of its
+  own (`CLIENT_VERSION`), `API_VERSIONS = [1]`, `about()`, `connect()`
+  (fails with `incompatible` when no API version is shared), `supports()`
+  and `settings()`. An engine from before `/v1/about` answers 404 there:
+  the client tells it from `/health` (`legacy`, with the capabilities of
+  that time), so one client serves both. The types stay written by hand:
+  generating them would need a schema of every route, which is more than
+  the contract test buys.
+- Contract tests: `clients/typescript/test/contract.test.ts` runs the
+  client against every engine binary in `GRAFENO_CONTRACT_BINS`, using
+  what each says it supports (nodes, edges, text search, GQ, traversals,
+  recall, export and import, backups, accounts and sessions, settings),
+  plus an engine of an unknown API version (refused), a legacy one (told
+  from `/health`) and one with newer capabilities (unknown names ignored).
+  Run against this engine and the one built from the commit before 15.3
+  (which has no `/v1/about`): both pass, the older as legacy. The CI runs it
+  against the engine it builds and the latest published release (none yet:
+  it says so and runs the current one only).
+- Grafeno Studio (gfStudio): checks each engine with `connect()`, refuses
+  an incompatible one with a clear message, hides the views an engine
+  lacks (memory, cluster, access), and backs up through `GET /v1/backup`
+  for local and remote databases alike (the desktop app only writes the
+  file). What remains outside the API is the desktop app's local files:
+  opening one and restoring a backup still use the engine linked into the
+  app, which 15.4 replaces by starting the installed engine (`grafeno
+  serve` on a loopback port, `grafeno restore`).
 
 **15.4 The desktop application without an engine.**
 

@@ -30,6 +30,9 @@ The `grafeno` binary serves and manages a Grafeno database (installers:
   running server (see *Access* below).
 - `grafeno backup OUT`: a consistent copy of the whole database, from a
   file or (with `--config`) from a running server, which keeps serving.
+  `grafeno restore BACKUP NEW` recovers a backup into a new database file
+  (pages checked, layout upgraded, namespaces verified; the backup is only
+  read and an existing file is never replaced).
   `grafeno check` verifies every page of the file against its checksum
   before checking the indexes: run it on a file that may be damaged.
   `grafeno check --recall 100` also estimates the recall of vector
@@ -297,8 +300,10 @@ superuser, and from then on every request needs a credential.
 | `GET`, `PATCH`, `DELETE` | `/v1/accounts/{name}` | `{password?, grants?, roles?, superuser?, own_only?, disabled?, description?}` | `manage_accounts`, not on superusers; disabling or a new password ends its sessions |
 | `GET` | `/v1/privileges` | | every action by object, and the built-in levels (anyone signed in) |
 | `GET` | `/v1/audit` | `?since=&limit=`, `?format=jsonl`, or `Accept: text/event-stream` | audit events (`audit`): `{events, last, oldest, gap}`, JSON Lines, or a stream |
-| `GET`, `POST`, `PATCH`, `DELETE` | `/v1/admin/users`, `/v1/admin/users/{name}` | as `/v1/accounts`, plus `expires_at` (microseconds, ISO 8601, or `null`) | the accounts under the design's name (14.3) |
-| `GET`, `PUT`, `DELETE` | `/v1/admin/roles`, `/v1/admin/roles/{name}` | as `/v1/roles` | the roles (`manage_roles`) |
+| `GET`, `POST` | `/v1/admin/users` | as `/v1/accounts`, plus `expires_at` (microseconds, ISO 8601, or `null`) | the accounts under the design's name (14.3) |
+| `GET`, `PATCH`, `DELETE` | `/v1/admin/users/{name}` | as `/v1/accounts/{name}`, plus `expires_at` | one account |
+| `GET` | `/v1/admin/roles` | | the roles (`manage_roles`) |
+| `GET`, `PUT`, `DELETE` | `/v1/admin/roles/{name}` | as `/v1/roles/{name}` | one role |
 | `GET` | `/v1/admin/grants?holder=name` | | `{columns: [source, access, privilege, on], rows}`: an account's or a role's privileges (its own: anyone; others: `manage_roles` or `manage_accounts`) |
 | `POST` | `/v1/admin/grants` | `{privileges: ["read", "editor", …], on: {on: …}, to: [roles], deny?}` | grants or denies; `{rows: [["granted 2 privileges …"]]}` (`manage_roles`) |
 | `POST` | `/v1/admin/grants/revoke` | `{privileges, on, from: [roles], which?: grants\|denials\|both}` | revokes |
@@ -342,6 +347,8 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | Method   | Path                                  | Body / query                                            | Returns                       |
 | -------- | ------------------------------------- | ------------------------------------------------------- | ----------------------------- |
 | `GET`    | `/health`                             |                                                         | `{status, version, layout}`   |
+| `GET`    | `/v1/about`                           | (public)                                                | `{product, version, api: {version, supported}, layout, capabilities, auth: {token, accounts, open, password_sign_in}, cluster}`: see *The API as a contract* |
+| `GET`    | `/v1/settings`                        | (superusers)                                            | the settings the server runs with, without the token or the cluster secret |
 | `GET`    | `/v1/namespaces`                      |                                                         | `[{name, nodes, edges, created_at, description?}]`, empty ones too |
 | `POST`   | `/v1/namespaces`                      | `{name, description?}`                                  | the namespace (201); 409 if it exists |
 | `GET`    | `/v1/namespaces/{ns}`                 |                                                         | the namespace, or 404         |
@@ -379,6 +386,7 @@ requests accept either that or an ISO 8601 string (`2024-05-01`,
 | `POST`   | `/v1/{ns}/context`                    | recall query + `{budget, fact_share, max_facts, facts, communities}` | `{overview, items, facts, tokens, rendered}`; `communities` puts that many matching community summaries first |
 | `POST`   | `/v1/{ns}/batch`                      | `{ops}`                                                 | `{results, refs}`             |
 | `POST`   | `/v1/{ns}/query`                      | `{query, params?}` ([GQ](../../docs/query-language.md)) | `{columns, rows, stats}`      |
+| `POST`   | `/v1/{ns}/query/part`                 | a part of a split query (member to member, 13.4)        | the part's rows and statistics |
 | `GET`    | `/v1/whoami`                          |                                                         | the caller: `{name, owner, grants, own_only}` |
 | `GET`    | `/v1/metrics`                         |                                                         | counters and histograms in the Prometheus text format (any secret) |
 | `GET`    | `/v1/keys`                            |                                                         | the keys, never their secrets (owners) |
@@ -474,6 +482,44 @@ Syncing a note and replacing its links in one request:
 ] }
 ```
 
+### The API as a contract
+
+The HTTP API is the only way into the engine: Grafeno Studio, the
+TypeScript client and any other program use it and nothing else. Every
+route is in the tables above (a test checks that the server answers
+exactly these). `GET /v1/about` (public) says what the engine is:
+
+```json
+{
+  "product": "grafeno",
+  "version": "0.1.0",
+  "api": { "version": 1, "supported": [1] },
+  "layout": 17,
+  "capabilities": ["namespaces", "nodes", "…", "cluster.groups", "query.split"],
+  "auth": { "token": true, "accounts": true, "open": false, "password_sign_in": true },
+  "cluster": null
+}
+```
+
+Every response under `/v1` carries `x-grafeno-api: 1`. The API version
+changes only when a change would break a client written for the previous
+one (a route removed, a field renamed or retyped); what is added keeps the
+version and shows up as a capability, so a client turns off what an older
+engine lacks instead of failing. The capabilities:
+
+| Capability | What it is |
+| ---------- | ---------- |
+| `namespaces`, `nodes`, `edges`, `facts` | the graph and its facts with valid and record time |
+| `search.text`, `search.vector` | full-text and vector search |
+| `recall`, `context`, `memory` | hybrid recall, context for a prompt, importance and accesses |
+| `query`, `query.explain`, `batches`, `traversal`, `algorithms` | GQ, `EXPLAIN`, batches, k-hop, paths, subgraphs and neighborhoods, graph algorithms |
+| `resolution`, `match-rules`, `extraction`, `constraints`, `communities`, `summaries`, `indexes` | keeping knowledge in shape (phase 11) |
+| `changes`, `changes.stream`, `webhooks`, `ingest` | the change log, as pages and as a stream, webhooks, NDJSON ingestion |
+| `export`, `import`, `import.csv`, `import.graphml`, `backup` | moving data in and out |
+| `metrics`, `settings` | `GET /v1/metrics`, `GET /v1/settings` |
+| `accounts`, `sessions`, `keys`, `roles`, `grants`, `policies`, `audit` | access (phase 14) |
+| `cluster`, `cluster.groups`, `query.split` | clusters (phase 13) |
+
 ### Cluster
 
 On a cluster member (`[cluster]` in `grafeno.toml`, see
@@ -503,11 +549,21 @@ leader only. Owner routes:
 | `GET` | `/v1/cluster/groups` | | each Raft group: `{id, voters, held, status}` (13.5) |
 | `GET` | `/v1/cluster/placement` | | `[{namespace, group, moving_to}]`: the namespaces placed outside group 0 |
 | `POST` | `/v1/cluster/placement` | `{namespace, group}` | moves it without stopping it: `{from, to, records, catch_up_rounds, paused_ms, …}` |
+| `GET` | `/v1/cluster/groups/{group}/status` | | one group's view, as `/v1/cluster` |
+| `POST` | `/v1/cluster/groups/{group}/voters` | `{voters: [ids]}` | changes that group's voters |
+| `POST` | `/v1/cluster/groups/{group}/compact` | | snapshots that group's database |
 
 With several groups, a request for a namespace goes to its group (on any
 member); writes during a move's pause answer `busy` (503) and should be
-retried. Internal routes under `/v1/cluster/groups/{id}/` carry a move's
-copies, fence and directory.
+retried. Routes members use among themselves (the cluster secret, not for
+clients):
+
+| Method | Path | Body | Returns |
+| --- | --- | --- | --- |
+| `POST` | `/v1/cluster/audit` | audit events a follower saw | recorded by the leader |
+| `POST` | `/v1/cluster/groups/{group}/import` | a move's copies of records | `{records}` |
+| `POST` | `/v1/cluster/groups/{group}/fence` | the namespace being moved | fences its writes |
+| `POST` | `/v1/cluster/groups/{group}/directory` | a namespace's new group | updates the directory |
 
 `grafeno cluster status|voters|compact --url … --token … [--group N]` call
 them; `/v1/cluster/groups/{id}/status`, `…/voters` and `…/compact` do the
