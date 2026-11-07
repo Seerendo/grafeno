@@ -88,7 +88,10 @@ impl ServerSettings {
             scan_threads: config.query.scan_threads.unwrap_or(0),
             durability: config.durability.map(Into::into).unwrap_or_default(),
             max_requests: config.max_requests.unwrap_or(http::MAX_REQUESTS),
-            memory: config.memory.options(),
+            memory: grafeno::OpenOptions {
+                copy_before_upgrade: config.copy_before_upgrade.unwrap_or(true),
+                ..config.memory.options()
+            },
             writer: config.writer.options(),
             import_chunk: config.writer.import_chunk(),
             changes: config.changes.retention(),
@@ -260,15 +263,64 @@ pub mod windows {
         })
     }
 
-    /// `grafeno.log` next to the configuration: services have no console.
+    /// The size at which `grafeno.log` becomes `grafeno.log.1` (replacing
+    /// the one before).
+    const LOG_LIMIT: u64 = 10 * 1024 * 1024;
+
+    /// Services have no console: what happens goes to the Event Log
+    /// (Application, source `Grafeno`, which the installer registers) and
+    /// to `grafeno.log` next to the configuration, rotated at 10 MiB.
     fn log(config: &Path, message: &str) {
+        let error = message.starts_with("error") || message.contains("with an error");
+        event(message, error);
         let path = config.with_file_name("grafeno.log");
+        if std::fs::metadata(&path).is_ok_and(|meta| meta.len() > LOG_LIMIT) {
+            let _ = std::fs::rename(&path, path.with_extension("log.1"));
+        }
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
         {
             let _ = writeln!(file, "{} {message}", grafeno::Timestamp::now().iso());
+        }
+    }
+
+    /// One event in the Application log (message 1 of grafeno.exe's
+    /// message table is the string itself).
+    fn event(message: &str, error: bool) {
+        use windows_sys::Win32::System::EventLog::{
+            DeregisterEventSource, EVENTLOG_ERROR_TYPE, EVENTLOG_INFORMATION_TYPE,
+            RegisterEventSourceW, ReportEventW,
+        };
+        let wide = |text: &str| -> Vec<u16> { text.encode_utf16().chain(Some(0)).collect() };
+        let source = wide(NAME);
+        let text = wide(message);
+        let strings = [text.as_ptr()];
+        // SAFETY: valid NUL-terminated strings that outlive the calls; the
+        // handle is released before returning.
+        unsafe {
+            let handle = RegisterEventSourceW(std::ptr::null(), source.as_ptr());
+            if handle.is_null() {
+                return;
+            }
+            let kind = if error {
+                EVENTLOG_ERROR_TYPE
+            } else {
+                EVENTLOG_INFORMATION_TYPE
+            };
+            ReportEventW(
+                handle,
+                kind,
+                0,
+                1,
+                std::ptr::null_mut(),
+                1,
+                0,
+                strings.as_ptr(),
+                std::ptr::null(),
+            );
+            DeregisterEventSource(handle);
         }
     }
 
@@ -333,8 +385,14 @@ pub mod windows {
     }
 
     /// Registers the service (started automatically with Windows), and
-    /// starts it unless `start` is false. Needs an administrator.
-    pub fn install(config: &Path, start: bool) -> Result<(), Box<dyn std::error::Error>> {
+    /// starts it unless `start` is false. It runs as `account` (such as
+    /// `NT SERVICE\Grafeno`, a virtual account with no rights but those
+    /// given to it), or as LocalSystem. Needs an administrator.
+    pub fn install(
+        config: &Path,
+        start: bool,
+        account: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let manager = ServiceManager::local_computer(
             None::<&str>,
             ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
@@ -353,7 +411,7 @@ pub mod windows {
                 config.into(),
             ],
             dependencies: vec![],
-            account_name: None,
+            account_name: account.map(OsString::from),
             account_password: None,
         };
         let service =
@@ -365,6 +423,45 @@ pub mod windows {
             service.start::<&str>(&[])?;
         }
         Ok(())
+    }
+
+    /// Stops the service, waiting up to 15 seconds.
+    pub fn stop() -> Result<(), Box<dyn std::error::Error>> {
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+        let service =
+            manager.open_service(NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP)?;
+        if service.query_status()?.current_state != ServiceState::Stopped {
+            let _ = service.stop();
+            for _ in 0..30 {
+                if service.query_status()?.current_state == ServiceState::Stopped {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the service is registered, running and started with Windows.
+    pub fn state() -> Option<crate::instances::ServiceState> {
+        let manager =
+            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).ok()?;
+        let service = manager
+            .open_service(
+                NAME,
+                ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG,
+            )
+            .ok()?;
+        let state = service.query_status().ok()?.current_state;
+        let enabled = service
+            .query_config()
+            .is_ok_and(|config| config.start_type == ServiceStartType::AutoStart);
+        Some(crate::instances::ServiceState {
+            unit: NAME.to_owned(),
+            active: state == ServiceState::Running,
+            enabled,
+            detail: format!("{state:?}").to_lowercase(),
+        })
     }
 
     /// Stops (waiting up to 15 seconds) and removes the service.

@@ -780,7 +780,7 @@ export class Grafeno {
     return new Namespace(this, name);
   }
 
-  health(): Promise<{ status: string; version: string }> {
+  health(): Promise<{ status: string; version: string; layout: number }> {
     return this.request("GET", "/health");
   }
 

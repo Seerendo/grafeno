@@ -37,8 +37,12 @@ rpassword = "7"
 futures-util = { version = "0.3", default-features = false }
 tower = { version = "0.5", features = ["util"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_EventLog"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
@@ -62,7 +66,10 @@ maintainer-scripts = "../../packaging/linux/debian/"
 assets = [
     ["target/release/grafeno", "usr/bin/", "755"],
     ["../../packaging/linux/grafeno.service", "lib/systemd/system/grafeno.service", "644"],
+    ["../../packaging/linux/grafeno@.service", "lib/systemd/system/grafeno@.service", "644"],
     ["../../packaging/linux/setup.sh", "usr/share/grafeno/setup.sh", "755"],
+    ["../../packaging/linux/stop-all.sh", "usr/share/grafeno/stop-all.sh", "755"],
+    ["../../packaging/linux/apparmor/grafeno", "etc/apparmor.d/grafeno", "644"],
     ["../../README.md", "usr/share/doc/grafeno/README.md", "644"],
 ]
 
@@ -77,7 +84,10 @@ post_uninstall_script = "../../packaging/linux/rpm/postun.sh"
 assets = [
     { source = "target/release/grafeno", dest = "/usr/bin/grafeno", mode = "755" },
     { source = "../../packaging/linux/grafeno.service", dest = "/usr/lib/systemd/system/grafeno.service", mode = "644" },
+    { source = "../../packaging/linux/grafeno@.service", dest = "/usr/lib/systemd/system/grafeno@.service", mode = "644" },
     { source = "../../packaging/linux/setup.sh", dest = "/usr/share/grafeno/setup.sh", mode = "755" },
+    { source = "../../packaging/linux/stop-all.sh", dest = "/usr/share/grafeno/stop-all.sh", mode = "755" },
+    { source = "../../target/selinux/grafeno.pp", dest = "/usr/share/selinux/packages/grafeno.pp", mode = "644" },
     { source = "../../README.md", dest = "/usr/share/doc/grafeno/README.md", mode = "644", doc = true },
 ]
 

@@ -1,9 +1,20 @@
 # Builds the release files when a tag like v0.1.0 is pushed, and attaches
-# them to a GitHub release, with a .sha256 for each:
-#   the server: grafeno-<version>-windows-x64-setup.exe,
-#     grafeno-x86_64-pc-windows-msvc.zip,
-#     grafeno-x86_64-unknown-linux-musl.tar.gz, grafeno_<version>_amd64.deb,
-#     grafeno-<version>-1.x86_64.rpm.
+# them to a GitHub release, each with a .sha256 (and a .minisig when the
+# minisign key is set):
+#   grafeno-<version>-windows-x64-setup.exe, grafeno-x86_64-pc-windows-msvc.zip,
+#   for x86_64 and aarch64: grafeno-<arch>-unknown-linux-musl.tar.gz,
+#     grafeno_<version>-1_<amd64|arm64>.deb, grafeno-<version>-1.<arch>.rpm
+#     (and the same packages under names without the version),
+#   grafeno-<version>-winget.zip, the winget manifests to submit.
+# It also adds the packages to the signed APT and DNF repositories on the
+# gh-pages branch (GitHub Pages).
+#
+# Secrets, each optional (what needs one is skipped without it):
+#   MINISIGN_SECRET_KEY        a minisign secret key made with `minisign -G -W`
+#   GPG_PRIVATE_KEY            an armored GnuPG secret key without a passphrase,
+#                              signing the repositories and the .rpm files
+#   WINDOWS_CERTIFICATE        a base64 .pfx code-signing certificate, and
+#   WINDOWS_CERTIFICATE_PASSWORD  its password: they sign grafeno.exe and the setup
 # The engine alone: Grafeno Studio and Grafeno Desktop are released from
 # their own repository.
 name: release
@@ -30,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - name: Build the .tar.gz, .deb and .rpm
+      - name: Build the .tar.gz, .deb and .rpm (x86_64 and aarch64)
         run: docker buildx build -f packaging/linux/Dockerfile --output dist/linux .
       - uses: actions/upload-artifact@v4
         with:
@@ -40,21 +51,37 @@ jobs:
   windows:
     needs: test
     runs-on: windows-latest
+    env:
+      CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Build grafeno.exe
         run: cargo build --release --locked -p grafeno-server
-      - name: Build the installer and the zip
+      - name: Build the installer, the zip and the winget manifests
         shell: pwsh
         run: |
           $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
             Where-Object name -eq "grafeno-server" | Select-Object -ExpandProperty version
           choco install innosetup --no-progress -y
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DAppVersion=$version" packaging\windows\grafeno.iss
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if ($env:CERTIFICATE) {
+            # Code signing: the program, then the setup and its uninstaller.
+            [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.pfx", [Convert]::FromBase64String($env:CERTIFICATE))
+            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
+            $sign = "`"$($signtool.FullName)`" sign /f `"$env:RUNNER_TEMP\cert.pfx`" /p `"$env:CERTIFICATE_PASSWORD`" /fd sha256 /tr http://timestamp.digicert.com /td sha256"
+            cmd /c "$sign target\release\grafeno.exe"
+            & $iscc /Q "/DAppVersion=$version" /DSign "/Ssigntool=$sign `$f" packaging\windows\grafeno.iss
+          } else {
+            & $iscc /Q "/DAppVersion=$version" packaging\windows\grafeno.iss
+          }
           New-Item -ItemType Directory -Force dist\zip | Out-Null
           Copy-Item target\release\grafeno.exe, README.md dist\zip\
           Compress-Archive -Path dist\zip\* -DestinationPath dist\grafeno-x86_64-pc-windows-msvc.zip
+          $setup = "grafeno-$version-windows-x64-setup.exe"
+          python packaging/windows/winget/make-manifests.py $version "dist\$setup" "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v$version/$setup" dist\winget
+          Compress-Archive -Path dist\winget\* -DestinationPath "dist\grafeno-$version-winget.zip"
           Get-ChildItem dist\*.exe, dist\*.zip | ForEach-Object {
             "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $($_.Name)" | Out-File -Encoding ascii "$($_.FullName).sha256"
           }
@@ -70,12 +97,60 @@ jobs:
     needs: [linux, windows]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    env:
+      MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: files
           merge-multiple: true
+      - name: Sign the files (minisign)
+        if: env.MINISIGN_SECRET_KEY != ''
+        run: |
+          sudo apt-get install -y -qq minisign
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
+          for f in files/*; do
+            case "$f" in *.sha256) continue ;; esac
+            minisign -S -s "$RUNNER_TEMP/minisign.key" -m "$f"
+          done
+          rm "$RUNNER_TEMP/minisign.key"
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" files/* --repo "$GITHUB_REPOSITORY" --title "Grafeno $GITHUB_REF_NAME" --generate-notes
+
+  repositories:
+    needs: linux
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    env:
+      GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux
+          path: dist
+      - name: Add the packages to the APT and DNF repositories (gh-pages)
+        if: env.GPG_PRIVATE_KEY != ''
+        run: |
+          sudo apt-get install -y -qq createrepo-c rpm apt-utils gnupg
+          printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          export GRAFENO_GPG_KEY="$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/ {print $10; exit}')"
+          site="$RUNNER_TEMP/site"
+          if git ls-remote --exit-code origin gh-pages >/dev/null; then
+            git clone --branch gh-pages --depth 1 "https://x-access-token:${{ github.token }}@github.com/$GITHUB_REPOSITORY" "$site"
+          else
+            mkdir -p "$site" && git -C "$site" init -b gh-pages
+            git -C "$site" remote add origin "https://x-access-token:${{ github.token }}@github.com/$GITHUB_REPOSITORY"
+          fi
+          owner="${GITHUB_REPOSITORY%%/*}"
+          name="${GITHUB_REPOSITORY#*/}"
+          packaging/repo/build-repo.sh dist "$site" "https://${owner,,}.github.io/$name"
+          touch "$site/.nojekyll"
+          cd "$site"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Packages of $GITHUB_REF_NAME"
+          git push origin gh-pages

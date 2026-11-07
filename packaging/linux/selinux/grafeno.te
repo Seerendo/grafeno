@@ -1,0 +1,47 @@
+# SELinux policy module of the Grafeno service: the grafeno_t domain
+# (entered when systemd starts /usr/bin/grafeno), its settings
+# (grafeno_etc_t), its data (grafeno_var_lib_t) and its ports
+# (grafeno_port_t). The domain is permissive until the policy has been
+# proven on enforcing machines: it logs what it would deny, and denies
+# nothing.
+policy_module(grafeno, 1.0.0)
+
+type grafeno_t;
+type grafeno_exec_t;
+init_daemon_domain(grafeno_t, grafeno_exec_t)
+permissive grafeno_t;
+
+type grafeno_etc_t;
+files_config_file(grafeno_etc_t)
+
+type grafeno_var_lib_t;
+files_type(grafeno_var_lib_t)
+
+type grafeno_port_t;
+corenet_port(grafeno_port_t)
+
+allow grafeno_t self:process { signal_perms getsched setsched };
+allow grafeno_t self:fifo_file rw_fifo_file_perms;
+allow grafeno_t self:unix_stream_socket create_stream_socket_perms;
+allow grafeno_t self:tcp_socket { accept listen create_stream_socket_perms };
+allow grafeno_t self:udp_socket create_socket_perms;
+
+read_files_pattern(grafeno_t, grafeno_etc_t, grafeno_etc_t)
+list_dirs_pattern(grafeno_t, grafeno_etc_t, grafeno_etc_t)
+
+manage_dirs_pattern(grafeno_t, grafeno_var_lib_t, grafeno_var_lib_t)
+manage_files_pattern(grafeno_t, grafeno_var_lib_t, grafeno_var_lib_t)
+files_var_lib_filetrans(grafeno_t, grafeno_var_lib_t, dir)
+
+# The API on its ports; cluster members and webhooks anywhere.
+allow grafeno_t grafeno_port_t:tcp_socket name_bind;
+corenet_tcp_bind_generic_node(grafeno_t)
+corenet_tcp_connect_all_ports(grafeno_t)
+sysnet_dns_name_resolve(grafeno_t)
+miscfiles_read_generic_certs(grafeno_t)
+
+kernel_read_system_state(grafeno_t)
+dev_read_sysfs(grafeno_t)
+dev_read_urand(grafeno_t)
+fs_getattr_xattr_fs(grafeno_t)
+logging_send_syslog_msg(grafeno_t)

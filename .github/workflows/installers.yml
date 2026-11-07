@@ -1,7 +1,12 @@
-# The engine's installers, built and installed on clean machines: the Linux
-# packages and the one-liner in containers of several distributions, and
-# the Windows setup on a Windows runner (installed unattended with its own
-# data folder and port, the service checked, then uninstalled).
+# The engine's installers, built and installed on clean machines:
+# - the Linux packages (x86_64 and aarch64), the one-liner and the signed
+#   APT and DNF repositories in containers of several distributions, with
+#   systemd for the instances, upgrades and rollbacks;
+# - the .deb on the Ubuntu runner itself, with its AppArmor profile
+#   enforced;
+# - the Windows setup on a Windows runner (unattended, a virtual account,
+#   an administrator, the Event Log), upgraded, then uninstalled keeping
+#   and then removing the data.
 name: Installers
 
 on:
@@ -10,13 +15,13 @@ on:
     paths:
       - "install.sh"
       - "packaging/**"
-      - "crates/grafeno-server/Cargo.toml"
+      - "crates/grafeno-server/**"
       - ".github/workflows/installers.yml"
   pull_request:
     paths:
       - "install.sh"
       - "packaging/**"
-      - "crates/grafeno-server/Cargo.toml"
+      - "crates/grafeno-server/**"
       - ".github/workflows/installers.yml"
   workflow_dispatch:
 
@@ -29,16 +34,69 @@ concurrency:
 
 jobs:
   linux:
-    name: Linux packages and the one-liner
+    name: Linux packages, the one-liner and the repositories
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-      - name: Build the .tar.gz, .deb and .rpm
+      - name: Build the .tar.gz, .deb and .rpm (x86_64 and aarch64)
         run: docker buildx build -f packaging/linux/Dockerfile --output dist/linux .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: dist/linux/*
       - name: Install them in clean containers
-        run: packaging/linux/test-install.sh --systemd
+        run: packaging/linux/test-install.sh --repo --systemd --arm64
+
+  apparmor:
+    name: The .deb under AppArmor (Ubuntu runner)
+    needs: linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-packages
+          path: dist
+      - name: Install the package
+        run: |
+          sudo apt-get install -y ./dist/grafeno-linux-amd64.deb
+          for _ in $(seq 50); do curl -fs http://127.0.0.1:7810/health && break; sleep 0.2; done
+      - name: The service runs confined, and works
+        run: |
+          set -x
+          sudo aa-status | grep -A3 'profiles are in enforce mode' | tee /dev/stderr
+          sudo aa-status --json | grep -q '"grafeno": "enforce"'
+          pid="$(systemctl show -p MainPID --value grafeno)"
+          sudo cat "/proc/$pid/attr/current" | grep -q 'grafeno (enforce)'
+          token="$(sudo grafeno config token)"
+          curl -fs -X POST -H "Authorization: Bearer $token" -H 'content-type: application/json' \
+            -d '{"labels":["Note"],"text":"written under AppArmor"}' http://127.0.0.1:7810/v1/notes/nodes
+          curl -fs -X POST -H "Authorization: Bearer $token" -H 'content-type: application/json' \
+            -d '{"query":"AppArmor"}' http://127.0.0.1:7810/v1/notes/search/text | grep -q 'written under'
+          sudo grafeno doctor
+      - name: An instance with its data elsewhere is confined and works too
+        run: |
+          printf 'An-admin-passw0rd\n' > /tmp/pw
+          sudo grafeno setup --instance other --unattended --data /srv/grafeno-other \
+            --admin root --admin-password-file /tmp/pw
+          for _ in $(seq 50); do curl -fs http://127.0.0.1:7811/health && break; sleep 0.2; done
+          pid="$(systemctl show -p MainPID --value grafeno@other)"
+          sudo cat "/proc/$pid/attr/current" | grep -q 'grafeno (enforce)'
+          curl -fs -X POST -H 'content-type: application/json' \
+            -d '{"name":"root","password":"An-admin-passw0rd"}' http://127.0.0.1:7811/v1/auth/signin | grep -q access_token
+          test -f /srv/grafeno-other/grafeno.redb
+      - name: Nothing was denied
+        run: |
+          if sudo journalctl -k | grep 'apparmor="DENIED"' | grep 'profile="grafeno"'; then
+            echo "AppArmor denied the service something"; exit 1
+          fi
+      - name: Purging removes the settings and the data
+        run: |
+          sudo apt-get purge -y grafeno
+          test ! -e /etc/grafeno && test ! -e /var/lib/grafeno
 
   windows:
     name: Windows setup
@@ -54,36 +112,63 @@ jobs:
         run: |
           choco install innosetup --no-progress -y
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DAppVersion=0.0.0" packaging\windows\grafeno.iss
-      - name: Install it unattended, with its own data folder and port
+      - name: Install it unattended (its own data folder and port, a virtual account, an administrator)
         shell: pwsh
         run: |
           $setup = "dist\grafeno-0.0.0-windows-x64-setup.exe"
-          Start-Process $setup -Wait -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/LOG=setup.log', '/DATADIR=C:\GrafenoTest\data', '/PORT=7821', '/TASKS=service,path'
+          Start-Process $setup -Wait -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/LOG=setup.log', '/DATADIR=C:\GrafenoTest\data', '/PORT=7821', '/ACCOUNT=virtual', '/ADMIN=root', '/ADMINPASSWORD=An-admin-passw0rd', '/TASKS=service,path'
           Get-Content setup.log -Tail 20
           $config = "C:\ProgramData\Grafeno\grafeno.toml"
           Get-Content $config
           if (-not (Select-String -Path $config -Pattern '127.0.0.1:7821' -Quiet)) { throw "the port is not in the settings" }
           if (-not (Select-String -Path $config -Pattern 'GrafenoTest' -Quiet)) { throw "the data folder is not in the settings" }
-          if ((Get-Service Grafeno).Status -ne 'Running') { throw "the service is not running" }
+          $service = Get-CimInstance Win32_Service -Filter "Name='Grafeno'"
+          $service | Format-List Name, State, StartMode, StartName
+          if ($service.State -ne 'Running') { throw "the service is not running" }
+          if ($service.StartName -ne 'NT SERVICE\Grafeno') { throw "the service runs as $($service.StartName)" }
           $healthy = $false
           foreach ($i in 1..50) {
             try { Invoke-RestMethod http://127.0.0.1:7821/health | Out-Null; $healthy = $true; break } catch { Start-Sleep -Milliseconds 200 }
           }
           if (-not $healthy) { throw "the engine does not answer on 7821" }
           $token = & "C:\Program Files\Grafeno\grafeno.exe" config token
-          Invoke-RestMethod http://127.0.0.1:7821/v1/namespaces -Headers @{ Authorization = "Bearer $token" } | Out-Null
+          $headers = @{ Authorization = "Bearer $token" }
+          Invoke-RestMethod http://127.0.0.1:7821/v1/notes/nodes -Method Post -Headers $headers -ContentType 'application/json' -Body '{"labels":["Note"],"text":"written by the virtual account"}' | Out-Null
+          $session = Invoke-RestMethod http://127.0.0.1:7821/v1/auth/signin -Method Post -ContentType 'application/json' -Body '{"name":"root","password":"An-admin-passw0rd"}'
+          if (-not $session.access_token) { throw "the administrator cannot sign in" }
           $note = Invoke-WebRequest http://127.0.0.1:7821/studio/ -UseBasicParsing
           if ($note.Content -notmatch 'installed on its own') { throw "the engine serves an interface" }
           if (-not (Test-Path "C:\GrafenoTest\data\grafeno.redb")) { throw "no database in the data folder" }
-          if (Get-ChildItem "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Grafeno" -Filter '*Studio*' -ErrorAction SilentlyContinue) { throw "a Studio shortcut was installed" }
+          if (Test-Path "$env:TEMP\admin.txt") { throw "the password file was left behind" }
+          $events = Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Grafeno' } -MaxEvents 5
+          $events | Format-List TimeCreated, LevelDisplayName, Message
+          if (-not ($events | Where-Object Message -like 'serving on http://127.0.0.1:7821*')) { throw "no readable event in the Event Log" }
+          & "C:\Program Files\Grafeno\grafeno.exe" doctor
+          if ($LASTEXITCODE -ne 0) { throw "grafeno doctor failed" }
       - name: Upgrade over it, then uninstall (the data stays)
         shell: pwsh
         run: |
           $setup = "dist\grafeno-0.0.0-windows-x64-setup.exe"
           Start-Process $setup -Wait -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/TASKS=service,path'
-          if ((Get-Service Grafeno).Status -ne 'Running') { throw "the service did not come back after the upgrade" }
+          $service = Get-CimInstance Win32_Service -Filter "Name='Grafeno'"
+          if ($service.State -ne 'Running') { throw "the service did not come back after the upgrade" }
+          if ($service.StartName -ne 'NT SERVICE\Grafeno') { throw "the upgrade changed the account to $($service.StartName)" }
           if (-not (Select-String -Path "C:\ProgramData\Grafeno\grafeno.toml" -Pattern '7821' -Quiet)) { throw "the upgrade lost the settings" }
           Start-Process "C:\Program Files\Grafeno\unins000.exe" -Wait -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
           if (Get-Service Grafeno -ErrorAction SilentlyContinue) { throw "the service is still there" }
           if (-not (Test-Path "C:\GrafenoTest\data\grafeno.redb")) { throw "uninstalling removed the data" }
           if (-not (Test-Path "C:\ProgramData\Grafeno\grafeno.toml")) { throw "uninstalling removed the settings" }
+      - name: Install again over the kept data, then uninstall removing it
+        shell: pwsh
+        run: |
+          $setup = "dist\grafeno-0.0.0-windows-x64-setup.exe"
+          Start-Process $setup -Wait -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/TASKS=service,path'
+          foreach ($i in 1..50) {
+            try { Invoke-RestMethod http://127.0.0.1:7821/health | Out-Null; break } catch { Start-Sleep -Milliseconds 200 }
+          }
+          $token = & "C:\Program Files\Grafeno\grafeno.exe" config token
+          $found = Invoke-RestMethod http://127.0.0.1:7821/v1/notes/search/text -Method Post -Headers @{ Authorization = "Bearer $token" } -ContentType 'application/json' -Body '{"query":"virtual"}'
+          if (-not ($found | ConvertTo-Json -Depth 5 | Select-String 'written by the virtual account' -Quiet)) { throw "the kept data is not served" }
+          Start-Process "C:\Program Files\Grafeno\unins000.exe" -Wait -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/PURGE=1'
+          if (Test-Path "C:\GrafenoTest\data") { throw "/PURGE=1 kept the data" }
+          if (Test-Path "C:\ProgramData\Grafeno") { throw "/PURGE=1 kept the settings" }

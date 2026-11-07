@@ -173,6 +173,7 @@ fn verify(db: &Grafeno, version: u64) {
 fn every_past_layout_upgrades() {
     for version in 1..=16 {
         let path = fixture(version);
+        assert_eq!(Grafeno::file_layout(&path).unwrap(), Some(version));
         {
             let db = Grafeno::open(&path).unwrap_or_else(|e| panic!("v{version}: {e}"));
             verify(&db, version);
@@ -180,6 +181,14 @@ fn every_past_layout_upgrades() {
             db.write(|tx| tx.create_node(NS, NewNode::new("Note").text("after the upgrade")))
                 .unwrap();
         }
+        // The file as it was is kept beside it, for the previous version.
+        let copy = grafeno::upgrade_copy_path(&path, version);
+        assert_eq!(Grafeno::file_layout(&copy).unwrap(), Some(version));
+        assert_eq!(grafeno::upgrade_copies(&path), vec![copy.clone()]);
+        assert_eq!(
+            Grafeno::file_layout(&path).unwrap(),
+            Some(grafeno::SCHEMA_VERSION)
+        );
         // Reopening upgrades nothing more and loses nothing.
         let db = Grafeno::open(&path).unwrap();
         let read = db.begin_read().unwrap();
@@ -190,6 +199,41 @@ fn every_past_layout_upgrades() {
         assert!(read.check(NS).unwrap().is_ok());
         assert_eq!(read.search_text(NS, "upgrade", 5).unwrap().len(), 1);
         drop((read, db));
+        assert_eq!(grafeno::upgrade_copies(&path), vec![copy.clone()]);
         std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(&copy).unwrap();
     }
+}
+
+#[test]
+fn the_copy_before_an_upgrade() {
+    // A new file and a current one are not copied.
+    let path = std::env::temp_dir().join(format!("grafeno-copy-{}.redb", NodeId::new()));
+    assert_eq!(Grafeno::file_layout(&path).unwrap(), None);
+    drop(Grafeno::open(&path).unwrap());
+    assert_eq!(Grafeno::copy_before_upgrade(&path).unwrap(), None);
+    assert!(grafeno::upgrade_copies(&path).is_empty());
+    std::fs::remove_file(&path).unwrap();
+
+    // Turned off, an old file is upgraded without a copy.
+    let path = fixture(14);
+    let options = grafeno::OpenOptions {
+        copy_before_upgrade: false,
+        ..Default::default()
+    };
+    drop(Grafeno::open_with(&path, &options).unwrap());
+    assert!(grafeno::upgrade_copies(&path).is_empty());
+    std::fs::remove_file(&path).unwrap();
+
+    // A copy left by an earlier upgrade gives way to the new one.
+    let path = fixture(15);
+    let stale = grafeno::upgrade_copy_path(&path, 9);
+    std::fs::write(&stale, b"older").unwrap();
+    let copy = Grafeno::copy_before_upgrade(&path).unwrap().unwrap();
+    assert_eq!(copy, grafeno::upgrade_copy_path(&path, 15));
+    assert!(!stale.exists());
+    // The copy is the file as it was: the old layout, the same bytes.
+    assert_eq!(std::fs::read(&copy).unwrap(), std::fs::read(&path).unwrap());
+    std::fs::remove_file(&path).unwrap();
+    std::fs::remove_file(&copy).unwrap();
 }

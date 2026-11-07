@@ -82,6 +82,11 @@ pub struct OpenOptions {
     /// Decoded vectors and link lists a write transaction keeps while it
     /// inserts vectors.
     pub vector_cache_bytes: usize,
+    /// Before an older file's layout is upgraded, copy it to
+    /// `<name>.layout-<old>.redb` beside it (see
+    /// [`Grafeno::copy_before_upgrade`]), so the previous version of
+    /// Grafeno can still open the data. On by default.
+    pub copy_before_upgrade: bool,
 }
 
 /// The default page cache: 256 MiB.
@@ -93,6 +98,7 @@ impl Default for OpenOptions {
             cache_bytes: DEFAULT_CACHE,
             projection_cache_bytes: crate::algo::DEFAULT_PROJECTION_CACHE,
             vector_cache_bytes: crate::vector::DEFAULT_VECTOR_CACHE,
+            copy_before_upgrade: true,
         }
     }
 }
@@ -105,8 +111,40 @@ impl OpenOptions {
             cache_bytes: bytes / 2,
             projection_cache_bytes: bytes / 4,
             vector_cache_bytes: bytes / 4,
+            ..Self::default()
         }
     }
+}
+
+/// Where [`Grafeno::copy_before_upgrade`] copies a file of layout `version`.
+pub fn upgrade_copy_path(path: &FsPath, version: u64) -> std::path::PathBuf {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    path.with_file_name(format!("{stem}.layout-{version}.redb"))
+}
+
+/// The copies [`Grafeno::copy_before_upgrade`] left beside the file.
+pub fn upgrade_copies(path: &FsPath) -> Vec<std::path::PathBuf> {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let prefix = format!("{stem}.layout-");
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => FsPath::new("."),
+    };
+    let mut found: Vec<_> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|p| {
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
+                name.strip_prefix(&prefix)
+                    .and_then(|rest| rest.strip_suffix(".redb"))
+                    .is_some_and(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+            })
+        })
+        .collect();
+    found.sort();
+    found
 }
 
 /// What checking a database file found.
@@ -155,12 +193,86 @@ impl Grafeno {
 
     /// [`Grafeno::open`] with caches of these sizes.
     pub fn open_with(path: impl AsRef<FsPath>, options: &OpenOptions) -> Result<Self> {
+        let path = path.as_ref();
+        if options.copy_before_upgrade {
+            Self::copy_before_upgrade(path)?;
+        }
         let db = Database::builder()
             .set_cache_size(options.cache_bytes)
             .create(path)
             .map_err(storage)?;
         let grafeno = Self::init(db)?;
         Ok(grafeno.with_options(options))
+    }
+
+    /// The layout version of a database file, without upgrading it: `None`
+    /// for a missing or empty file. No other program may have it open.
+    pub fn file_layout(path: impl AsRef<FsPath>) -> Result<Option<u64>> {
+        let path = path.as_ref();
+        if std::fs::metadata(path).map_or(true, |meta| meta.len() == 0) {
+            return Ok(None);
+        }
+        let db = Database::open(path).map_err(storage)?;
+        let read = db.begin_read().map_err(storage)?;
+        let version = match read.open_table(META) {
+            Ok(meta) => meta.get(SCHEMA_KEY).map_err(storage)?.map(|v| v.value()),
+            Err(redb::TableError::TableDoesNotExist(_)) => None,
+            Err(error) => return Err(storage(error)),
+        };
+        if version.is_some() {
+            return Ok(version);
+        }
+        // Before version 2 there was no `meta` table.
+        let nodes = match read.open_table(NODES) {
+            Ok(nodes) => nodes.len().map_err(storage)?,
+            Err(redb::TableError::TableDoesNotExist(_)) => 0,
+            Err(error) => return Err(storage(error)),
+        };
+        Ok((nodes > 0).then_some(1))
+    }
+
+    /// If the file at `path` has an older layout than this build writes,
+    /// copies it to `<name>.layout-<old>.redb` beside it, as it is, and
+    /// removes copies an earlier upgrade left (`<name>.layout-*.redb`): the
+    /// previous version of Grafeno opens the copy, so going back to it
+    /// keeps the data. Returns the copy's path. If the copy cannot be made
+    /// (no room on the disk), the file is left untouched and opening it
+    /// fails, rather than upgrading it without a way back. No other
+    /// program may have the file open.
+    pub fn copy_before_upgrade(path: impl AsRef<FsPath>) -> Result<Option<std::path::PathBuf>> {
+        let path = path.as_ref();
+        let Some(version) = Self::file_layout(path)? else {
+            return Ok(None);
+        };
+        if version >= SCHEMA_VERSION {
+            return Ok(None);
+        }
+        let copy = upgrade_copy_path(path, version);
+        let partial = copy.with_extension("redb.partial");
+        let result = std::fs::copy(path, &partial)
+            .and_then(|_| {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&partial)?
+                    .sync_all()
+            })
+            .and_then(|()| std::fs::rename(&partial, &copy));
+        if let Err(error) = result {
+            let _ = std::fs::remove_file(&partial);
+            return Err(Error::Storage(format!(
+                "{} has layout version {version} and this Grafeno writes {SCHEMA_VERSION}; \
+                 it keeps a copy at {} before upgrading it, and could not ({error}). \
+                 Free some disk space (the copy is as large as the file), or turn the copy off",
+                path.display(),
+                copy.display()
+            )));
+        }
+        for older in upgrade_copies(path) {
+            if older != copy {
+                let _ = std::fs::remove_file(older);
+            }
+        }
+        Ok(Some(copy))
     }
 
     fn with_options(mut self, options: &OpenOptions) -> Self {

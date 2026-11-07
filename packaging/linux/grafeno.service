@@ -40,6 +40,8 @@ SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
 UMask=0027
 ReadWritePaths=/var/lib/grafeno
+# Confined by AppArmor where it is loaded (Debian, Ubuntu); ignored elsewhere.
+AppArmorProfile=-grafeno
 
 [Install]
 WantedBy=multi-user.target

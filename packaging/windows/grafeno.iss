@@ -8,15 +8,23 @@
 ;
 ; A guided setup, as PostgreSQL's is: the program folder, the data folder,
 ; the port, whether other computers may connect (with a firewall rule), the
-; service and the PATH. Unattended, the same answers are parameters:
+; account the service runs as, the first administrator, the service and the
+; PATH. Unattended, the same answers are parameters:
 ;
 ;   grafeno-<version>-windows-x64-setup.exe /VERYSILENT /SUPPRESSMSGBOXES
 ;     /DIR="C:\Grafeno" /DATADIR="D:\GrafenoData" /PORT=7810 /NETWORK=0
-;     /TASKS="service,path"
+;     /ACCOUNT=virtual /ADMIN=admin /ADMINPASSWORD=... /TASKS="service,path"
 ;
-; Upgrades (running a newer setup over an older one) keep the settings and
-; the data; uninstalling keeps them too (C:\ProgramData\Grafeno and the data
-; folder).
+; /ACCOUNT=virtual (the default) runs the service as NT SERVICE\Grafeno, a
+; virtual account that may use only Grafeno's folders; /ACCOUNT=system runs
+; it as LocalSystem. Upgrades (running a newer setup over an older one) keep
+; the settings, the data and the service's account; uninstalling keeps the
+; settings and the data (C:\ProgramData\Grafeno and the data folder) unless
+; asked to remove them (unattended: unins000.exe /VERYSILENT /PURGE=1).
+;
+; Signed builds: iscc /DSign "/Ssigntool=signtool sign /f cert.pfx /p ...
+; /fd sha256 /tr http://timestamp.digicert.com /td sha256 $f" signs the setup
+; and its uninstaller.
 
 #ifndef AppVersion
   #define AppVersion "0.1.0"
@@ -48,6 +56,10 @@ UninstallDisplayIcon={app}\grafeno.exe
 UninstallDisplayName=Grafeno {#AppVersion}
 SetupLogging=yes
 CloseApplications=no
+#ifdef Sign
+SignTool=signtool
+SignedUninstaller=yes
+#endif
 
 [Tasks]
 Name: service; Description: "Run Grafeno as a Windows service (it starts with Windows)"
@@ -70,31 +82,61 @@ Name: "{group}\Uninstall Grafeno"; Filename: "{uninstallexe}"
 
 [Registry]
 Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Tasks: path; Check: NeedsAddPath(ExpandConstant('{app}'))
+; The Event Log's source for the service's events (grafeno.exe holds the
+; message table).
+Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Services\EventLog\Application\Grafeno"; ValueType: expandsz; ValueName: "EventMessageFile"; ValueData: "{app}\grafeno.exe"; Flags: uninsdeletekey
+Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Services\EventLog\Application\Grafeno"; ValueType: dword; ValueName: "TypesSupported"; ValueData: "7"
 
 [Run]
 ; Settings with a fresh token, only on the first install (upgrades keep them).
 Filename: "{app}\grafeno.exe"; Parameters: "config init --path ""{#ConfigFile}"" --db ""{code:DataDir}\grafeno.redb"" --addr {code:Address}"; Flags: runhidden waituntilterminated; StatusMsg: "Creating the settings and token..."; Check: not FileExists(ExpandConstant('{#ConfigFile}'))
+; The first administrator, before the service holds the database. The
+; password reaches it on its standard input, from a file deleted right after.
+Filename: "{cmd}"; Parameters: "/c """"{app}\grafeno.exe"" users create ""{code:AdminName}"" --superuser --db ""{code:DataDir}\grafeno.redb"" --password-stdin < ""{tmp}\admin.txt"""""; Flags: runhidden waituntilterminated; StatusMsg: "Creating the first administrator..."; Check: CreatesAdmin; BeforeInstall: WriteAdminPassword; AfterInstall: ForgetAdminPassword
+Filename: "{app}\grafeno.exe"; Parameters: "service install --no-start --config ""{#ConfigFile}"" {code:AccountArgument}"; Flags: runhidden waituntilterminated; StatusMsg: "Installing the Grafeno service..."; Tasks: service
+; The virtual account may use Grafeno's folders, and nothing else.
+Filename: "{sys}\icacls.exe"; Parameters: """{#SettingsDir}"" /grant ""NT SERVICE\Grafeno:(OI)(CI)M"""; Flags: runhidden waituntilterminated; Tasks: service; Check: VirtualAccount
+Filename: "{sys}\icacls.exe"; Parameters: """{code:InstalledDataDir}"" /grant ""NT SERVICE\Grafeno:(OI)(CI)M"""; Flags: runhidden waituntilterminated; Tasks: service; Check: VirtualAccount
 ; Other computers may connect: a firewall rule for the port.
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Grafeno {code:Port}"" dir=in action=allow protocol=TCP localport={code:Port}"; Flags: runhidden waituntilterminated; StatusMsg: "Opening the port in the firewall..."; Check: OpensFirewall
-Filename: "{app}\grafeno.exe"; Parameters: "service install --config ""{#ConfigFile}"""; Flags: runhidden waituntilterminated; StatusMsg: "Starting the Grafeno service..."; Tasks: service
+Filename: "{sys}\sc.exe"; Parameters: "start Grafeno"; Flags: runhidden waituntilterminated; StatusMsg: "Starting the Grafeno service..."; Tasks: service
 
 [UninstallRun]
 Filename: "{app}\grafeno.exe"; Parameters: "service uninstall"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveService"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Grafeno {code:InstalledPort}"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveFirewallRule"
 
 [Messages]
-FinishedLabel=Grafeno is installed.%n%nThe engine is a service: connect to it with its console (Grafeno Shell), its HTTP API, or Grafeno Studio (installed apart). Its token: grafeno config token.%n%nThe settings (C:\ProgramData\Grafeno) and the data stay if you uninstall.
+FinishedLabel=Grafeno is installed.%n%nThe engine is a service: connect to it with its console (Grafeno Shell), its HTTP API, or Grafeno Studio (installed apart). Its token: grafeno config token. Check it with: grafeno doctor.%n%nThe settings (C:\ProgramData\Grafeno) and the data stay if you uninstall, unless you choose to remove them.
 
 [Code]
 var
   ServerPage: TInputQueryWizardPage;
   NetworkPage: TInputOptionWizardPage;
   DataPage: TInputDirWizardPage;
+  AccountPage: TInputOptionWizardPage;
+  AdminPage: TInputQueryWizardPage;
+  // The account of the service an earlier install registered ('' if none).
+  OldAccount: String;
+  // An earlier install's settings were there when the setup started.
+  WasInstalled: Boolean;
+  // Uninstall: remove the settings and the data too.
+  Purge: Boolean;
+  PurgeData: String;
 
-// What the settings file of an earlier install says, if there is one.
+function InitializeSetup(): Boolean;
+begin
+  if not RegQueryStringValue(HKEY_LOCAL_MACHINE,
+    'SYSTEM\CurrentControlSet\Services\Grafeno', 'ObjectName', OldAccount) then
+    OldAccount := '';
+  WasInstalled := FileExists(ExpandConstant('{#ConfigFile}'));
+  Result := True;
+end;
+
+// Whether an earlier install's settings were there (the first [Run] step
+// writes them on a first install).
 function Upgrading(): Boolean;
 begin
-  Result := FileExists(ExpandConstant('{#ConfigFile}'));
+  Result := WasInstalled;
 end;
 
 function DefaultDataDir(): String;
@@ -127,13 +169,35 @@ begin
     NetworkPage.SelectedValueIndex := 1
   else
     NetworkPage.SelectedValueIndex := 0;
+
+  AccountPage := CreateInputOptionPage(NetworkPage.ID, 'Service account',
+    'Which account should the service run as?',
+    'A virtual account may use only Grafeno''s folders (the settings and the data); LocalSystem may use the whole computer.',
+    True, False);
+  AccountPage.Add('NT SERVICE\Grafeno, a virtual account (recommended)');
+  AccountPage.Add('LocalSystem');
+  if Lowercase(ExpandConstant('{param:ACCOUNT|virtual}')) = 'system' then
+    AccountPage.SelectedValueIndex := 1
+  else
+    AccountPage.SelectedValueIndex := 0;
+
+  AdminPage := CreateInputQueryPage(AccountPage.ID, 'First administrator',
+    'Create the first administrator?',
+    'A superuser who signs in with a password (in the console, the API or Grafeno Studio). Leave the password empty to skip it: the token in the settings works meanwhile.');
+  AdminPage.Add('Name:', False);
+  AdminPage.Add('Password (12 characters or more):', True);
+  AdminPage.Add('Password again:', True);
+  AdminPage.Values[0] := ExpandConstant('{param:ADMIN|admin}');
+  AdminPage.Values[1] := ExpandConstant('{param:ADMINPASSWORD|}');
+  AdminPage.Values[2] := AdminPage.Values[1];
 end;
 
 // An upgrade keeps its settings: the questions about them are skipped.
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := Upgrading() and
-    ((PageID = DataPage.ID) or (PageID = ServerPage.ID) or (PageID = NetworkPage.ID));
+    ((PageID = DataPage.ID) or (PageID = ServerPage.ID) or (PageID = NetworkPage.ID)
+     or (PageID = AccountPage.ID) or (PageID = AdminPage.ID));
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -150,6 +214,24 @@ begin
       Result := False;
     end;
   end;
+  if (CurPageID = AdminPage.ID) and (AdminPage.Values[1] <> '') then
+  begin
+    if AdminPage.Values[1] <> AdminPage.Values[2] then
+    begin
+      MsgBox('The passwords differ.', mbError, MB_OK);
+      Result := False;
+    end
+    else if Length(AdminPage.Values[1]) < 12 then
+    begin
+      MsgBox('The password needs 12 characters or more.', mbError, MB_OK);
+      Result := False;
+    end
+    else if Trim(AdminPage.Values[0]) = '' then
+    begin
+      MsgBox('Give the administrator a name.', mbError, MB_OK);
+      Result := False;
+    end;
+  end;
 end;
 
 function DataDir(Param: String): String;
@@ -157,6 +239,75 @@ begin
   Result := Trim(DataPage.Values[0]);
   if Result = '' then
     Result := DefaultDataDir();
+end;
+
+function AdminName(Param: String): String;
+begin
+  Result := Trim(AdminPage.Values[0]);
+end;
+
+// Only on a first install (no database yet), and only with a password.
+function CreatesAdmin(): Boolean;
+begin
+  Result := (not Upgrading()) and (AdminPage.Values[1] <> '') and (AdminName('') <> '');
+end;
+
+procedure WriteAdminPassword();
+begin
+  SaveStringToFile(ExpandConstant('{tmp}\admin.txt'), AdminPage.Values[1] + #13#10, False);
+end;
+
+procedure ForgetAdminPassword();
+begin
+  DeleteFile(ExpandConstant('{tmp}\admin.txt'));
+end;
+
+// An upgrade keeps the account the service had; a first install takes
+// the page's choice.
+function VirtualAccount(): Boolean;
+begin
+  if OldAccount <> '' then
+    Result := CompareText(OldAccount, 'NT SERVICE\Grafeno') = 0
+  else
+    Result := AccountPage.SelectedValueIndex = 0;
+end;
+
+function AccountArgument(Param: String): String;
+begin
+  if VirtualAccount() then
+    Result := '--account "NT SERVICE\Grafeno"'
+  else
+    Result := '';
+end;
+
+// The data folder of the installed settings (upgrades), else the page's.
+function InstalledDataDir(Param: String): String;
+var
+  Lines: TArrayOfString;
+  I, Slash: Integer;
+  Line: String;
+begin
+  Result := DataDir('');
+  if not LoadStringsFromFile(ExpandConstant('{#ConfigFile}'), Lines) then
+    exit;
+  for I := 0 to GetArrayLength(Lines) - 1 do
+  begin
+    Line := Trim(Lines[I]);
+    // db = "C:/ProgramData/Grafeno/data/grafeno.redb": its folder.
+    if (Pos('db ', Line) = 1) and (Pos('"', Line) > 0) then
+    begin
+      Line := Copy(Line, Pos('"', Line) + 1, Length(Line));
+      Delete(Line, Length(Line), 1);
+      StringChangeEx(Line, '/', '\', True);
+      StringChangeEx(Line, '\\', '\', True);
+      Slash := Length(Line);
+      while (Slash > 0) and (Line[Slash] <> '\') do
+        Slash := Slash - 1;
+      if Slash > 0 then
+        Result := Copy(Line, 1, Slash - 1);
+      break;
+    end;
+  end;
 end;
 
 function Port(Param: String): String;
@@ -227,14 +378,32 @@ begin
     Exec(OldExe, 'service uninstall', '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
-// Uninstall: take the install folder out of the system PATH again.
+// Uninstall: ask whether to remove the settings and the data too (no by
+// default; /PURGE=1 unattended), and take the install folder out of the
+// system PATH.
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Path, Dir: string;
   At: Integer;
 begin
+  if CurUninstallStep = usUninstall then
+  begin
+    PurgeData := InstalledDataDir('');
+    if UninstallSilent() then
+      Purge := ExpandConstant('{param:PURGE|0}') = '1'
+    else
+      Purge := MsgBox('Also remove the settings and the data (' + PurgeData +
+        ')? This deletes the databases and cannot be undone.', mbConfirmation,
+        MB_YESNO or MB_DEFBUTTON2) = IDYES;
+    exit;
+  end;
   if CurUninstallStep <> usPostUninstall then
     exit;
+  if Purge then
+  begin
+    DelTree(PurgeData, True, True, True);
+    DelTree(ExpandConstant('{#SettingsDir}'), True, True, True);
+  end;
   if not RegQueryStringValue(HKEY_LOCAL_MACHINE,
     'SYSTEM\CurrentControlSet\Control\Session Manager\Environment', 'Path', Path) then
     exit;

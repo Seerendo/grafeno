@@ -1098,7 +1098,11 @@ fn busy_response() -> Response {
 }
 
 async fn health() -> Json<Value> {
-    Json(json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") }))
+    Json(json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+        "layout": grafeno::SCHEMA_VERSION,
+    }))
 }
 
 #[derive(Serialize)]

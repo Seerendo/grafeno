@@ -53,6 +53,23 @@ enum Command {
         #[arg(long = "cors-origin")]
         cors_origins: Vec<String>,
     },
+    /// Initialize an instance, as initdb does: its data folder, settings
+    /// (a fresh token), first administrator and service, enabled and
+    /// started. Asks what the flags leave open, unless --unattended.
+    Setup(SetupArgs),
+    /// The instances on this machine; drop one, or roll one back to the
+    /// copy its last upgrade kept.
+    Instances {
+        #[command(subcommand)]
+        command: Option<InstancesCommand>,
+    },
+    /// Check the instances (or one): settings, folders and permissions,
+    /// the database's layout, free disk space, the port and the service.
+    Doctor {
+        /// Only this instance.
+        #[arg(long)]
+        instance: Option<String>,
+    },
     /// Create or read the settings file of an installed server.
     #[command(subcommand)]
     Config(ConfigCommand),
@@ -560,6 +577,76 @@ enum ConfigCommand {
     },
 }
 
+#[derive(Args)]
+struct SetupArgs {
+    /// The instance's name: `default` (grafeno.toml, grafeno.service) or
+    /// another (<name>.toml, grafeno@<name>.service).
+    #[arg(long)]
+    instance: Option<String>,
+    /// The folder of its database.
+    #[arg(long)]
+    data: Option<PathBuf>,
+    /// The address to listen on (wins over --port and --network).
+    #[arg(long)]
+    addr: Option<std::net::SocketAddr>,
+    /// The port (the default instance 7810, others the next free one).
+    #[arg(long)]
+    port: Option<u16>,
+    /// Accept connections from other computers (every interface).
+    #[arg(long)]
+    network: bool,
+    /// `immediate` (the default) or `eventual`.
+    #[arg(long)]
+    durability: Option<String>,
+    /// Memory for caches, in MiB.
+    #[arg(long)]
+    memory_mb: Option<u64>,
+    /// The first administrator's name (a superuser).
+    #[arg(long)]
+    admin: Option<String>,
+    /// A file whose first line is the administrator's password.
+    #[arg(long)]
+    admin_password_file: Option<PathBuf>,
+    /// Read the administrator's password from standard input.
+    #[arg(long)]
+    admin_password_stdin: bool,
+    /// No administrator: the token alone works until one is created.
+    #[arg(long)]
+    no_admin: bool,
+    /// Enable the service without starting it.
+    #[arg(long)]
+    no_start: bool,
+    /// Answers in a TOML file (the same names as the flags, with `_`).
+    #[arg(long)]
+    answers: Option<PathBuf>,
+    /// Ask nothing: take the defaults for what is not given.
+    #[arg(long, short = 'y')]
+    unattended: bool,
+    /// Print only errors.
+    #[arg(long, short = 'q')]
+    quiet: bool,
+}
+
+#[derive(Subcommand)]
+enum InstancesCommand {
+    /// List them (the default).
+    List,
+    /// Stop and remove an instance (its service and settings); with
+    /// --purge its database too.
+    Drop {
+        name: String,
+        /// Remove its database and the copies beside it.
+        #[arg(long)]
+        purge: bool,
+        /// Do not ask for confirmation.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Put back the copy the last upgrade kept, for the previous version
+    /// (install it next); the newer data is set aside, not deleted.
+    Rollback { name: String },
+}
+
 #[derive(Subcommand)]
 enum ServiceCommand {
     /// Register the `Grafeno` service and start it (as administrator).
@@ -570,6 +657,10 @@ enum ServiceCommand {
         /// Register it without starting it.
         #[arg(long)]
         no_start: bool,
+        /// The account it runs as, such as `NT SERVICE\Grafeno` (a virtual
+        /// account); LocalSystem by default.
+        #[arg(long)]
+        account: Option<String>,
     },
     /// Stop and remove the service (as administrator).
     Uninstall,
@@ -687,6 +778,68 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         Command::Service(command) => service_command(command)?,
+        Command::Setup(args) => setup_command(args)?,
+        Command::Instances { command } => {
+            use grafeno_server::instances::{self, Instance};
+            match command.unwrap_or(InstancesCommand::List) {
+                InstancesCommand::List => {
+                    let all = instances::list();
+                    if all.is_empty() {
+                        println!(
+                            "No instances in {} (create one with grafeno setup).",
+                            instances::config_dir().display()
+                        );
+                    } else {
+                        println!("{:12} {:22} {:24} DATABASE", "NAME", "ADDRESS", "SERVICE");
+                        for instance in &all {
+                            println!("{}", instances::describe(instance));
+                        }
+                    }
+                }
+                InstancesCommand::Drop { name, purge, yes } => {
+                    let instance = Instance::named(&name)?;
+                    if !yes {
+                        let what = if purge {
+                            "its service, settings AND DATA"
+                        } else {
+                            "its service and settings (the data is kept)"
+                        };
+                        eprint!("Remove the instance {name:?}, {what}? Type its name to confirm: ");
+                        let mut line = String::new();
+                        std::io::stdin().read_line(&mut line)?;
+                        if line.trim() != name {
+                            return Err("not confirmed; nothing was removed".into());
+                        }
+                    }
+                    instances::drop_instance(&instance, purge)?;
+                }
+                InstancesCommand::Rollback { name } => {
+                    instances::rollback(&Instance::named(&name)?)?;
+                }
+            }
+        }
+        Command::Doctor { instance } => {
+            use grafeno_server::instances::{self, Instance};
+            let all = match instance {
+                Some(name) => vec![Instance::named(&name)?],
+                None => instances::list(),
+            };
+            if all.is_empty() {
+                return Err(format!(
+                    "no instances in {} (create one with grafeno setup)",
+                    instances::config_dir().display()
+                )
+                .into());
+            }
+            let mut failed = false;
+            for instance in &all {
+                let findings = instances::doctor(instance);
+                failed |= instances::print_findings(instance, &findings);
+            }
+            if failed {
+                return Err("some checks failed".into());
+            }
+        }
         Command::Mcp {
             db,
             namespace,
@@ -1236,7 +1389,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 fn service_command(command: ServiceCommand) -> Result<(), Box<dyn std::error::Error>> {
     use grafeno_server::service::windows;
     match command {
-        ServiceCommand::Install { config, no_start } => {
+        ServiceCommand::Install {
+            config,
+            no_start,
+            account,
+        } => {
             let config = config.unwrap_or_else(config::default_path);
             if !config.exists() {
                 return Err(format!(
@@ -1245,7 +1402,7 @@ fn service_command(command: ServiceCommand) -> Result<(), Box<dyn std::error::Er
                 )
                 .into());
             }
-            windows::install(&config, !no_start)?;
+            windows::install(&config, !no_start, account.as_deref())?;
             println!(
                 "Installed the {} service{}.",
                 windows::NAME,
@@ -1260,6 +1417,39 @@ fn service_command(command: ServiceCommand) -> Result<(), Box<dyn std::error::Er
             windows::dispatch(config.unwrap_or_else(config::default_path))?;
         }
     }
+    Ok(())
+}
+
+fn setup_command(args: SetupArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use grafeno_server::instances::{self, Answers, SetupMode};
+    let durability = match args.durability.as_deref() {
+        None => None,
+        Some("immediate") => Some(config::DurabilitySetting::Immediate),
+        Some("eventual") => Some(config::DurabilitySetting::Eventual),
+        Some(_) => return Err("--durability is immediate or eventual".into()),
+    };
+    let answers = Answers {
+        instance: args.instance,
+        data: args.data,
+        addr: args.addr,
+        port: args.port,
+        network: args.network.then_some(true),
+        durability,
+        memory_mb: args.memory_mb,
+        admin: args.admin,
+        admin_password_file: args.admin_password_file,
+        no_admin: args.no_admin,
+        start: args.no_start.then_some(false),
+    }
+    .merged_over(args.answers.as_deref())?;
+    instances::setup(
+        answers,
+        &SetupMode {
+            interactive: !args.unattended,
+            password_stdin: args.admin_password_stdin,
+            quiet: args.quiet,
+        },
+    )?;
     Ok(())
 }
 

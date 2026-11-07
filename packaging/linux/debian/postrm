@@ -1,10 +1,12 @@
 #!/bin/sh
 set -e
-# The data in /var/lib/grafeno and the settings in /etc/grafeno are kept,
-# even on purge: they may be the only copy of someone's memory.
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload >/dev/null 2>&1 || true
 fi
+# Removing keeps the settings and the data; purging removes them, as
+# Debian expects (`grafeno backup` first if they matter).
 if [ "$1" = "purge" ]; then
-    echo "Grafeno: kept /var/lib/grafeno and /etc/grafeno; remove them by hand if you no longer need them."
+    rm -rf /etc/grafeno /var/lib/grafeno /etc/apparmor.d/local/grafeno
+    rm -rf /etc/systemd/system/grafeno.service.d /etc/systemd/system/grafeno@*.service.d
+    echo "Grafeno: purged /etc/grafeno and /var/lib/grafeno (data folders chosen elsewhere are kept)."
 fi

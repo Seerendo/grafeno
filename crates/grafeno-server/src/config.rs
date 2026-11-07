@@ -8,6 +8,7 @@
 //! cors_origins = []      # origins allowed to call the API from a browser
 //! durability = "immediate"  # or "eventual": commits reach the disk within 0.5 s
 //! max_requests = 512     # served at once; more get 503 with Retry-After
+//! copy_before_upgrade = true  # copy the file before a new version upgrades its layout
 //!
 //! [query]                # limits for each GQ query; 0 turns one off
 //! timeout_secs = 30
@@ -81,6 +82,10 @@ pub struct Config {
     pub durability: Option<DurabilitySetting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_requests: Option<usize>,
+    /// Keep a copy of the database before a new version upgrades its
+    /// layout (true by default; see `Grafeno::copy_before_upgrade`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_before_upgrade: Option<bool>,
     #[serde(default, skip_serializing_if = "QueryConfig::is_empty")]
     pub query: QueryConfig,
     #[serde(default, skip_serializing_if = "MemoryConfig::is_empty")]
@@ -274,6 +279,7 @@ impl MemoryConfig {
             cache_bytes: bytes(self.cache_mb, base.cache_bytes),
             projection_cache_bytes: bytes(self.projection_cache_mb, base.projection_cache_bytes),
             vector_cache_bytes: bytes(self.vector_cache_mb, base.vector_cache_bytes),
+            ..base
         }
     }
 }
@@ -405,6 +411,18 @@ pub fn new_token() -> Result<String, String> {
 /// Writes a new configuration with a fresh token. Refuses to replace an
 /// existing file unless `force`.
 pub fn init(path: &Path, db: &Path, addr: SocketAddr, force: bool) -> Result<Config, String> {
+    let config = Config {
+        db: Some(db.to_path_buf()),
+        addr: Some(addr),
+        ..Config::default()
+    };
+    write_new(path, config, force)
+}
+
+/// Writes `config` (with a fresh token if it has none) as a new settings
+/// file, creating its folder and the database's. Refuses to replace an
+/// existing file unless `force`.
+pub fn write_new(path: &Path, mut config: Config, force: bool) -> Result<Config, String> {
     if path.exists() && !force {
         return Err(format!(
             "{} already exists (use --force to replace it)",
@@ -415,27 +433,13 @@ pub fn init(path: &Path, db: &Path, addr: SocketAddr, force: bool) -> Result<Con
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
     }
-    if let Some(parent) = db.parent() {
+    if let Some(parent) = config.db.as_deref().and_then(Path::parent) {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
     }
-    let config = Config {
-        db: Some(db.to_path_buf()),
-        addr: Some(addr),
-        token: Some(new_token()?),
-        studio: None,
-        cors_origins: Vec::new(),
-        durability: None,
-        max_requests: None,
-        query: QueryConfig::default(),
-        memory: MemoryConfig::default(),
-        writer: WriterConfig::default(),
-        changes: ChangesConfig::default(),
-        audit: AuditConfig::default(),
-        background: crate::events::BackgroundConfig::default(),
-        cluster: None,
-        auth: AuthSection::default(),
-    };
+    if config.token.is_none() {
+        config.token = Some(new_token()?);
+    }
     let text = format!(
         "# Grafeno server settings. Restart the service after changing them.\n\
          # Every /v1 request needs `Authorization: Bearer <token>` (or a key, or a session).\n\

@@ -91,6 +91,7 @@ fn open(path: &str) -> Grafeno {
         cache_bytes: mb("CACHE_MB", base.cache_bytes),
         projection_cache_bytes: mb("PROJECTION_CACHE_MB", base.projection_cache_bytes),
         vector_cache_bytes: mb("VECTOR_CACHE_MB", base.vector_cache_bytes),
+        ..base
     };
     Grafeno::open_with(path, &options).unwrap()
 }

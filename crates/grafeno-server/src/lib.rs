@@ -13,6 +13,7 @@ pub mod config;
 pub mod events;
 pub mod groups;
 pub mod http;
+pub mod instances;
 pub mod keys;
 pub mod mcp;
 pub mod metrics;

@@ -1,6 +1,6 @@
 #!/bin/sh
 set -e
-# Stop the service when the package is removed (not on upgrades).
-if [ "$1" = "remove" ] && [ -d /run/systemd/system ]; then
-    systemctl disable --now grafeno.service >/dev/null 2>&1 || true
+# Stop every instance when the package is removed (not on upgrades).
+if [ "$1" = "remove" ]; then
+    /usr/share/grafeno/stop-all.sh
 fi

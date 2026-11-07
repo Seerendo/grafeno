@@ -61,7 +61,7 @@ pub use check::{CheckReport, CompactReport, RebuildReport};
 pub use constraints::{Action, Constraint, ConstraintEvent, HistoryEntry, OnConflict, Scope};
 pub use db::{
     Actor, DEFAULT_CACHE, Durability, FileIntegrity, Grafeno, OpenOptions, ReadTx, SCHEMA_VERSION,
-    WriteTx,
+    WriteTx, upgrade_copies, upgrade_copy_path,
 };
 pub use dump::{DumpStats, EXPORT_FORMAT, EXPORT_VERSION, ImportOptions, Record};
 pub use grafeno_core::*;
